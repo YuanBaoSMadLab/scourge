@@ -1,0 +1,5 @@
+# 统一换行：仓库内 LF，Windows 工作区按需 CRLF
+* text=auto
+*.ps1 text eol=crlf
+*.mlir text
+*.ll text
