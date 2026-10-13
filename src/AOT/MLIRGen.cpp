@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -343,7 +344,13 @@ private:
     Value genName(const Name& n);
     Value genUnary(const Unary& u);
     Value genBinary(const std::string& op, Value l, Value r,
-                    const SourceRange& range, const Expr* rExpr);
+                    const SourceRange& range, const Expr* rExpr,
+                    const Expr* lExpr = nullptr);
+    /// 表达式张量类型的全静态形状（无 kDyn）且元素为 f64 → 返回形状，
+    /// 否则空（linalg 降级覆盖集判定：形状属性只对可安全降级的形态写出）。
+    std::optional<std::vector<int64_t>> staticF64Shape(const Expr* e) const;
+    /// 形状属性文本 "array<i64: 24, 2>"（DenseI64ArrayAttr 通用形式）。
+    static std::string shapeArrAttr(const std::vector<int64_t>& s);
     Value promoteF64(Value v);
     Value genTernary(const Ternary& t);
     Value genCall(const Call& c);
@@ -936,7 +943,7 @@ Value Gen::genExpr(const Expr& e) {
         auto& b = static_cast<const Binary&>(e);
         Value l = genExpr(*b.lhs);
         Value r = genExpr(*b.rhs);
-        return genBinary(b.op, l, r, b.range, b.rhs.get());
+        return genBinary(b.op, l, r, b.range, b.rhs.get(), b.lhs.get());
     }
     case Expr::Kind::Ternary:
         return genTernary(static_cast<const Ternary&>(e));
@@ -1061,8 +1068,35 @@ Value Gen::promoteF64(Value v) {
     return Value{VK::Float, ssa};
 }
 
+std::optional<std::vector<int64_t>>
+Gen::staticF64Shape(const Expr* e) const {
+    if (!e) return std::nullopt;
+    auto it = types_.find(e);
+    if (it == types_.end() || it->second->kind != Type::Kind::Tensor)
+        return std::nullopt;
+    const Type& t = *it->second;
+    if (t.params.empty() || t.params[0]->kind != Type::Kind::Float)
+        return std::nullopt;
+    for (int64_t d : t.shape)
+        if (d == kDyn) return std::nullopt;
+    // 0-d 张量不在 linalg 覆盖集（shapeArrAttr 空形状文本非法；兜底 sg_*）
+    if (t.shape.empty()) return std::nullopt;
+    return t.shape;
+}
+
+std::string Gen::shapeArrAttr(const std::vector<int64_t>& s) {
+    std::string out = "array<i64: ";
+    for (size_t k = 0; k < s.size(); ++k) {
+        if (k) out += ", ";
+        out += std::to_string(s[k]);
+    }
+    out += ">";
+    return out;
+}
+
 Value Gen::genBinary(const std::string& op, Value l, Value r,
-                     const SourceRange& range, const Expr* rExpr) {
+                     const SourceRange& range, const Expr* rExpr,
+                     const Expr* lExpr) {
     // ---- 逻辑（两侧恒为 bool） ----
     if (op == "and") {
         std::string ssa = fresh();
@@ -1190,16 +1224,35 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         if (op == "@") {
             if (l.vk != VK::Tensor || r.vk != VK::Tensor)
                 unsupported(range, "'@' 需要两个张量操作数");
+            // linalg 覆盖集：双 f64 + 两侧形状全静态 + 内维一致（内维不匹配
+            // 保留兜底 sg_*，运行时 panic 语义与 VM 零分叉）
+            std::string attrs;
+            if (!l.tInt && !r.tInt) {
+                auto lShape = staticF64Shape(lExpr);
+                auto rShape = staticF64Shape(rExpr);
+                if (lShape && rShape && (*lShape)[1] == (*rShape)[0])
+                    attrs = " {lhs_shape = " + shapeArrAttr(*lShape) +
+                            ", rhs_shape = " + shapeArrAttr(*rShape) + "}";
+            }
             std::string ssa = fresh();
             emit(ssa + " = \"lang.tensor_matmul\"(" + l.ssa + ", " + r.ssa +
-                 ") : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr " + opLoc());
+                 ")" + attrs + " : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr " +
+                 opLoc());
             return Value{VK::Tensor, ssa, l.tInt && r.tInt, 2};
         }
         if (l.vk == VK::Tensor && r.vk == VK::Tensor) {
+            // linalg 覆盖集：+ - *（0/1/2）且双 f64 且形状静态（'/' 有
+            // 除零 panic，恒走 sg_*）
+            std::string attrs;
+            if (tOp >= 0 && tOp <= 2 && !l.tInt && !r.tInt) {
+                if (auto sh = staticF64Shape(lExpr))
+                    attrs = " {kind = " + std::to_string(tOp) +
+                            " : i32, shape = " + shapeArrAttr(*sh) + "}";
+            }
             std::string ssa = fresh();
             emit(ssa + " = \"lang.tensor_binop_tt\"(" + i32Const(tOp) + ", " +
-                 l.ssa + ", " + r.ssa +
-                 ") : (i32, !llvm.ptr, !llvm.ptr) -> !llvm.ptr " + opLoc());
+                 l.ssa + ", " + r.ssa + ")" + attrs +
+                 " : (i32, !llvm.ptr, !llvm.ptr) -> !llvm.ptr " + opLoc());
             // outInt = 非 '/' 且两侧 int（VM tensorBinOp 规则）；形状相等秩不变
             return Value{VK::Tensor, ssa, tOp != 3 && l.tInt && r.tInt,
                          l.tRank};
@@ -1227,15 +1280,23 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         }
         std::string si = i32Const(sc.vk != VK::Float ? 1 : 0);
         Value t = l.vk == VK::Tensor ? l : r;
+        // linalg 覆盖集：+ - *（0/1/2）且张量 f64 且标量 float 且形状静态
+        //（ts 查左表达式、st 查右表达式——张量所在侧）
+        std::string attrs;
+        if (tOp >= 0 && tOp <= 2 && !t.tInt && sc.vk == VK::Float) {
+            if (auto sh = staticF64Shape(l.vk == VK::Tensor ? lExpr : rExpr))
+                attrs = " {kind = " + std::to_string(tOp) +
+                        " : i32, shape = " + shapeArrAttr(*sh) + "}";
+        }
         std::string ssa = fresh();
         if (l.vk == VK::Tensor) { // 张量 op 标量 → ts
             emit(ssa + " = \"lang.tensor_binop_ts\"(" + i32Const(tOp) + ", " +
-                 t.ssa + ", " + si + ", " + vi + ", " + vf +
-                 ") : (i32, !llvm.ptr, i32, i64, f64) -> !llvm.ptr " + opLoc());
+                 t.ssa + ", " + si + ", " + vi + ", " + vf + ")" + attrs +
+                 " : (i32, !llvm.ptr, i32, i64, f64) -> !llvm.ptr " + opLoc());
         } else { // 标量 op 张量 → st（标量在左，C 侧负责方向）
             emit(ssa + " = \"lang.tensor_binop_st\"(" + i32Const(tOp) + ", " +
-                 si + ", " + vi + ", " + vf + ", " + t.ssa +
-                 ") : (i32, i32, i64, f64, !llvm.ptr) -> !llvm.ptr " + opLoc());
+                 si + ", " + vi + ", " + vf + ", " + t.ssa + ")" + attrs +
+                 " : (i32, i32, i64, f64, !llvm.ptr) -> !llvm.ptr " + opLoc());
         }
         return Value{VK::Tensor, ssa, tOp != 3 && t.tInt && sc.vk != VK::Float,
                      t.tRank};
@@ -1515,7 +1576,12 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
                  ") : (!llvm.ptr) -> i64 " + opLoc());
             return Value{VK::Int, ssa};
         }
-        emit(ssa + " = \"lang.tensor_sum_f\"(" + v.ssa + ") : (!llvm.ptr) -> f64");
+        // linalg 覆盖集：f64 + 形状静态 → 写形状属性（否则 LangToLLVM 兜底）
+        std::string attrs;
+        if (auto sh = staticF64Shape(c.args[0].get()))
+            attrs = " {shape = " + shapeArrAttr(*sh) + "}";
+        emit(ssa + " = \"lang.tensor_sum_f\"(" + v.ssa + ")" + attrs +
+             " : (!llvm.ptr) -> f64 " + opLoc());
         return Value{VK::Float, ssa};
     }
     if (name == "max" || name == "min") {
@@ -1542,8 +1608,14 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         if (v.vk != VK::Tensor)
             unsupported(c.args[0]->range, "transpose() 仅支持张量");
         std::string ssa = fresh();
-        emit(ssa + " = \"lang.tensor_transpose\"(" + v.ssa +
-             ") : (!llvm.ptr) -> !llvm.ptr " + opLoc());
+        // linalg 覆盖集：f64 2D + 形状静态 → 写形状属性（perm {1,0}）
+        std::string attrs;
+        if (!v.tInt && v.tRank == 2) {
+            if (auto sh = staticF64Shape(c.args[0].get()))
+                attrs = " {shape = " + shapeArrAttr(*sh) + "}";
+        }
+        emit(ssa + " = \"lang.tensor_transpose\"(" + v.ssa + ")" + attrs +
+             " : (!llvm.ptr) -> !llvm.ptr " + opLoc());
         return Value{VK::Tensor, ssa, v.tInt, 2};
     }
     if (name == "reshape") {
@@ -1772,7 +1844,8 @@ void Gen::genAugAssign(const AugAssign& a) {
     }
     if (slotVK == VK::Tensor) {
         Value l = isLocal ? loadSlot(slot) : loadGlobal(curModule_, n.name);
-        Value v = genBinary(op, l, r, a.range, nullptr);
+        // 目标标识符表达式供 staticF64Shape 查 ExprTypeMap（lExpr 参数）
+        Value v = genBinary(op, l, r, a.range, nullptr, a.target.get());
         if (isLocal) storeTo(slot, v);
         else storeGlobal(g, v);
         return;

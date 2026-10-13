@@ -364,6 +364,45 @@ SgTensor* sg_tensor_empty(void) {
     return t;
 }
 
+/* ---- LangToLinalg 桥（AOT 步骤 3：linalg 降级的零拷贝输出/数据直取） ---- */
+
+/* 数据指针直取（按 isInt 分派 i64/f64 存储；LangToLinalg 输入桥用） */
+void* sg_tensor_data(SgTensor* t) {
+    return t->isInt ? (void*)t->i64 : (void*)t->f64;
+}
+
+/* 静态形状未初始化分配（LangToLinalg 输出侧；arena 策略与 from_* 一致，
+ * 数据由调用方接管填充） */
+SgTensor* sg_tensor_alloc(int isInt, int64_t rank, const int64_t* shape) {
+    SgTensor* t = (SgTensor*)sg_xmalloc(sizeof(SgTensor));
+    int64_t n = 1;
+    t->rank = rank;
+    t->shape = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)(rank > 0 ? rank : 1));
+    for (int64_t k = 0; k < rank; ++k) {
+        t->shape[k] = shape[k];
+        n *= shape[k];
+    }
+    t->isInt = isInt;
+    if (isInt) {
+        t->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
+        t->f64 = 0;
+    } else {
+        t->f64 = (double*)sg_xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+        t->i64 = 0;
+    }
+    return t;
+}
+
+/* 外部内存接管（LangToLinalg 输出侧：把 memref.alloc 分配的存储挂进句柄。
+ * 该内存同样为 malloc 且程序生命周期持有（AOT 运行时不 free），与
+ * sg_xmalloc 的 arena 纪律一致，无双重所有权问题） */
+void sg_tensor_adopt(SgTensor* t, void* data) {
+    if (t->isInt)
+        t->i64 = (int64_t*)data;
+    else
+        t->f64 = (double*)data;
+}
+
 /* 全张量行拼接升维：行形状一致校验（与 VM tensorNew 一致；
  * VM 只比形状不比 dtype，混合 dtype → 提升 f64） */
 SgTensor* sg_tensor_concat(int64_t nrows, const SgTensor** rows,
