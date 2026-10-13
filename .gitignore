@@ -1,0 +1,18 @@
+# 仅跟踪编译器核心：include / src / scripts / .clang-format / CMakeLists.txt
+build/
+build-rel/
+docs/
+examples/
+tests/
+YuanBaoSMadLab/
+
+# 构建与工具链中间产物
+*.exe
+*.obj
+*.o
+*.lib
+*.sgbc
+*.sgi
+*.mlir
+*.ll
+*.buildcap

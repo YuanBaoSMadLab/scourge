@@ -1,0 +1,11 @@
+# Copyright (c) 2026 Scourge Project. All rights reserved.
+# Scourge 编译器代码风格：4 空格、80 列、LLVM 风格基础
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 80
+AlwaysBreakTemplateDeclarations: Yes
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+DerivePointerAlignment: false
+PointerAlignment: Left
+SortIncludes: CaseSensitive
