@@ -3,6 +3,10 @@ build-rel/
 docs/
 examples/
 tests/
+bin/
+
+# CMake configure 过程泄漏的 tablegen 生成头（非仓库源码）
+include/mlir/
 
 设计.md
 

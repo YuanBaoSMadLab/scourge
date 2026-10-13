@@ -10,6 +10,10 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# 统一动态 CRT（/MD）：E:\llvm 的 LLVM/MLIR 库为 VS Release 默认动态 CRT 构建，
+# 全工程对齐避免混链冲突（LNK4217/4286 → LNK1169；find_package 后会再次重设）。
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+
 # 默认 Release 单配置； Ninja 用户可用 -DCMAKE_BUILD_TYPE=Release
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -54,8 +58,36 @@ target_include_directories(scourge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 # 可执行文件
 # ---------------------------------------------------------------------------
 add_executable(scourge src/Tool/main.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp
-    src/Tool/Builder.cpp)
+    src/Tool/Builder.cpp src/AOT/InProcess.cpp)
 target_link_libraries(scourge PRIVATE scourge_core)
+
+# ---- 进程内 MLIR/LLVM（build 命令阶段 2+3 内联，摆脱 mlir-opt/mlir-translate）----
+# 库源：E:\llvm 自建树（llvm+mlir，Release，断言 ON → LLVM_ENABLE_ABI_BREAKING_CHECKS=1，
+# 全树 ABI 自洽；SCOURGE_LLVM_ROOT 可覆盖）。该树构建时未接入 zlib/zstd（缓存
+# NOTFOUND，压缩路径整体关闭），无第三方压缩符号依赖。clang 链接器仍取自
+# D:\LLVM\bin（仅作最终驱动，与库版本无耦合）。
+if(NOT SCOURGE_LLVM_ROOT)
+    set(SCOURGE_LLVM_ROOT "E:/llvm/build")
+endif()
+# LLVMDebugInfoPDB 的链接接口引用 DIASDK::Diaguids（本工程不用 PDB，空接口目标
+# 仅满足配置期存在性检查）。
+if(NOT TARGET DIASDK::Diaguids)
+    add_library(DIASDK::Diaguids INTERFACE IMPORTED)
+endif()
+find_package(LLVM REQUIRED CONFIG HINTS "${SCOURGE_LLVM_ROOT}/lib/cmake/llvm")
+find_package(MLIR REQUIRED CONFIG HINTS "${SCOURGE_LLVM_ROOT}/lib/cmake/mlir")
+# LLVMConfig.cmake 会把 CMAKE_MSVC_RUNTIME_LIBRARY 硬设为 MultiThreaded（静态 CRT），
+# 但 E:\llvm 库本体为 VS Release 默认动态 CRT（/MD）——find_package 之后统一重设回
+# 动态 CRT，保证先于/晚于 find_package 定义的所有目标与库一致（否则 LNK1169/LNK2038）。
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+target_include_directories(scourge SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS}
+                                                  ${MLIR_INCLUDE_DIRS})
+target_link_libraries(scourge PRIVATE
+    MLIRIR MLIRParser MLIRPass
+    MLIRFuncDialect MLIRArithDialect MLIRControlFlowDialect MLIRLLVMDialect
+    MLIRConvertToLLVMPass MLIRTargetLLVM
+    MLIRLLVMToLLVMIRTranslation MLIRBuiltinToLLVMIRTranslation
+    MLIRRegisterAllExtensions)
 
 add_executable(scourge_tests tests/test_runner.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp)
 target_link_libraries(scourge_tests PRIVATE scourge_core)

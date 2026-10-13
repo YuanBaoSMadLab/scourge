@@ -3,8 +3,9 @@
 //  Scourge 工具链 — build 命令实现：AOT 三阶段流水线驱动
 // ----------------------------------------------------------------------------
 //  Stage A（前端）复用 Session 加载 + 全量检查；Stage C 本文件：
-//    generateMLIR → 写 .mlir → mlir-opt --convert-to-llvm →
-//    mlir-translate --mlir-to-llvmir → clang 链接内嵌 C 运行时。
+//    generateMLIR → 写 .mlir → 进程内 MLIR→LLVM IR（AOT/InProcess，等价
+//    原 mlir-opt --convert-to-llvm + mlir-translate 两步）→ clang 链接
+//    内嵌 C 运行时。
 //
 //  C 运行时（kRuntimeC）与 MLIRGen 的 34 个 extern 声明逐一对应，语义纪律
 //  与 SG-BC VM（src/BC/VM.cpp）逐字对齐：
@@ -23,6 +24,7 @@
 #include <sstream>
 #include <system_error>
 
+#include "scourge/AOT/InProcess.hpp"
 #include "scourge/AOT/MLIRGen.hpp"
 #include "scourge/Tool/Session.hpp"
 
@@ -940,7 +942,6 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath) {
     if (dir.empty()) dir = ".";
     std::string stem = outPath.stem().string();
     fs::path mlirPath = dir / (stem + ".mlir");
-    fs::path convPath = dir / (stem + ".conv.mlir");
     fs::path llPath = dir / (stem + ".ll");
     fs::path rtPath = dir / (stem + "_rt.c");
     fs::path capPath = dir / (stem + ".buildcap");
@@ -954,54 +955,38 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath) {
         f << kRuntimeC;
     }
 
-    // ---- 工具链定位（SCOURGE_LLVM_BIN 可覆盖） ----
+    // ---- 工具链定位（SCOURGE_LLVM_BIN 可覆盖；MLIR→LLVM IR 已进程内化） ----
     const char* envBin = std::getenv("SCOURGE_LLVM_BIN");
     fs::path llvmBin =
         (envBin && *envBin) ? fs::path(envBin) : fs::path("D:/LLVM/bin");
-    fs::path mlirOpt = llvmBin / "mlir-opt.exe";
-    fs::path mlirTranslate = llvmBin / "mlir-translate.exe";
     fs::path clang = llvmBin / "clang.exe";
-    for (const fs::path* tool : {&mlirOpt, &mlirTranslate, &clang}) {
+    {
         std::error_code ec;
-        if (!fs::exists(*tool, ec)) {
-            b.log = "构建中止：未找到 " + tool->string() +
+        if (!fs::exists(clang, ec)) {
+            b.log = "构建中止：未找到 " + clang.string() +
                     "（可用环境变量 SCOURGE_LLVM_BIN 指定 LLVM bin 目录）\n";
             b.exitCode = 1;
             return b;
         }
     }
 
-    // ---- 阶段 2：MLIR → LLVM dialect ----
+    // ---- 阶段 2+3（合并）：进程内 MLIR → LLVM dialect → LLVM IR ----
     std::string toolOut;
-    int rc = runCapture(mlirOpt.string(),
-                        "\"" + mlirPath.string() + "\" --convert-to-llvm -o \"" +
-                            convPath.string() + "\"",
-                        capPath, toolOut);
-    if (rc != 0) {
-        b.log = "构建中止：mlir-opt 失败（exit " + std::to_string(rc) +
-                "）\n" + toolOut;
-        b.exitCode = 1;
-        return b;
-    }
-
-    // ---- 阶段 3：LLVM dialect → LLVM IR ----
-    rc = runCapture(mlirTranslate.string(),
-                    "\"" + convPath.string() + "\" --mlir-to-llvmir -o \"" +
-                        llPath.string() + "\"",
-                    capPath, toolOut);
-    if (rc != 0) {
-        b.log = "构建中止：mlir-translate 失败（exit " + std::to_string(rc) +
-                "）\n" + toolOut;
+    if (!aot::convertToLLVMInProcess(mlir, llPath.string(), toolOut)) {
+        std::ofstream cap(capPath, std::ios::binary);
+        cap << toolOut;
+        b.log = "构建中止：MLIR → LLVM IR 进程内转换失败\n" + toolOut;
         b.exitCode = 1;
         return b;
     }
 
     // ---- 阶段 4：clang 编译链接（probe4 验证过的命令形） ----
-    rc = runCapture(clang.string(),
-                    "-O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS \"" +
-                        llPath.string() + "\" \"" + rtPath.string() +
-                        "\" -o \"" + outPath.string() + "\"",
-                    capPath, toolOut);
+    int rc = runCapture(
+        clang.string(),
+        "-O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS \"" +
+            llPath.string() + "\" \"" + rtPath.string() +
+            "\" -o \"" + outPath.string() + "\"",
+        capPath, toolOut);
     if (rc != 0) {
         b.log = "构建中止：clang 链接失败（exit " + std::to_string(rc) +
                 "）\n" + toolOut;
