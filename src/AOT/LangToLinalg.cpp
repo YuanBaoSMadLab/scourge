@@ -4,11 +4,14 @@
 // ----------------------------------------------------------------------------
 //  AOT 步骤 3：张量计算类 lang op 的原生 MLIR 降级（接口见 LangToLinalg.hpp）。
 //
-//  数据桥（与 sg_* 句柄世界的零拷贝/低拷贝衔接）：
-//  * 输入：func.call @sg_tensor_data(句柄) 直取数据指针 → LLVM load 循环
-//    拷入 memref.alloc（1D 连续）→ memref.reinterpret_cast 得多维视图，
-//    消费 op 创建后立即 memref.dealloc 回收拷贝缓冲。
-//    拷贝成本 = 输入元素数（3a-2 计划以 descriptor 直造替代实现零拷贝）。
+//  数据桥（与 sg_* 句柄世界零拷贝衔接，3a-2）：
+//  * 输入：func.call @sg_tensor_data(句柄) 直取数据指针 → 手构 memref
+//    descriptor（allocated=aligned=数据指针，offset=0，静态行主
+//    sizes/strides，布局与 LLVMTypeConverter::getMemRefDescriptorFields
+//    unpackAggregates=false 逐字段一致）→ unrealized_conversion_cast
+//    包装为 memref 视图，零拷贝。arena 内存纪律下无 free，句柄值 SSA
+//    活性覆盖消费全程，只读别名安全；下游 one-shot ConvertToLLVM 对该
+//    cast 穿透直取 descriptor 本体（框架 materialization 同型机制）。
 //  * 输出：memref.alloc（1D 连续）→ reinterpret_cast → linalg outs 写入 →
 //    memref.extract_aligned_pointer_as_index 取存储指针 →
 //    func.call @sg_tensor_adopt(新句柄, 指针) 零拷贝接管 → 新句柄
@@ -31,7 +34,6 @@
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
-#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
@@ -147,37 +149,63 @@ Value viewOf(ConversionPatternRewriter& rewriter, Location loc, Value flat,
         loc, dstTy, flat, OpFoldResult(rewriter.getIndexAttr(0)), sizes, strds);
 }
 
-struct InputBuf {
-    Value flat; ///< 1D 拷贝缓冲（消费者创建后立即 memref.dealloc）
-    Value view; ///< 多维视图（linalg ins）
-};
+/// 裸数据指针 → memref 静态视图：手构 memref descriptor
+/// {allocated, aligned, offset=0, sizes[], strides[]}（与
+/// LLVMTypeConverter::getMemRefDescriptorFields unpackAggregates=false
+/// 布局逐字段一致的字面量 struct）+ unrealized_conversion_cast 包装。
+Value descViewOf(ConversionPatternRewriter& rewriter, Location loc, Value p,
+                 ArrayRef<int64_t> shape, Type elem) {
+    MLIRContext* ctx = rewriter.getContext();
+    Type idx = rewriter.getI64Type();
+    Type arrTy = LLVM::LLVMArrayType::get(idx, shape.size());
+    auto descTy = LLVM::LLVMStructType::getLiteral(
+        ctx, {ptrTy(ctx), ptrTy(ctx), idx, arrTy, arrTy});
 
-/// 输入桥：句柄 → 数据指针 → 拷贝循环 → 多维 memref 视图。
-InputBuf bridgeInput(ConversionPatternRewriter& rewriter, Location loc,
-                     ModuleOp mod, Value handle, ArrayRef<int64_t> shape,
-                     Type f64) {
+    Value d = rewriter.create<LLVM::UndefOp>(loc, descTy);
+    auto ins = [&](Value into, Value v, ArrayRef<int64_t> pos) {
+        d = rewriter.create<LLVM::InsertValueOp>(loc, into, v, pos);
+    };
+    ins(d, p, {0}); // allocated
+    ins(d, p, {1}); // aligned
+    Value zero = rewriter.create<arith::ConstantOp>(
+        loc, idx, rewriter.getI64IntegerAttr(0));
+    ins(d, zero, {2}); // offset
+
+    // 行主连续 sizes/strides：stride[i] = prod(shape[i+1..])
+    SmallVector<int64_t> strides(shape.size(), 1);
+    for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i)
+        strides[i] = strides[i + 1] * shape[i + 1];
+    Value szArr = rewriter.create<LLVM::UndefOp>(loc, arrTy);
+    Value stArr = rewriter.create<LLVM::UndefOp>(loc, arrTy);
+    for (auto [k, dim] : llvm::enumerate(shape)) {
+        Value sz = rewriter.create<arith::ConstantOp>(
+            loc, idx, rewriter.getI64IntegerAttr(dim));
+        szArr = rewriter.create<LLVM::InsertValueOp>(
+            loc, szArr, sz, ArrayRef<int64_t>{static_cast<int64_t>(k)});
+    }
+    for (auto [k, st] : llvm::enumerate(strides)) {
+        Value c = rewriter.create<arith::ConstantOp>(
+            loc, idx, rewriter.getI64IntegerAttr(st));
+        stArr = rewriter.create<LLVM::InsertValueOp>(
+            loc, stArr, c, ArrayRef<int64_t>{static_cast<int64_t>(k)});
+    }
+    d = rewriter.create<LLVM::InsertValueOp>(loc, d, szArr, ArrayRef<int64_t>{3});
+    d = rewriter.create<LLVM::InsertValueOp>(loc, d, stArr, ArrayRef<int64_t>{4});
+
+    return rewriter.create<UnrealizedConversionCastOp>(
+                      loc, shaped(ctx, shape, elem), ValueRange{d})
+        .getResult(0);
+}
+
+/// 输入桥（零拷贝）：句柄 → 数据指针 → descriptor 视图。
+/// arena 内存纪律下无 free，句柄值 SSA 活性覆盖消费全程，只读别名安全。
+Value viewInput(ConversionPatternRewriter& rewriter, Location loc,
+                Value handle, ArrayRef<int64_t> shape, Type f64) {
     MLIRContext* ctx = rewriter.getContext();
     Value p = rewriter.create<func::CallOp>(
         loc, RtSyms::kData, TypeRange{ptrTy(ctx)}, ValueRange{handle})
                   .getResult(0);
-    Value buf = rewriter.create<memref::AllocOp>(loc, flat1D(ctx, shape, f64));
-
-    Value c0 = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-    Value n = rewriter.create<arith::ConstantIndexOp>(loc, numel(shape));
-    Value c1 = rewriter.create<arith::ConstantIndexOp>(loc, 1);
-    Type i64 = rewriter.getI64Type();
-    rewriter.create<scf::ForOp>(
-        loc, c0, n, c1, ValueRange{},
-        [&](OpBuilder& nb, Location l, Value iv, ValueRange) {
-            Value ii = nb.create<arith::IndexCastUIOp>(l, i64, iv);
-            // f64 元素步进（elem_type 显式给出元素大小）
-            Value gp = nb.create<LLVM::GEPOp>(l, ptrTy(ctx), f64, p,
-                                              LLVM::GEPArg{ii});
-            Value v = nb.create<LLVM::LoadOp>(l, f64, gp);
-            nb.create<memref::StoreOp>(l, v, buf, ValueRange{iv});
-            nb.create<scf::YieldOp>(l);
-        });
-    return {buf, viewOf(rewriter, loc, buf, shape)};
+    return descViewOf(rewriter, loc, p, shape, f64);
 }
 
 struct OutputBuf {
@@ -280,14 +308,12 @@ private:
             op->emitError("LangToLinalg：matmul 形状属性必须二维");
             return failure();
         }
-        InputBuf a = bridgeInput(rewriter, loc, mod, operands[0], lShape, f64);
-        InputBuf b = bridgeInput(rewriter, loc, mod, operands[1], rShape, f64);
+        Value a = viewInput(rewriter, loc, operands[0], lShape, f64);
+        Value b = viewInput(rewriter, loc, operands[1], rShape, f64);
         SmallVector<int64_t> outShape = {lShape[0], rShape[1]};
         OutputBuf out = allocOutput(rewriter, loc, mod, outShape, f64);
-        rewriter.create<linalg::MatmulOp>(loc, ValueRange{a.view, b.view},
+        rewriter.create<linalg::MatmulOp>(loc, ValueRange{a, b},
                                           ValueRange{out.view});
-        rewriter.create<memref::DeallocOp>(loc, a.flat);
-        rewriter.create<memref::DeallocOp>(loc, b.flat);
         adoptOutput(rewriter, loc, out.handle, out.flat);
         rewriter.replaceOp(op, out.handle);
         return success();
@@ -314,7 +340,7 @@ private:
         Value tensorOp = isTT ? operands[1] : (isST ? operands[4] : operands[1]);
         Value scalar = isTT ? Value() : operands[isST ? 2 : 4];
 
-        InputBuf a = bridgeInput(rewriter, loc, mod, tensorOp, shape, f64);
+        Value a = viewInput(rewriter, loc, tensorOp, shape, f64);
         OutputBuf out = allocOutput(rewriter, loc, mod, shape, f64);
 
         AffineMap idMap = AffineMap::getMultiDimIdentityMap(
@@ -325,15 +351,15 @@ private:
                                                utils::IteratorType::parallel);
         SmallVector<Value> ins;
         if (isTT) { // 张量-张量：args = [a_elem, b_elem, out_elem]
-            InputBuf b = bridgeInput(rewriter, loc, mod, operands[2], shape, f64);
+            Value b = viewInput(rewriter, loc, operands[2], shape, f64);
             maps = {idMap, idMap, idMap};
-            ins = {a.view, b.view};
+            ins = {a, b};
         } else if (isST) { // 标量在左：subf(vf, t)；args = [t_elem, out_elem]
             maps = {emptyMap, idMap, idMap};
-            ins = {scalar, a.view};
+            ins = {scalar, a};
         } else { // ts 张量在左：subf(t, vf)；args = [t_elem, out_elem]
             maps = {idMap, emptyMap, idMap};
-            ins = {a.view, scalar};
+            ins = {a, scalar};
         }
 
         auto body = [&](OpBuilder& nb, Location l, ValueRange args) {
@@ -353,7 +379,6 @@ private:
         rewriter.create<linalg::GenericOp>(loc, TypeRange{}, ins,
                                            ValueRange{out.view}, maps, iters,
                                            body);
-        rewriter.create<memref::DeallocOp>(loc, a.flat);
         adoptOutput(rewriter, loc, out.handle, out.flat);
         rewriter.replaceOp(op, out.handle);
         return success();
@@ -363,7 +388,7 @@ private:
     lowerSum(Operation* op, ArrayRef<Value> operands,
              ConversionPatternRewriter& rewriter, Location loc, ModuleOp mod,
              MLIRContext* ctx, Type f64, ArrayRef<int64_t> shape) const {
-        InputBuf in = bridgeInput(rewriter, loc, mod, operands[0], shape, f64);
+        Value in = viewInput(rewriter, loc, operands[0], shape, f64);
         auto accTy = MemRefType::get({}, f64);
         Value acc = rewriter.create<memref::AllocaOp>(loc, accTy);
         Value zero = rewriter.create<arith::ConstantOp>(
@@ -382,9 +407,8 @@ private:
             nb.create<linalg::YieldOp>(l, ValueRange{r});
         };
         rewriter.create<linalg::GenericOp>(loc, TypeRange{},
-                                           ValueRange{in.view}, ValueRange{acc},
+                                           ValueRange{in}, ValueRange{acc},
                                            maps, iters, body);
-        rewriter.create<memref::DeallocOp>(loc, in.flat);
         Value res = rewriter.create<memref::LoadOp>(loc, f64, acc,
                                                     ValueRange{});
         rewriter.replaceOp(op, res);
@@ -400,12 +424,11 @@ private:
             op->emitError("LangToLinalg：transpose 形状属性必须二维");
             return failure();
         }
-        InputBuf in = bridgeInput(rewriter, loc, mod, operands[0], shape, f64);
+        Value in = viewInput(rewriter, loc, operands[0], shape, f64);
         SmallVector<int64_t> outShape = {shape[1], shape[0]};
         OutputBuf out = allocOutput(rewriter, loc, mod, outShape, f64);
-        rewriter.create<linalg::TransposeOp>(loc, in.view, out.view,
+        rewriter.create<linalg::TransposeOp>(loc, in, out.view,
                                              ArrayRef<int64_t>{1, 0});
-        rewriter.create<memref::DeallocOp>(loc, in.flat);
         adoptOutput(rewriter, loc, out.handle, out.flat);
         rewriter.replaceOp(op, out.handle);
         return success();
@@ -426,12 +449,11 @@ public:
         return "Scourge Lang 张量计算 op（带静态形状属性）降级为 linalg";
     }
 
-    /// 本 pass 创建 linalg/memref/scf/llvm op，依赖方言须经 PassManager
+    /// 本 pass 创建 linalg/memref/llvm op，依赖方言须经 PassManager
     /// 预先加载（否则 OpBuilder 建零 op 时方言未注册崩溃）。
     void getDependentDialects(DialectRegistry& registry) const override {
         registry.insert<linalg::LinalgDialect, memref::MemRefDialect,
-                        scf::SCFDialect, func::FuncDialect,
-                        LLVM::LLVMDialect>();
+                        func::FuncDialect, LLVM::LLVMDialect>();
     }
 
     void runOnOperation() override {
@@ -447,7 +469,7 @@ public:
         target.addLegalDialect<BuiltinDialect, func::FuncDialect,
                                arith::ArithDialect, cf::ControlFlowDialect,
                                LLVM::LLVMDialect, memref::MemRefDialect,
-                               scf::SCFDialect, linalg::LinalgDialect>();
+                               linalg::LinalgDialect>();
         target.addLegalDialect<
             ::scourge::aot::lang::LangDialect>();
         // 覆盖集 op 仅在携带完整 linalg 形状属性时非法（动态合法回调：
