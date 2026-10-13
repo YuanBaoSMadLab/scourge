@@ -3,12 +3,15 @@
 //  Scourge AOT — 进程内 MLIR → LLVM IR 转换实现（接口见 AOT/InProcess.hpp）
 // ----------------------------------------------------------------------------
 //  等价替换原两步子进程（mlir-opt --convert-to-llvm → mlir-translate
-//  --mlir-to-llvmir）：parseSourceString → ConvertToLLVMPass →
-//  translateModuleToLLVMIR，诊断经 ScopedDiagnosticHandler 聚合返回。
-//  方言注册与 MLIRGen 产出的文本方言集一一对应（builtin/func/arith/cf/llvm）；
-//  ConvertToLLVM 的依赖方言经 registry 扩展按需加载（与 mlir-opt 行为一致）。
-//  注意：静态链接 D:/LLVM 的 Release MLIR 库，CRT 匹配考虑，进程内 MLIR
-//  路径建议使用 Release 构建目录。
+//  --mlir-to-llvmir）：parseSourceString → LangToLLVMPass →
+//  ConvertToLLVMPass → translateModuleToLLVMIR，诊断经
+//  ScopedDiagnosticHandler 聚合返回。
+//  方言注册与 MLIRGen 产出的文本方言集一一对应（builtin/func/arith/cf/llvm/
+//  lang）；ConvertToLLVM 的依赖方言经 registry 扩展按需加载（与 mlir-opt
+//  行为一致）。lang.* 高层 op 先经自研 LangToLLVM 降级为 @sg_* 运行时调用
+//  （AOT 步骤 2 分层纪律：lang 层不出现运行时符号），再走通用 ConvertToLLVM。
+//  注意：静态链接 E:/llvm 自建树的 Release MLIR 库，CRT 匹配考虑，进程内
+//  MLIR 路径建议使用 Release 构建目录。
 // ============================================================================
 #include "scourge/AOT/InProcess.hpp"
 
@@ -36,6 +39,9 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include "scourge/AOT/LangOps.h"
+#include "scourge/AOT/LangToLLVM.hpp"
+
 namespace scourge {
 namespace aot {
 
@@ -45,6 +51,8 @@ bool convertToLLVMInProcess(const std::string& mlirText,
     registry.insert<mlir::BuiltinDialect, mlir::func::FuncDialect,
                     mlir::arith::ArithDialect, mlir::cf::ControlFlowDialect,
                     mlir::LLVM::LLVMDialect>();
+    // 自研 lang 方言（Scourge 高层语义 op，LangOps.td 单一事实源）。
+    registry.insert<scourge::aot::lang::LangDialect>();
     // 全量方言扩展注册（等价 mlir-opt）：func 等方言承诺的
     // ConvertToLLVMPatternInterface 与内联扩展由此落位，缺注册会触发
     // "promised ... but never implemented" 的 LLVM ERROR。
@@ -71,8 +79,11 @@ bool convertToLLVMInProcess(const std::string& mlirText,
         return false;
     }
 
-    // 阶段 2：MLIR → LLVM dialect（等价 mlir-opt --convert-to-llvm）
+    // 阶段 2a：lang.* 高层 op → @sg_* 运行时调用（全量转换；未覆盖的
+    // lang op 会使 applyFullConversion 失败——禁止静默残留）
+    // 阶段 2b：MLIR → LLVM dialect（等价 mlir-opt --convert-to-llvm）
     mlir::PassManager pm(&ctx);
+    pm.addPass(scourge::aot::createLangToLLVMPass());
     pm.addPass(mlir::createConvertToLLVMPass());
     if (mlir::failed(pm.run(module->getOperation()))) {
         diag = diagBuf.empty() ? "MLIR → LLVM dialect 转换失败（无诊断）"

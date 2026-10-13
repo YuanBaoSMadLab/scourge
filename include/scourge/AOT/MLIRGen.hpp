@@ -3,8 +3,11 @@
 //  Scourge 编译器 — AOT MLIR 生成器（SG-AST → 文本 MLIR，设计文档 Stage C）
 // ----------------------------------------------------------------------------
 //  首条 AOT 竖切：把已通过全量检查的模块图生成为单一文本 MLIR 模块
-//  （func / arith / cf / llvm 方言），随后由 Builder 驱动
-//    进程内 MLIR→LLVM IR（AOT/InProcess）→ clang 链接内嵌 C 运行时
+//  （func / arith / cf / llvm + 自研 lang 方言；带 panic 语义的运算一律
+//  落 lang.* 泛型形式 op，file:line 经 op 的 FileLineColLoc 恢复），随后由
+//  Builder 驱动
+//    进程内 LangToLLVM 降级（lang.* → @sg_* 运行时调用）→
+//    MLIR→LLVM IR（AOT/InProcess）→ clang 链接内嵌 C 运行时
 //  得到原生可执行文件。
 //
 //  类型/形状推导纪律（CINN InferSymbolicShapeContext 思想）：

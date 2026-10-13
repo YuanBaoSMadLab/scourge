@@ -607,7 +607,6 @@ SgTensor* sg_tensor_matmul(SgTensor* a, SgTensor* b, const char* fn,
                             a->i64[i * k + p], b->i64[p * n + j], &prod) ||
                         __builtin_add_overflow(acc, prod, &acc))
                         sg_panic(fn, file, line, "整数乘法溢出");
-                    acc += prod;
                 }
                 t->i64[i * n + j] = acc;
             }

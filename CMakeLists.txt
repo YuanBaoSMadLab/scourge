@@ -58,7 +58,8 @@ target_include_directories(scourge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 # 可执行文件
 # ---------------------------------------------------------------------------
 add_executable(scourge src/Tool/main.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp
-    src/Tool/Builder.cpp src/AOT/InProcess.cpp)
+    src/Tool/Builder.cpp src/AOT/InProcess.cpp src/AOT/LangDialect.cpp
+    src/AOT/LangToLLVM.cpp)
 target_link_libraries(scourge PRIVATE scourge_core)
 
 # ---- 进程内 MLIR/LLVM（build 命令阶段 2+3 内联，摆脱 mlir-opt/mlir-translate）----
@@ -82,8 +83,46 @@ find_package(MLIR REQUIRED CONFIG HINTS "${SCOURGE_LLVM_ROOT}/lib/cmake/mlir")
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 target_include_directories(scourge SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS}
                                                   ${MLIR_INCLUDE_DIRS})
+# ---------------------------------------------------------------------------
+# Lang 方言 ODS 生成（AOT 步骤 2）：mlir-tblgen 取自 E:\llvm 同源树，
+# 生成物只落 build 目录（严禁泄漏源码树）；LangOps.td 为唯一入库事实源。
+# ---------------------------------------------------------------------------
+set(SCOURGE_LANG_TD "${CMAKE_CURRENT_SOURCE_DIR}/include/scourge/AOT/LangOps.td")
+set(SCOURGE_LANG_GEN "${CMAKE_CURRENT_BINARY_DIR}/lang_gen")
+if(NOT SCOURGE_MLIR_TBLGEN)
+    find_program(SCOURGE_MLIR_TBLGEN mlir-tblgen
+        HINTS "${SCOURGE_LLVM_ROOT}/Release/bin" "${SCOURGE_LLVM_ROOT}/bin")
+endif()
+if(NOT SCOURGE_MLIR_TBLGEN)
+    message(FATAL_ERROR "未找到 mlir-tblgen（Lang 方言 ODS 生成需要）："
+        "请传 -DSCOURGE_MLIR_TBLGEN=<路径>，或确认 SCOURGE_LLVM_ROOT 下"
+        " Release/bin 或 bin 中存在 mlir-tblgen")
+endif()
+set(SCOURGE_TBLGEN_ARGS)
+foreach(_d ${MLIR_INCLUDE_DIRS} ${LLVM_INCLUDE_DIRS})
+    list(APPEND SCOURGE_TBLGEN_ARGS -I "${_d}")
+endforeach()
+set(SCOURGE_LANG_GEN_OUTPUTS
+    "${SCOURGE_LANG_GEN}/LangOps.h.inc"
+    "${SCOURGE_LANG_GEN}/LangOps.cpp.inc"
+    "${SCOURGE_LANG_GEN}/LangDialect.h.inc"
+    "${SCOURGE_LANG_GEN}/LangDialect.cpp.inc")
+file(MAKE_DIRECTORY "${SCOURGE_LANG_GEN}")
+add_custom_command(
+    OUTPUT ${SCOURGE_LANG_GEN_OUTPUTS}
+    COMMAND "${SCOURGE_MLIR_TBLGEN}" -gen-dialect-decls "${SCOURGE_LANG_TD}" -o "${SCOURGE_LANG_GEN}/LangDialect.h.inc" ${SCOURGE_TBLGEN_ARGS}
+    COMMAND "${SCOURGE_MLIR_TBLGEN}" -gen-dialect-defs "${SCOURGE_LANG_TD}" -o "${SCOURGE_LANG_GEN}/LangDialect.cpp.inc" ${SCOURGE_TBLGEN_ARGS}
+    COMMAND "${SCOURGE_MLIR_TBLGEN}" -gen-op-decls "${SCOURGE_LANG_TD}" -o "${SCOURGE_LANG_GEN}/LangOps.h.inc" ${SCOURGE_TBLGEN_ARGS}
+    COMMAND "${SCOURGE_MLIR_TBLGEN}" -gen-op-defs "${SCOURGE_LANG_TD}" -o "${SCOURGE_LANG_GEN}/LangOps.cpp.inc" ${SCOURGE_TBLGEN_ARGS}
+    DEPENDS "${SCOURGE_LANG_TD}"
+    COMMENT "scourge: mlir-tblgen 生成 Lang 方言（生成物仅落 build 目录）"
+    VERBATIM)
+add_custom_target(scourge_lang_gen DEPENDS ${SCOURGE_LANG_GEN_OUTPUTS})
+add_dependencies(scourge scourge_lang_gen)
+target_include_directories(scourge PRIVATE "${SCOURGE_LANG_GEN}")
+
 target_link_libraries(scourge PRIVATE
-    MLIRIR MLIRParser MLIRPass
+    MLIRIR MLIRParser MLIRPass MLIRTransformUtils
     MLIRFuncDialect MLIRArithDialect MLIRControlFlowDialect MLIRLLVMDialect
     MLIRConvertToLLVMPass MLIRTargetLLVM
     MLIRLLVMToLLVMIRTranslation MLIRBuiltinToLLVMIRTranslation

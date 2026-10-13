@@ -190,10 +190,8 @@ struct GlobalSlot {
     std::string sym; ///< "@sg_g_M__g"
 };
 
-/// panic 上下文（fn / file 寄存器 + 行号寄存器）。
-struct PanicCtx {
-    std::string fn, file, line;
-};
+// lang op 的 panic 上下文不再显式传参：file/line 编码进 op 的 Location，
+// fn 由父 func 符号在 LangToLLVM 降级时反解（AOT 步骤 2 分层纪律）。
 
 class Gen {
 public:
@@ -326,8 +324,13 @@ private:
     Value loadGlobal(const std::string& module, const std::string& name);
     void storeGlobal(const GlobalSlot& g, Value v);
 
-    // ---- panic 上下文 -------------------------------------------------------------
-    PanicCtx panicCtx() { return PanicCtx{dispSsa_, fileSsa_, intConst(line_)}; }
+    // ---- lang op 位置后缀 ---------------------------------------------------------
+    /// lang op 的 loc 后缀：panic 上下文（file/line）由 LangToLLVM 从该
+    /// FileLineColLoc 恢复（fn 由父 func 符号反解）。仅 panic-ABI op 携带。
+    std::string opLoc() const {
+        return "loc(\"" + escapeMlirStr(curFilePath_) + "\":" +
+               std::to_string(line_) + ":1)";
+    }
 
     // ---- 调用 -------------------------------------------------------------------
     Value emitCallRet(const std::string& sym, const std::vector<Value>& args,
@@ -410,7 +413,6 @@ private:
     int tmp_ = 0;
     int blockCounter_ = 0;
     int line_ = 0;
-    std::string dispSsa_, fileSsa_; ///< panic 用 fn/file 寄存器（入口块）
     std::string oneSsa_, zeroI64Ssa_, zeroF64Ssa_, btrueSsa_, bfalseSsa_;
     std::map<int64_t, std::string> intConsts_;
     std::map<int32_t, std::string> i32Consts_;
@@ -443,14 +445,6 @@ void Gen::startFunction(const std::string& symLine, const std::string& dispName,
     i32Consts_.clear();
     locals_.clear();
     loopStack_.clear();
-
-    // panic 上下文寄存器（fn / file）
-    dispSsa_ = fresh();
-    emitEntry(dispSsa_ + " = llvm.mlir.addressof " + internStr(curDispName_) +
-              " : !llvm.ptr");
-    fileSsa_ = fresh();
-    emitEntry(fileSsa_ + " = llvm.mlir.addressof " + internStr(curFilePath_) +
-              " : !llvm.ptr");
 
     // 参数槽 + store（None 参数无 SSA，跳过 store）
     for (size_t k = 0; k < params.size(); ++k) {
@@ -498,7 +492,7 @@ void Gen::finishFunction() {
             break;
         case VK::Tensor: {
             std::string p = fresh();
-            emit(p + " = func.call @sg_tensor_empty() : () -> !llvm.ptr");
+            emit(p + " = \"lang.tensor_empty\"() : () -> !llvm.ptr");
             emit("func.return " + p + " : !llvm.ptr");
             break;
         }
@@ -588,7 +582,7 @@ Slot Gen::allocSlot(VK vk) {
     case VK::Tensor: {
         // 零值槽存空张量句柄（防野值；与 VM 槽位零值纪律一致）。
         std::string p = fresh();
-        emitEntry(p + " = func.call @sg_tensor_empty() : () -> !llvm.ptr");
+        emitEntry(p + " = \"lang.tensor_empty\"() : () -> !llvm.ptr");
         emitEntry("llvm.store " + p + ", " + slot.ptr + " : !llvm.ptr, !llvm.ptr");
         break;
     }
@@ -883,12 +877,10 @@ Value Gen::genTensorLit(const ListLit& ls) {
                  " : !llvm.ptr, !llvm.ptr");
             allInt &= es[k].tInt;
         }
-        PanicCtx c = panicCtx();
         std::string ssa = fresh();
-        emit(ssa + " = func.call @sg_tensor_concat(" +
-             intConst((int64_t)es.size()) + ", " + arr + ", " + c.fn + ", " +
-             c.file + ", " + c.line +
-             ") : (i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr");
+        emit(ssa + " = \"lang.tensor_concat\"(" +
+             intConst((int64_t)es.size()) + ", " + arr +
+             ") : (i64, !llvm.ptr) -> !llvm.ptr " + opLoc());
         return Value{VK::Tensor, ssa, allInt,
                      static_cast<uint8_t>(rowRank + 1)};
     }
@@ -906,16 +898,15 @@ Value Gen::genTensorLit(const ListLit& ls) {
         emit("llvm.store " + ev.ssa + ", " + addr + " : " +
              (isF ? "f64" : "i64") + ", !llvm.ptr");
     }
-    PanicCtx c = panicCtx();
     std::string ssa = fresh();
     if (isF) {
-        emit(ssa + " = func.call @sg_tensor_from_f64(" +
+        emit(ssa + " = \"lang.tensor_from_f64\"(" +
              intConst((int64_t)es.size()) + ", " + arr +
-             ") : (i64, !llvm.ptr) -> !llvm.ptr");
+             ") : (i64, !llvm.ptr) -> !llvm.ptr " + opLoc());
     } else {
-        emit(ssa + " = func.call @sg_tensor_from_i64(" +
+        emit(ssa + " = \"lang.tensor_from_i64\"(" +
              intConst((int64_t)es.size()) + ", " + arr +
-             ") : (i64, !llvm.ptr) -> !llvm.ptr");
+             ") : (i64, !llvm.ptr) -> !llvm.ptr " + opLoc());
     }
     return Value{VK::Tensor, ssa, !isF, 1};
 }
@@ -983,27 +974,22 @@ Value Gen::genExpr(const Expr& e) {
             idxs.push_back(iv);
         }
         std::string arr = buildI64Array(idxs);
-        PanicCtx c = panicCtx();
-        std::string tail = c.fn + ", " + c.file + ", " + c.line;
         std::string ssa = fresh();
         if (idxs.size() == base.tRank) { // 全秩 → 标量读取
             if (base.tInt)
-                emit(ssa + " = func.call @sg_tensor_get_i(" + base.ssa + ", " +
-                     intConst((int64_t)idxs.size()) + ", " + arr + ", " + tail +
-                     ") : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, "
-                     "i64) -> i64");
+                emit(ssa + " = \"lang.tensor_get_i\"(" + base.ssa + ", " +
+                     intConst((int64_t)idxs.size()) + ", " + arr +
+                     ") : (!llvm.ptr, i64, !llvm.ptr) -> i64 " + opLoc());
             else
-                emit(ssa + " = func.call @sg_tensor_get_f(" + base.ssa + ", " +
-                     intConst((int64_t)idxs.size()) + ", " + arr + ", " + tail +
-                     ") : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, "
-                     "i64) -> f64");
+                emit(ssa + " = \"lang.tensor_get_f\"(" + base.ssa + ", " +
+                     intConst((int64_t)idxs.size()) + ", " + arr +
+                     ") : (!llvm.ptr, i64, !llvm.ptr) -> f64 " + opLoc());
             return Value{base.tInt ? VK::Int : VK::Float, ssa};
         }
         // 部分索引 → 子张量切片（n > 秩时由运行时 panic，消息与 VM 一致）
-        emit(ssa + " = func.call @sg_tensor_slice(" + base.ssa + ", " +
-             intConst((int64_t)idxs.size()) + ", " + arr + ", " + tail +
-             ") : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> "
-             "!llvm.ptr");
+        emit(ssa + " = \"lang.tensor_slice\"(" + base.ssa + ", " +
+             intConst((int64_t)idxs.size()) + ", " + arr +
+             ") : (!llvm.ptr, i64, !llvm.ptr) -> !llvm.ptr " + opLoc());
         uint8_t outRank = idxs.size() < base.tRank
                               ? static_cast<uint8_t>(base.tRank - idxs.size())
                               : uint8_t{0};
@@ -1049,11 +1035,9 @@ Value Gen::genUnary(const Unary& u) {
     }
     if (u.op == "-") {
         if (v.vk == VK::Int) {
-            PanicCtx c = panicCtx();
             std::string ssa = fresh();
-            emit(ssa + " = func.call @sg_neg_i64(" + v.ssa + ", " + c.fn + ", " +
-                 c.file + ", " + c.line +
-                 ") : (i64, !llvm.ptr, !llvm.ptr, i64) -> i64");
+            emit(ssa + " = \"lang.negi\"(" + v.ssa + ") : (i64) -> i64 " +
+                 opLoc());
             return Value{VK::Int, ssa};
         }
         if (v.vk == VK::Float) {
@@ -1097,8 +1081,8 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
             // C 运行时返回 int（i32），与 ABI 一致；调用方转回 i1 布尔。
             // 参数序与 VM 的 r.s.find(l.s) 对齐：hay = 右操作数。
             std::string ssa = fresh();
-            emit(ssa + " = func.call @sg_str_contains(" + r.ssa + ", " + l.ssa +
-                 ") : (!llvm.ptr, !llvm.ptr) -> i32");
+            emit(ssa + " = \"lang.str_contains\"(" + r.ssa + ", " + l.ssa +
+                 ") : (!llvm.ptr, !llvm.ptr) -> i32 " + opLoc());
             std::string z = fresh();
             emit(z + " = arith.constant 0 : i32");
             std::string b = fresh();
@@ -1121,8 +1105,8 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         }
         if (l.vk == VK::Str && r.vk == VK::Str) {
             std::string s = fresh();
-            emit(s + " = func.call @sg_str_cmp(" + l.ssa + ", " + r.ssa +
-                 ") : (!llvm.ptr, !llvm.ptr) -> i64");
+            emit(s + " = \"lang.str_cmp\"(" + l.ssa + ", " + r.ssa +
+                 ") : (!llvm.ptr, !llvm.ptr) -> i64 " + opLoc());
             std::string sign = op == "=="   ? "eq"
                                : op == "!=" ? "ne"
                                : op == "<"  ? "slt"
@@ -1176,8 +1160,8 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
     // ---- 字符串运算 ----
     if (op == "+" && l.vk == VK::Str && r.vk == VK::Str) {
         std::string ssa = fresh();
-        emit(ssa + " = func.call @sg_str_concat(" + l.ssa + ", " + r.ssa +
-             ") : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr");
+        emit(ssa + " = \"lang.str_concat\"(" + l.ssa + ", " + r.ssa +
+             ") : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr " + opLoc());
         return Value{VK::Str, ssa};
     }
     if (op == "*" &&
@@ -1185,11 +1169,9 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
          (l.vk == VK::Int && r.vk == VK::Str))) {
         Value s = l.vk == VK::Str ? l : r;
         Value n = l.vk == VK::Str ? r : l;
-        PanicCtx c = panicCtx();
         std::string ssa = fresh();
-        emit(ssa + " = func.call @sg_str_repeat(" + s.ssa + ", " + n.ssa + ", " +
-             c.fn + ", " + c.file + ", " + c.line +
-             ") : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr");
+        emit(ssa + " = \"lang.str_repeat\"(" + s.ssa + ", " + n.ssa +
+             ") : (!llvm.ptr, i64) -> !llvm.ptr " + opLoc());
         return Value{VK::Str, ssa};
     }
 
@@ -1205,24 +1187,19 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
                                  : -1;
     if (op == "@" ||
         (tOp >= 0 && (l.vk == VK::Tensor || r.vk == VK::Tensor))) {
-        PanicCtx c = panicCtx();
-        std::string tail = c.fn + ", " + c.file + ", " + c.line;
         if (op == "@") {
             if (l.vk != VK::Tensor || r.vk != VK::Tensor)
                 unsupported(range, "'@' 需要两个张量操作数");
             std::string ssa = fresh();
-            emit(ssa + " = func.call @sg_tensor_matmul(" + l.ssa + ", " +
-                 r.ssa + ", " + tail +
-                 ") : (!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> "
-                 "!llvm.ptr");
+            emit(ssa + " = \"lang.tensor_matmul\"(" + l.ssa + ", " + r.ssa +
+                 ") : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr " + opLoc());
             return Value{VK::Tensor, ssa, l.tInt && r.tInt, 2};
         }
         if (l.vk == VK::Tensor && r.vk == VK::Tensor) {
             std::string ssa = fresh();
-            emit(ssa + " = func.call @sg_tensor_binop_tt(" + i32Const(tOp) +
-                 ", " + l.ssa + ", " + r.ssa + ", " + tail +
-                 ") : (i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) "
-                 "-> !llvm.ptr");
+            emit(ssa + " = \"lang.tensor_binop_tt\"(" + i32Const(tOp) + ", " +
+                 l.ssa + ", " + r.ssa +
+                 ") : (i32, !llvm.ptr, !llvm.ptr) -> !llvm.ptr " + opLoc());
             // outInt = 非 '/' 且两侧 int（VM tensorBinOp 规则）；形状相等秩不变
             return Value{VK::Tensor, ssa, tOp != 3 && l.tInt && r.tInt,
                          l.tRank};
@@ -1252,15 +1229,13 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         Value t = l.vk == VK::Tensor ? l : r;
         std::string ssa = fresh();
         if (l.vk == VK::Tensor) { // 张量 op 标量 → ts
-            emit(ssa + " = func.call @sg_tensor_binop_ts(" + i32Const(tOp) +
-                 ", " + t.ssa + ", " + si + ", " + vi + ", " + vf + ", " + tail +
-                 ") : (i32, !llvm.ptr, i32, i64, f64, !llvm.ptr, !llvm.ptr, "
-                 "i64) -> !llvm.ptr");
+            emit(ssa + " = \"lang.tensor_binop_ts\"(" + i32Const(tOp) + ", " +
+                 t.ssa + ", " + si + ", " + vi + ", " + vf +
+                 ") : (i32, !llvm.ptr, i32, i64, f64) -> !llvm.ptr " + opLoc());
         } else { // 标量 op 张量 → st（标量在左，C 侧负责方向）
-            emit(ssa + " = func.call @sg_tensor_binop_st(" + i32Const(tOp) +
-                 ", " + si + ", " + vi + ", " + vf + ", " + t.ssa + ", " + tail +
-                 ") : (i32, i32, i64, f64, !llvm.ptr, !llvm.ptr, !llvm.ptr, "
-                 "i64) -> !llvm.ptr");
+            emit(ssa + " = \"lang.tensor_binop_st\"(" + i32Const(tOp) + ", " +
+                 si + ", " + vi + ", " + vf + ", " + t.ssa +
+                 ") : (i32, i32, i64, f64, !llvm.ptr) -> !llvm.ptr " + opLoc());
         }
         return Value{VK::Tensor, ssa, tOp != 3 && t.tInt && sc.vk != VK::Float,
                      t.tRank};
@@ -1271,7 +1246,6 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         op == "%" || op == "**") {
         if (!isNumVK(l.vk) || !isNumVK(r.vk))
             unsupported(range, "运算符 '" + op + "' 的操作数类型");
-        PanicCtx c = panicCtx();
 
         if (l.vk != VK::Float && r.vk != VK::Float) {
             // ---- 纯整数路径 ----
@@ -1279,13 +1253,13 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
                 const char* sym;
                 const char* ret;
             };
-            IntHelper h = op == "+"    ? IntHelper{"@sg_add_i64", "i64"}
-                          : op == "-"  ? IntHelper{"@sg_sub_i64", "i64"}
-                          : op == "*"  ? IntHelper{"@sg_mul_i64", "i64"}
-                          : op == "/"  ? IntHelper{"@sg_div_i64", "f64"}
-                          : op == "//" ? IntHelper{"@sg_floordiv_i64", "i64"}
-                          : op == "%"  ? IntHelper{"@sg_mod_i64", "i64"}
-                                       : IntHelper{"@sg_ipow_i64", "i64"};
+            IntHelper h = op == "+"    ? IntHelper{"lang.addi", "i64"}
+                          : op == "-"  ? IntHelper{"lang.subi", "i64"}
+                          : op == "*"  ? IntHelper{"lang.muli", "i64"}
+                          : op == "/"  ? IntHelper{"lang.divi", "f64"}
+                          : op == "//" ? IntHelper{"lang.floordivi", "i64"}
+                          : op == "%"  ? IntHelper{"lang.modi", "i64"}
+                                       : IntHelper{"lang.powi", "i64"};
             if (op == "**") {
                 // 负指数结果为 float（结果类型依赖运行时符号）——AOT 要求
                 // 指数为非负整数字面量。
@@ -1295,9 +1269,8 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
                                 "整数幂 '**' 需要非负整数字面量指数");
             }
             std::string ssa = fresh();
-            emit(ssa + " = func.call " + h.sym + "(" + l.ssa + ", " + r.ssa +
-                 ", " + c.fn + ", " + c.file + ", " + c.line +
-                 ") : (i64, i64, !llvm.ptr, !llvm.ptr, i64) -> " + h.ret);
+            emit(ssa + " = \"" + h.sym + "\"(" + l.ssa + ", " + r.ssa +
+                 ") : (i64, i64) -> " + h.ret + " " + opLoc());
             return Value{op == "/" ? VK::Float : VK::Int, ssa};
         }
 
@@ -1318,14 +1291,13 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
             emit(ssa + " = arith.mulf " + lf.ssa + ", " + rf.ssa + " : f64");
             return Value{VK::Float, ssa};
         }
-        const char* sym = op == "/"   ? "@sg_fdiv_f64"
-                          : op == "//" ? "@sg_floordiv_f64"
-                          : op == "%"  ? "@sg_fmod_f64"
-                                       : "@sg_pow_f64";
+        const char* sym = op == "/"   ? "lang.divf"
+                          : op == "//" ? "lang.floordivf"
+                          : op == "%"  ? "lang.modf"
+                                       : "lang.powf";
         std::string ssa = fresh();
-        emit(ssa + " = func.call " + sym + "(" + lf.ssa + ", " + rf.ssa + ", " +
-             c.fn + ", " + c.file + ", " + c.line +
-             ") : (f64, f64, !llvm.ptr, !llvm.ptr, i64) -> f64");
+        emit(ssa + " = \"" + sym + "\"(" + lf.ssa + ", " + rf.ssa +
+             ") : (f64, f64) -> f64 " + opLoc());
         return Value{VK::Float, ssa};
     }
 
@@ -1410,7 +1382,6 @@ Value Gen::genCall(const Call& c) {
 }
 
 Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
-    PanicCtx ctx = panicCtx();
     auto need = [&](size_t want) {
         if (c.args.size() != want) unsupported(c.range, "内建 " + name + "() 参数个数");
     };
@@ -1419,33 +1390,32 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         std::vector<Value> args;
         for (const auto& a : c.args) args.push_back(genExpr(*a));
         for (size_t k = 0; k < args.size(); ++k) {
-            if (k) emit("func.call @sg_print_space() : () -> ()");
+            if (k) emit("\"lang.print_space\"() : () -> ()");
             const Value& v = args[k];
             switch (v.vk) {
             case VK::Int:
-                emit("func.call @sg_print_i64(" + v.ssa + ") : (i64) -> ()");
+                emit("\"lang.print_i64\"(" + v.ssa + ") : (i64) -> ()");
                 break;
             case VK::Float:
-                emit("func.call @sg_print_f64(" + v.ssa + ") : (f64) -> ()");
+                emit("\"lang.print_f64\"(" + v.ssa + ") : (f64) -> ()");
                 break;
             case VK::Bool:
-                emit("func.call @sg_print_bool(" + v.ssa + ") : (i1) -> ()");
+                emit("\"lang.print_bool\"(" + v.ssa + ") : (i1) -> ()");
                 break;
             case VK::Str:
-                emit("func.call @sg_print_cstr(" + v.ssa + ") : (!llvm.ptr) -> ()");
+                emit("\"lang.print_str\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
                 break;
             case VK::None:
-                emit("func.call @sg_print_none() : () -> ()");
+                emit("\"lang.print_none\"() : () -> ()");
                 break;
             case VK::Tensor:
-                emit("func.call @sg_print_tensor(" + v.ssa +
-                     ") : (!llvm.ptr) -> ()");
+                emit("\"lang.print_tensor\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
                 break;
             default:
                 unsupported(c.range, "print 该参数类型");
             }
         }
-        emit("func.call @sg_print_nl() : () -> ()");
+        emit("\"lang.print_nl\"() : () -> ()");
         return Value{VK::None, ""};
     }
     if (name == "str") {
@@ -1454,19 +1424,19 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         switch (v.vk) {
         case VK::Int: {
             std::string ssa = fresh();
-            emit(ssa + " = func.call @sg_str_from_i64(" + v.ssa +
+            emit(ssa + " = \"lang.str_from_i64\"(" + v.ssa +
                  ") : (i64) -> !llvm.ptr");
             return Value{VK::Str, ssa};
         }
         case VK::Float: {
             std::string ssa = fresh();
-            emit(ssa + " = func.call @sg_str_from_f64(" + v.ssa +
+            emit(ssa + " = \"lang.str_from_f64\"(" + v.ssa +
                  ") : (f64) -> !llvm.ptr");
             return Value{VK::Str, ssa};
         }
         case VK::Bool: {
             std::string ssa = fresh();
-            emit(ssa + " = func.call @sg_str_from_bool(" + v.ssa +
+            emit(ssa + " = \"lang.str_from_bool\"(" + v.ssa +
                  ") : (i1) -> !llvm.ptr");
             return Value{VK::Str, ssa};
         }
@@ -1474,7 +1444,7 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
             return v; // VM stringify(Str) 原样返回
         case VK::Tensor: {
             std::string ssa = fresh();
-            emit(ssa + " = func.call @sg_str_from_tensor(" + v.ssa +
+            emit(ssa + " = \"lang.str_from_tensor\"(" + v.ssa +
                  ") : (!llvm.ptr) -> !llvm.ptr");
             return Value{VK::Str, ssa};
         }
@@ -1487,12 +1457,12 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         Value v = genExpr(*c.args[0]);
         if (v.vk != VK::Str) unsupported(c.args[0]->range, "len() 仅支持 str");
         std::string ssa = fresh();
-        emit(ssa + " = func.call @sg_len_str(" + v.ssa + ") : (!llvm.ptr) -> i64");
+        emit(ssa + " = \"lang.str_len\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
         return Value{VK::Int, ssa};
     }
     if (name == "now") {
         std::string ssa = fresh();
-        emit(ssa + " = func.call @sg_now() : () -> f64");
+        emit(ssa + " = \"lang.now\"() : () -> f64");
         return Value{VK::Float, ssa};
     }
     if (name == "range") {
@@ -1511,9 +1481,8 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
                              : name == "exp"  ? 2
                                               : 3;
             std::string ssa = fresh();
-            emit(ssa + " = func.call @sg_tensor_un(" + i32Const(fnid) + ", " +
-                 v.ssa + ", " + ctx.fn + ", " + ctx.file + ", " + ctx.line +
-                 ") : (i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr");
+            emit(ssa + " = \"lang.tensor_un\"(" + i32Const(fnid) + ", " +
+                 v.ssa + ") : (i32, !llvm.ptr) -> !llvm.ptr " + opLoc());
             return Value{VK::Tensor, ssa, fnid == 0 && v.tInt, v.tRank};
         }
         if (v.vk != VK::Int && v.vk != VK::Float)
@@ -1521,18 +1490,18 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         if (name == "abs") {
             std::string ssa = fresh();
             if (v.vk == VK::Int) {
-                emit(ssa + " = func.call @sg_abs_i64(" + v.ssa + ") : (i64) -> i64");
+                emit(ssa + " = \"lang.abs_i\"(" + v.ssa + ") : (i64) -> i64");
                 return Value{VK::Int, ssa};
             }
-            emit(ssa + " = func.call @sg_abs_f64(" + v.ssa + ") : (f64) -> f64");
+            emit(ssa + " = \"lang.abs_f\"(" + v.ssa + ") : (f64) -> f64");
             return Value{VK::Float, ssa};
         }
-        const char* sym = name == "sqrt" ? "@sg_sqrt_f64"
-                          : name == "exp" ? "@sg_exp_f64"
-                                          : "@sg_log_f64";
+        const char* sym = name == "sqrt" ? "lang.sqrt"
+                          : name == "exp" ? "lang.exp"
+                                          : "lang.log";
         Value vf = promoteF64(v);
         std::string ssa = fresh();
-        emit(ssa + " = func.call " + sym + "(" + vf.ssa + ") : (f64) -> f64");
+        emit(ssa + " = \"" + sym + "\"(" + vf.ssa + ") : (f64) -> f64 " + opLoc());
         return Value{VK::Float, ssa};
     }
     if (name == "sum") {
@@ -1542,13 +1511,11 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
             unsupported(c.args[0]->range, "sum() 仅支持张量");
         std::string ssa = fresh();
         if (v.tInt) {
-            emit(ssa + " = func.call @sg_tensor_sum_i(" + v.ssa + ", " +
-                 ctx.fn + ", " + ctx.file + ", " + ctx.line +
-                 ") : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64");
+            emit(ssa + " = \"lang.tensor_sum_i\"(" + v.ssa +
+                 ") : (!llvm.ptr) -> i64 " + opLoc());
             return Value{VK::Int, ssa};
         }
-        emit(ssa + " = func.call @sg_tensor_sum_f(" + v.ssa +
-             ") : (!llvm.ptr) -> f64");
+        emit(ssa + " = \"lang.tensor_sum_f\"(" + v.ssa + ") : (!llvm.ptr) -> f64");
         return Value{VK::Float, ssa};
     }
     if (name == "max" || name == "min") {
@@ -1559,18 +1526,14 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         Value nm = strConst(name);
         std::string ssa = fresh();
         if (v.tInt) {
-            emit(ssa + " = func.call @sg_tensor_reduce_i(" +
+            emit(ssa + " = \"lang.tensor_reduce_i\"(" +
                  i32Const(name == "max" ? 1 : 0) + ", " + v.ssa + ", " + nm.ssa +
-                 ", " + ctx.fn + ", " + ctx.file + ", " + ctx.line +
-                 ") : (i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> "
-                 "i64");
+                 ") : (i32, !llvm.ptr, !llvm.ptr) -> i64 " + opLoc());
             return Value{VK::Int, ssa};
         }
-        emit(ssa + " = func.call @sg_tensor_reduce_f(" +
+        emit(ssa + " = \"lang.tensor_reduce_f\"(" +
              i32Const(name == "max" ? 1 : 0) + ", " + v.ssa + ", " + nm.ssa +
-             ", " + ctx.fn + ", " + ctx.file + ", " + ctx.line +
-             ") : (i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> "
-             "f64");
+             ") : (i32, !llvm.ptr, !llvm.ptr) -> f64 " + opLoc());
         return Value{VK::Float, ssa};
     }
     if (name == "transpose") {
@@ -1579,9 +1542,8 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         if (v.vk != VK::Tensor)
             unsupported(c.args[0]->range, "transpose() 仅支持张量");
         std::string ssa = fresh();
-        emit(ssa + " = func.call @sg_tensor_transpose(" + v.ssa + ", " +
-             ctx.fn + ", " + ctx.file + ", " + ctx.line +
-             ") : (!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr");
+        emit(ssa + " = \"lang.tensor_transpose\"(" + v.ssa +
+             ") : (!llvm.ptr) -> !llvm.ptr " + opLoc());
         return Value{VK::Tensor, ssa, v.tInt, 2};
     }
     if (name == "reshape") {
@@ -1600,11 +1562,9 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         }
         std::string arr = buildI64Array(dims);
         std::string ssa = fresh();
-        emit(ssa + " = func.call @sg_tensor_reshape(" + v.ssa + ", " +
-             intConst((int64_t)dims.size()) + ", " + arr + ", " + ctx.fn + ", " +
-             ctx.file + ", " + ctx.line +
-             ") : (!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> "
-             "!llvm.ptr");
+        emit(ssa + " = \"lang.tensor_reshape\"(" + v.ssa + ", " +
+             intConst((int64_t)dims.size()) + ", " + arr +
+             ") : (!llvm.ptr, i64, !llvm.ptr) -> !llvm.ptr " + opLoc());
         return Value{VK::Tensor, ssa, v.tInt,
                      static_cast<uint8_t>(dims.size())};
     }
@@ -1701,9 +1661,7 @@ void Gen::genAssign(const Assign& a) {
             idxs.push_back(iv);
         }
         Value v = genExpr(*a.value);
-        PanicCtx c = panicCtx();
         std::string arr = buildI64Array(idxs);
-        std::string tail = c.fn + ", " + c.file + ", " + c.line;
         if (base.tInt) {
             if (v.vk == VK::Float)
                 unsupported(a.value->range, "浮点值无法赋给整型张量元素");
@@ -1712,11 +1670,9 @@ void Gen::genAssign(const Assign& a) {
                 emit(z + " = arith.extui " + v.ssa + " : i1 to i64");
                 v = Value{VK::Int, z};
             }
-            emit("func.call @sg_tensor_set_i(" + base.ssa + ", " +
+            emit("\"lang.tensor_set_i\"(" + base.ssa + ", " +
                  intConst((int64_t)idxs.size()) + ", " + arr + ", " + v.ssa +
-                 ", " + tail +
-                 ") : (!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, "
-                 "i64) -> ()");
+                 ") : (!llvm.ptr, i64, !llvm.ptr, i64) -> () " + opLoc());
         } else {
             if (v.vk == VK::Int) {
                 std::string f = fresh();
@@ -1727,11 +1683,9 @@ void Gen::genAssign(const Assign& a) {
                 emit(f + " = arith.uitofp " + v.ssa + " : i1 to f64");
                 v = Value{VK::Float, f};
             }
-            emit("func.call @sg_tensor_set_f(" + base.ssa + ", " +
+            emit("\"lang.tensor_set_f\"(" + base.ssa + ", " +
                  intConst((int64_t)idxs.size()) + ", " + arr + ", " + v.ssa +
-                 ", " + tail +
-                 ") : (!llvm.ptr, i64, !llvm.ptr, f64, !llvm.ptr, !llvm.ptr, "
-                 "i64) -> ()");
+                 ") : (!llvm.ptr, i64, !llvm.ptr, f64) -> () " + opLoc());
         }
         return;
     }
@@ -1941,21 +1895,19 @@ void Gen::genAssert(const Assert& a) {
     terminate("cf.cond_br " + cond.ssa + ", " + blk(okB).label + ", " +
               blk(panicB).label);
     cur_ = panicB;
-    PanicCtx ctx = panicCtx();
     if (hasMsg) {
         Value prefix = strConst("断言失败：");
         std::string m = fresh();
-        emit(m + " = func.call @sg_str_concat(" + prefix.ssa + ", " + msg.ssa +
-             ") : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr");
-        emit("func.call @sg_panic(" + ctx.fn + ", " + ctx.file + ", " +
-             ctx.line + ", " + m + ") : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> ()");
+        emit(m + " = \"lang.str_concat\"(" + prefix.ssa + ", " + msg.ssa +
+             ") : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr " + opLoc());
+        emit("\"lang.panic\"(" + m + ") : (!llvm.ptr) -> () " + opLoc());
     } else {
         Value m = strConst("断言失败");
-        emit("func.call @sg_panic(" + ctx.fn + ", " + ctx.file + ", " +
-             ctx.line + ", " + m.ssa +
-             ") : (!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> ()");
+        emit("\"lang.panic\"(" + m.ssa + ") : (!llvm.ptr) -> () " + opLoc());
     }
-    terminate("func.return"); // 不可达兜底（sg_panic 不返回）
+    terminate("llvm.unreachable"); // 不可达兜底（sg_panic 不返回；无值 return
+                                   // 在非 void 函数中不合法——llvm.unreachable
+                                   // 语义精确且对任意返回类型成立）
     cur_ = okB;
 }
 
@@ -2163,67 +2115,8 @@ void Gen::assemble(std::string& out) {
     if (!emptyStrDef_.empty()) out += "  " + emptyStrDef_ + "\n";
     for (const auto& d : strDefs_) out += "  " + d + "\n";
     for (const auto& d : globalDefs_) out += "  " + d + "\n";
-    // 内嵌 C 运行时的外部声明（固定集合，未用符号无副作用）。
-    static const char* kExterns[] = {
-        "func.func private @sg_panic(!llvm.ptr, !llvm.ptr, i64, !llvm.ptr) -> ()",
-        "func.func private @sg_add_i64(i64, i64, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_sub_i64(i64, i64, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_mul_i64(i64, i64, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_div_i64(i64, i64, !llvm.ptr, !llvm.ptr, i64) -> f64",
-        "func.func private @sg_floordiv_i64(i64, i64, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_mod_i64(i64, i64, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_ipow_i64(i64, i64, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_neg_i64(i64, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_fdiv_f64(f64, f64, !llvm.ptr, !llvm.ptr, i64) -> f64",
-        "func.func private @sg_floordiv_f64(f64, f64, !llvm.ptr, !llvm.ptr, i64) -> f64",
-        "func.func private @sg_fmod_f64(f64, f64, !llvm.ptr, !llvm.ptr, i64) -> f64",
-        "func.func private @sg_pow_f64(f64, f64, !llvm.ptr, !llvm.ptr, i64) -> f64",
-        "func.func private @sg_str_concat(!llvm.ptr, !llvm.ptr) -> !llvm.ptr",
-        "func.func private @sg_str_repeat(!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_str_cmp(!llvm.ptr, !llvm.ptr) -> i64",
-        "func.func private @sg_str_contains(!llvm.ptr, !llvm.ptr) -> i32",
-        "func.func private @sg_len_str(!llvm.ptr) -> i64",
-        "func.func private @sg_str_from_i64(i64) -> !llvm.ptr",
-        "func.func private @sg_str_from_f64(f64) -> !llvm.ptr",
-        "func.func private @sg_str_from_bool(i1) -> !llvm.ptr",
-        "func.func private @sg_abs_i64(i64) -> i64",
-        "func.func private @sg_abs_f64(f64) -> f64",
-        "func.func private @sg_sqrt_f64(f64) -> f64",
-        "func.func private @sg_exp_f64(f64) -> f64",
-        "func.func private @sg_log_f64(f64) -> f64",
-        "func.func private @sg_now() -> f64",
-        "func.func private @sg_print_i64(i64) -> ()",
-        "func.func private @sg_print_f64(f64) -> ()",
-        "func.func private @sg_print_bool(i1) -> ()",
-        "func.func private @sg_print_cstr(!llvm.ptr) -> ()",
-        "func.func private @sg_print_none() -> ()",
-        "func.func private @sg_print_space() -> ()",
-        "func.func private @sg_print_nl() -> ()",
-        // ---- 张量运行时（kRuntimeC 张量段一一对应） ----
-        "func.func private @sg_tensor_empty() -> !llvm.ptr",
-        "func.func private @sg_tensor_from_i64(i64, !llvm.ptr) -> !llvm.ptr",
-        "func.func private @sg_tensor_from_f64(i64, !llvm.ptr) -> !llvm.ptr",
-        "func.func private @sg_tensor_concat(i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_tensor_binop_tt(i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_tensor_binop_ts(i32, !llvm.ptr, i32, i64, f64, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_tensor_binop_st(i32, i32, i64, f64, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_tensor_matmul(!llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_tensor_get_i(!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_tensor_get_f(!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> f64",
-        "func.func private @sg_tensor_slice(!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_tensor_set_i(!llvm.ptr, i64, !llvm.ptr, i64, !llvm.ptr, !llvm.ptr, i64) -> ()",
-        "func.func private @sg_tensor_set_f(!llvm.ptr, i64, !llvm.ptr, f64, !llvm.ptr, !llvm.ptr, i64) -> ()",
-        "func.func private @sg_tensor_sum_i(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_tensor_sum_f(!llvm.ptr) -> f64",
-        "func.func private @sg_tensor_un(i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_tensor_reduce_i(i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> i64",
-        "func.func private @sg_tensor_reduce_f(i32, !llvm.ptr, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> f64",
-        "func.func private @sg_tensor_transpose(!llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_tensor_reshape(!llvm.ptr, i64, !llvm.ptr, !llvm.ptr, !llvm.ptr, i64) -> !llvm.ptr",
-        "func.func private @sg_print_tensor(!llvm.ptr) -> ()",
-        "func.func private @sg_str_from_tensor(!llvm.ptr) -> !llvm.ptr",
-    };
-    for (const char* e : kExterns) out += std::string("  ") + e + "\n";
+    // 内嵌 C 运行时 @sg_* 外部声明已由 LangToLLVM pass 模块级补插
+    // （lang 层不出现运行时符号——AOT 步骤 2 分层纪律）。
     for (const auto& f : funcDefs_) out += f;
     out += "}\n";
 }
