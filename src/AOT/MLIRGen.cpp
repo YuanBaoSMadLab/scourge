@@ -197,8 +197,9 @@ struct PanicCtx {
 
 class Gen {
 public:
-    Gen(Session& session, const std::string& entry)
-        : s_(session), entry_(entry) {}
+    Gen(Session& session, const std::string& entry,
+        const ExprTypeMap& exprTypes)
+        : s_(session), entry_(entry), types_(exprTypes) {}
 
     bool run(std::string& out);
 
@@ -379,6 +380,8 @@ private:
     // ---- 状态 -----------------------------------------------------------------
     Session& s_;
     std::string entry_;
+    /// 检查器产出的表达式类型注解表（单一事实源；emit 处只查不重算）。
+    const ExprTypeMap& types_;
 
     // 模块级产物
     std::vector<std::string> strDefs_;
@@ -693,7 +696,14 @@ Value Gen::emitCallRet(const std::string& sym, const std::vector<Value>& args,
 // ============================================================================
 
 /// 静态 VK 推断（三元结果类型等）。推断不出 → Bad。
+/// 类型/形状推导的单一事实源是检查器（Session::exprTypes() 注解表）：
+/// 此处优先查表直取，未命中（Err/Unknown 不入表）才走本地保守回退，
+/// 回退逻辑与检查器推导规则同构——不在生成期重算推导。
 VK Gen::inferVK(const Expr& e) const {
+    if (auto it = types_.find(&e); it != types_.end()) {
+        VK vk = vkOfType(it->second);
+        if (vk != VK::Bad) return vk;
+    }
     switch (e.kind) {
     case Expr::Kind::IntLit: return VK::Int;
     case Expr::Kind::FloatLit: return VK::Float;
@@ -2238,7 +2248,7 @@ bool Gen::run(std::string& out) {
 // ============================================================================
 
 bool generateMLIR(Session& session, const std::string& entry, std::string& out) {
-    Gen gen(session, entry);
+    Gen gen(session, entry, session.exprTypes());
     return gen.run(out);
 }
 

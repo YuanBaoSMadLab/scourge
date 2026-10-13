@@ -4,9 +4,12 @@
 // ----------------------------------------------------------------------------
 //  首条 AOT 竖切：把已通过全量检查的模块图生成为单一文本 MLIR 模块
 //  （func / arith / cf / llvm 方言），随后由 Builder 驱动
-//    mlir-opt --convert-to-llvm → mlir-translate --mlir-to-llvmir
-//    → clang 链接内嵌 C 运行时
+//    进程内 MLIR→LLVM IR（AOT/InProcess）→ clang 链接内嵌 C 运行时
 //  得到原生可执行文件。
+//
+//  类型/形状推导纪律（CINN InferSymbolicShapeContext 思想）：
+//  检查器是类型/形状的单一事实源（Session::exprTypes() 注解表），
+//  生成器 emit 处只查表，不在生成期重算推导。
 //
 //  语义纪律（与字节码后端零分叉）：
 //  * 静态类型子集：int / float / bool / str / None / range；其余类型

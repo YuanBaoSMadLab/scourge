@@ -56,6 +56,12 @@ struct ModuleSymbols {
 /// 模块名 → 已检查符号表（driver 按 DAG 依赖序填充）。
 using ModuleRegistry = std::map<std::string, std::shared_ptr<ModuleSymbols>>;
 
+/// 表达式类型注解表（CINN InferSymbolicShapeContext 思想的前置推导产物）：
+/// 检查器是类型/形状推导的单一事实源，checkExpr 的结果按 AST 节点缓存于此；
+/// 后端（AOT MLIRGen / 字节码 Compiler）直接查表消费，emit 处只查不重算。
+/// 键为节点指针，生命周期由 Session 持有的 AST 保证；Err/Unknown 占位不入表。
+using ExprTypeMap = std::unordered_map<const Expr*, TypePtr>;
+
 class TypeChecker {
 public:
     TypeChecker(const SourceMgr& src, DiagEngine& diag,
@@ -63,6 +69,9 @@ public:
 
     /// 检查一个模块；返回其导出符号（调用方存入 registry 供下游模块使用）。
     ModuleSymbols check(Module& m);
+
+    /// 取走本轮检查积累的表达式类型注解表（move 语义；检查器实例即弃）。
+    ExprTypeMap takeExprTypes() { return std::move(exprTypes_); }
 
 private:
     // ---- 作用域 ---------------------------------------------------------------
@@ -97,7 +106,8 @@ private:
     void checkContractDefs(const FuncDef& f);
 
     // ---- 表达式 ----------------------------------------------------------------
-    TypePtr checkExpr(const Expr& e);
+    TypePtr checkExpr(const Expr& e);   ///< 公共出口：推断结果写入注解表
+    TypePtr checkExprImpl(const Expr& e); ///< 分派实现（switch 各 case）
     TypePtr checkBinary(const Expr& e);
     TypePtr checkCall(const Expr& e);
     TypePtr checkBuiltinCall(const std::string& name, const Call& c);
@@ -135,6 +145,7 @@ private:
     int loopDepth_ = 0;
     bool inAsyncFn_ = false;        ///< 当前函数是否 async def（await 合法性）
     bool checkingEnsures_ = false;  ///< ensures 检查时绑定 result
+    ExprTypeMap exprTypes_;         ///< 表达式类型注解表（单一事实源，见上）
 };
 
 } // namespace scourge

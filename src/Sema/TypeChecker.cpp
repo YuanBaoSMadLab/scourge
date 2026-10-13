@@ -514,6 +514,15 @@ void TypeChecker::requireBool(const TypePtr& t, const SourceRange& r,
 // ============================================================================
 
 TypePtr TypeChecker::checkExpr(const Expr& e) {
+    TypePtr t = checkExprImpl(e);
+    // 单一事实源：推断结果按节点缓存（Err/Unknown 为已报错/推断失败占位，
+    // 不入表——后端查不到时走自己的保守回退，行为与未接入前一致）。
+    if (t && t->kind != Type::Kind::Err && t->kind != Type::Kind::Unknown)
+        exprTypes_[&e] = t;
+    return t;
+}
+
+TypePtr TypeChecker::checkExprImpl(const Expr& e) {
     switch (e.kind) {
     case Expr::Kind::IntLit: return tyInt();
     case Expr::Kind::FloatLit: return tyFloat();

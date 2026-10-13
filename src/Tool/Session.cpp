@@ -215,6 +215,7 @@ void Session::checkModule(const std::string& name) {
     DiagEngine local(src_);
     TypeChecker checker(src_, local, *snapshot);
     auto syms = std::make_shared<ModuleSymbols>(checker.check(*lit->second.mod));
+    ExprTypeMap localTypes = checker.takeExprTypes();
 
     std::lock_guard<std::mutex> lk(mutex_);
     // 暂存本模块诊断，并入主引擎推迟到本层线程全部结束之后（见 check），
@@ -222,6 +223,9 @@ void Session::checkModule(const std::string& name) {
     moduleDiags_[name] = local.all();
     checked_[name] = syms;
     registry_[name] = syms;
+    // 表达式类型注解并入主表（AST 指针跨模块不冲突；mutex 内定序合并，
+    // 与并发度无关）——AOT 后端查表消费的单一事实源。
+    exprTypes_.insert(localTypes.begin(), localTypes.end());
 }
 
 void Session::checkImported(unsigned jobs) {

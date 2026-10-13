@@ -60,6 +60,9 @@ public:
 
     // ---- 字节码后端（run 命令）访问器 ----
     const ModuleRegistry& registry() const { return registry_; }
+    /// 表达式类型注解表（检查时按 AST 节点缓存；check 成功后有效）。
+    /// AOT MLIRGen 等后端直接查表消费类型/形状，emit 处只查不重算。
+    const ExprTypeMap& exprTypes() const { return exprTypes_; }
     /// 已加载模块（依赖层序：被依赖者在前，层内字典序）——字节码编译与
     /// <top> 执行共用此序，保证全局初始化先于使用且输出确定。
     std::vector<std::string> modulesInDependencyOrder(const std::string& entry) const;
@@ -103,6 +106,9 @@ private:
     /// 各模块在独立引擎上产出的诊断（线程内暂存）；层内线程全部结束后
     /// 由主线程按确定序并入主引擎 diag_，保证输出不随并发度漂移。
     std::map<std::string, std::vector<Diagnostic>> moduleDiags_;
+    /// 表达式类型注解表（全部模块合并；键为 AST 节点指针，跨模块不冲突，
+    /// 主线程 mutex 内定序合并 → 与并发度无关）。
+    ExprTypeMap exprTypes_;
 };
 
 } // namespace scourge
