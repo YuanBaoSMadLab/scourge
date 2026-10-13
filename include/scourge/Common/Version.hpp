@@ -14,10 +14,10 @@
 namespace scourge {
 
 /// 语义版本号（MCP serverInfo 用）。
-inline constexpr std::string_view kScourgeVersion = "0.9.0";
+inline constexpr std::string_view kScourgeVersion = "0.9.1";
 
 /// 完整版本标签（CLI 输出与 .sgbc 缓存工具链标签）。
 inline constexpr std::string_view kScourgeVersionLabel =
-    "scourge 0.9.0（AOT 构建：build 命令经 MLIR → LLVM IR → 原生可执行，标量与张量均与 run 双模一致）";
+    "scourge 0.9.1（AOT 构建：build 命令经进程内 MLIR → LLVM IR → 原生可执行，无外部 mlir-opt/mlir-translate 依赖）";
 
 } // namespace scourge
