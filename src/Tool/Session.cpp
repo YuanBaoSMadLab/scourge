@@ -269,6 +269,11 @@ bool Session::importModule(const std::string& name) {
                       std::filesystem::current_path() / (name + ".sg"));
 }
 
+bool Session::loadAs(const std::string& name,
+                     const std::filesystem::path& path) {
+    return loadModule(name, path);
+}
+
 // ----------------------------------------------------------------------------
 // 检查（阶段二：DAG 分层并行）
 // ----------------------------------------------------------------------------

@@ -55,6 +55,11 @@ public:
     /// （含递归依赖）；已加载则幂等。诊断写入 diag()。
     bool importModule(const std::string& name);
 
+    /// 以显式模块名加载磁盘文件（含递归依赖；已加载则幂等）。
+    /// 供测试框架以派生名（<stem>__sgt）装载 <stem>.sgt，避免与同名
+    /// .sg 模块冲突；依赖相对解析与 load 一致。诊断写入 diag()。
+    bool loadAs(const std::string& name, const std::filesystem::path& path);
+
     /// 生成指定模块的 .sgi 文本（check 成功后调用）。
     std::string emitInterface(const std::string& name);
 

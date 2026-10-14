@@ -58,8 +58,9 @@ target_include_directories(scourge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 # 可执行文件
 # ---------------------------------------------------------------------------
 add_executable(scourge src/Tool/main.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp
-    src/Tool/Builder.cpp src/AOT/InProcess.cpp src/AOT/LangDialect.cpp
-    src/AOT/LangToAffine.cpp src/AOT/LangToLLVM.cpp src/AOT/LangToLinalg.cpp)
+    src/Tool/Builder.cpp src/Tool/TestRunner.cpp src/AOT/InProcess.cpp
+    src/AOT/LangDialect.cpp src/AOT/LangToAffine.cpp src/AOT/LangToLLVM.cpp
+    src/AOT/LangToLinalg.cpp)
 target_link_libraries(scourge PRIVATE scourge_core)
 
 # ---- 进程内 MLIR/LLVM（build 命令阶段 2+3 内联，摆脱 mlir-opt/mlir-translate）----
@@ -131,7 +132,8 @@ target_link_libraries(scourge PRIVATE
     MLIRLLVMToLLVMIRTranslation MLIRBuiltinToLLVMIRTranslation
     MLIRRegisterAllExtensions)
 
-add_executable(scourge_tests tests/test_runner.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp)
+add_executable(scourge_tests tests/test_runner.cpp src/Tool/Repl.cpp
+    src/Tool/McpServer.cpp src/Tool/TestRunner.cpp)
 target_link_libraries(scourge_tests PRIVATE scourge_core)
 
 enable_testing()

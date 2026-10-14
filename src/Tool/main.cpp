@@ -13,8 +13,8 @@
 //    scourge version / help
 //
 //  编译会话（加载 + DAG 分层并行检查）在 Tool/Session，run 执行核心在
-//  Tool/Runner，REPL 在 Tool/Repl，MCP 服务器在 Tool/McpServer——
-//  本文件只保留命令分发与 watch 循环。
+//  Tool/Runner，REPL 在 Tool/Repl，MCP 服务器在 Tool/McpServer，测试框架
+//  在 Tool/TestRunner——本文件只保留命令分发与 watch 循环。
 //
 //  退出码：0 成功；1 诊断错误；2 用法错误。
 // ============================================================================
@@ -39,6 +39,7 @@
 #include "scourge/Tool/Repl.hpp"
 #include "scourge/Tool/Runner.hpp"
 #include "scourge/Tool/Session.hpp"
+#include "scourge/Tool/TestRunner.hpp"
 
 namespace fs = std::filesystem;
 using namespace scourge;
@@ -319,7 +320,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> args(argv + (argc > 1 ? 1 : 0), argv + argc);
     if (args.empty()) {
         std::cout << kScourgeVersionLabel
-                  << "\n用法: scourge <check|interface|run|build|repl|mcp|version|help> ...\n";
+              << "\n用法: scourge <check|interface|run|build|test|repl|mcp|version|help> ...\n";
         return 2;
     }
     const std::string cmd = args[0];
@@ -338,6 +339,9 @@ int main(int argc, char** argv) {
             << "  build [--gpu] [--no-cache] <file>  AOT 构建：MLIR → LLVM IR → 原生可执行\n"
             << "                                      （<stem>.sgbuild/obj 增量缓存）\n"
             << "  repl                                会话式求值（REPL；会话内 :help 查看命令）\n"
+            << "  test [--json] [--seed N] [--runs N] <file>\n"
+            << "                                      测试框架：<stem>.sgt 显式测试 +\n"
+            << "                                      @pure 契约属性测试（自动预言）\n"
             << "  mcp                                 MCP 服务器模式（stdio JSON-RPC 2.0，供 AI 代理接入）\n"
             << "  version                             版本信息\n"
             << "  help                                本帮助\n";
@@ -347,6 +351,7 @@ int main(int argc, char** argv) {
     if (cmd == "interface") return cmdInterface(rest);
     if (cmd == "run") return cmdRun(rest);
     if (cmd == "build") return cmdBuild(rest);
+    if (cmd == "test") return runTests(rest);
     if (cmd == "repl") {
         if (!rest.empty()) {
             std::cerr << "用法: scourge repl\n";

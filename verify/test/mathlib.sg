@@ -1,0 +1,66 @@
+# mathlib.sg — 测试框架验证探针（属性测试目标模块）
+# 预期（ scourge test mathlib.sg ）：
+#   add     通过（requires 挡掉负数例，ensures 恒真）
+#   div     通过（requires b != 0 挡掉除零例）
+#   capped  通过（ensures 引用模块全局 LIMIT——驱动限定路径覆盖）
+#   scaled  通过（Tensor 静态形状输入生成路径覆盖）
+#   fact    失败（ensures 故意写错 → 反例 n=0，成因 ensures 违反）
+#   lookup  跳过（Dict 参数暂不生成输入）
+LIMIT = 100
+
+@pure
+def add(a: int, b: int) -> int:
+    """
+    加法（非负定义域）。
+    requires: a >= 0 and b >= 0
+    ensures: result == a + b
+    """
+    return a + b
+
+@pure
+def div(a: int, b: int) -> int:
+    """
+    整除（除数非零定义域）。
+    requires: b != 0
+    ensures: result == a // b
+    """
+    return a // b
+
+@pure
+def capped(x: int) -> int:
+    """
+    截断到 LIMIT（契约引用模块全局——限定路径探针）。
+    requires: x >= 0
+    ensures: result <= LIMIT and result <= x
+    """
+    if x > LIMIT:
+        return LIMIT
+    return x
+
+@pure
+def scaled(xs: Tensor[int, (2,)]) -> int:
+    """
+    二元组和（张量静态形状输入生成探针）。
+    requires: xs[0] >= -1000000
+    ensures: result == xs[0] + xs[1]
+    """
+    return xs[0] + xs[1]
+
+@pure
+def fact(n: int) -> int:
+    """
+    阶乘（ensures 故意错误——属性测试必须报反例）。
+    requires: n >= 0
+    ensures: result == n + 42
+    """
+    if n <= 1:
+        return 1
+    return n * fact(n - 1)
+
+@pure
+def lookup(d: Dict[str, int], k: str) -> int:
+    """
+    查表（Dict 参数——整函数跳过并注明原因）。
+    ensures: result >= 0
+    """
+    return 0

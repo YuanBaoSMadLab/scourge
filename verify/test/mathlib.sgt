@@ -1,0 +1,18 @@
+# mathlib.sgt — 测试框架验证探针（显式测试）
+# 预期：
+#   test_add_basic   通过
+#   test_add_wrong   失败（返回 False）
+#   test_oob_panic   失败（越界 panic）
+import mathlib
+
+def test_add_basic() -> bool:
+    return mathlib.add(1, 2) == 3
+
+def test_add_wrong() -> bool:
+    return mathlib.add(1, 2) == 4  # 故意失败
+
+def test_oob_panic() -> bool:
+    # 列表字面量默认推断为 1 维张量（Tensor[int, (1)]），注解须对齐。
+    xs: Tensor[int, (1)] = [1]
+    i: int = 2
+    return xs[i] == 0  # 越界 panic → 该测试失败
