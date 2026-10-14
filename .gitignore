@@ -4,6 +4,7 @@ docs/
 examples/
 tests/
 bin/
+release/
 
 # CMake configure 过程泄漏的 tablegen 生成头（非仓库源码）
 include/mlir/
