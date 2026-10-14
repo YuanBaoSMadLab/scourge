@@ -278,15 +278,18 @@ int cmdRun(const std::vector<std::string>& args) {
 int cmdBuild(const std::vector<std::string>& args) {
     std::string outFile;
     std::string inFile;
+    bool gpuMode = false;
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "-o" && i + 1 < args.size()) {
             outFile = args[++i];
+        } else if (args[i] == "--gpu") {
+            gpuMode = true; /* GPU 覆盖集 op 走 CUDA 动态加载（自动回退 CPU） */
         } else {
             inFile = args[i];
         }
     }
-    if (inFile.empty() || args.size() > 3) {
-        std::cerr << "用法: scourge build <file.sg> [-o out.exe]\n";
+    if (inFile.empty() || args.size() > 4) {
+        std::cerr << "用法: scourge build [--gpu] <file.sg> [-o out.exe]\n";
         return 2;
     }
 
@@ -295,7 +298,7 @@ int cmdBuild(const std::vector<std::string>& args) {
         outFile.empty()
             ? inPath.parent_path() / (inPath.stem().string() + ".exe")
             : fs::path(outFile);
-    BuildOutcome r = buildOnce(inPath, outPath);
+    BuildOutcome r = buildOnce(inPath, outPath, gpuMode);
     // 失败文本走 stderr——stdout 只承载构建结果报告。
     if (!r.log.empty()) std::cerr << r.log;
     if (r.exitCode == 0) std::cout << "已生成 " << r.exe.string() << "\n";

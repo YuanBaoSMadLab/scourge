@@ -38,6 +38,7 @@
 #include "scourge/AOT/LangOps.h"
 
 #include "TensorBridge.hpp"
+#include "GpuCover.hpp"
 
 namespace scourge {
 namespace aot {
@@ -249,6 +250,8 @@ class LangToLinalgPass
 public:
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LangToLinalgPass)
 
+    explicit LangToLinalgPass(bool gpuMode) : gpuMode_(gpuMode) {}
+
     StringRef getArgument() const override { return "scourge-lang-to-linalg"; }
     StringRef getDescription() const override {
         return "Scourge Lang 张量计算 op（带静态形状属性）降级为 linalg";
@@ -264,6 +267,7 @@ public:
     void runOnOperation() override {
         ModuleOp mod = getOperation();
         MLIRContext* ctx = &getContext();
+        const bool gpuMode = gpuMode_;
 
         declareBridgeExterns(mod);
 
@@ -287,9 +291,10 @@ public:
         // 视图，须在 missingAttrs 存活期内拷贝为值语义容器再捕获，否则
         // 内层 lambda 读悬垂内存（曾致 hasAttr 误判 → 覆盖集全部漏判
         // legal → 静默回退 sg_*）。
-        auto missingAttrs = [](std::initializer_list<llvm::StringRef> names) {
+        auto missingAttrs = [gpuMode](std::initializer_list<llvm::StringRef> names) {
             llvm::SmallVector<llvm::StringRef, 4> ns(names);
-            return [ns = std::move(ns)](Operation* op) {
+            return [ns = std::move(ns), gpuMode](Operation* op) {
+                if (gpuMode && gpu::covers(op)) return true; // GPU 接管 → 跳过
                 for (llvm::StringRef n : ns)
                     if (!op->hasAttr(n)) return true; // 未覆盖形态 → legal
                 return false; // 属性齐全 → 非法 → 降级
@@ -306,9 +311,10 @@ public:
             }
             return false;
         };
-        auto linalgMissing = [&](std::initializer_list<llvm::StringRef> names) {
+        auto linalgMissing = [gpuMode, f64Only](std::initializer_list<llvm::StringRef> names) {
             llvm::SmallVector<llvm::StringRef, 4> ns(names);
-            return [ns = std::move(ns), f64Only](Operation* op) {
+            return [ns = std::move(ns), f64Only, gpuMode](Operation* op) {
+                if (gpuMode && gpu::covers(op)) return true; // GPU 接管 → 跳过
                 for (llvm::StringRef n : ns)
                     if (!op->hasAttr(n)) return true; // 未覆盖形态 → legal
                 return f64Only(op); // int 形态 → legal
@@ -332,12 +338,15 @@ public:
         if (failed(applyPartialConversion(mod, target, std::move(patterns))))
             signalPassFailure();
     }
+
+private:
+    const bool gpuMode_; // CUDA 第 1 层：GPU 覆盖集跳过 linalg 降级
 };
 
 } // namespace
 
-std::unique_ptr<Pass> createLangToLinalgPass() {
-    return std::make_unique<LangToLinalgPass>();
+std::unique_ptr<Pass> createLangToLinalgPass(bool gpuMode) {
+    return std::make_unique<LangToLinalgPass>(gpuMode);
 }
 
 } // namespace aot

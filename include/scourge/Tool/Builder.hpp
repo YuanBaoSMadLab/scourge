@@ -21,9 +21,12 @@ struct BuildOutcome {
     std::filesystem::path exe; ///< 成功时的可执行产物路径
 };
 
-/// 「加载 → 全量检查 → MLIR 生成 → mlir-opt → mlir-translate → clang」一条龙。
-/// 中间产物（.mlir / .conv.mlir / .ll / _rt.c）与可执行文件同目录，便于检视。
+/// 「加载 → 全量检查 → MLIR 生成 → 进程内 MLIR→LLVM IR → clang」一条龙。
+/// 中间产物（.mlir / .ll / _rt.c）与可执行文件同目录，便于检视。
+/// gpuMode：--gpu 开关——GPU 覆盖集 op（f64 静态形状逐元素/matmul/sum/
+/// 转置）在生成代码中优先走 CUDA 动态加载路径，运行时不可用自动回退 CPU。
 BuildOutcome buildOnce(const std::filesystem::path& inPath,
-                       const std::filesystem::path& outPath);
+                       const std::filesystem::path& outPath,
+                       bool gpuMode = false);
 
 } // namespace scourge

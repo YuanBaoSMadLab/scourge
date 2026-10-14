@@ -35,7 +35,9 @@ namespace aot {
 
 /// 创建 Lang → Affine 降级 pass（ModulePass，partial conversion：未覆盖的
 /// lang op 原样保留，由 LangToLinalg / LangToLLVM 兜底）。
-std::unique_ptr<mlir::Pass> createLangToAffinePass();
+/// gpuMode（CUDA 第 1 层）：GPU 覆盖集 op（GpuCover.hpp）跳过本 pass 的
+/// 内联降级，留给 LangToLLVM 换发 @sg_gpu_* 运行时调用。
+std::unique_ptr<mlir::Pass> createLangToAffinePass(bool gpuMode = false);
 
 } // namespace aot
 } // namespace scourge

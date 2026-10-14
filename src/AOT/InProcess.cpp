@@ -61,7 +61,8 @@ namespace scourge {
 namespace aot {
 
 bool convertToLLVMInProcess(const std::string& mlirText,
-                            const std::string& llPath, std::string& diag) {
+                            const std::string& llPath, std::string& diag,
+                            bool gpuMode) {
     mlir::DialectRegistry registry;
     registry.insert<mlir::BuiltinDialect, mlir::func::FuncDialect,
                     mlir::arith::ArithDialect, mlir::cf::ControlFlowDialect,
@@ -106,10 +107,12 @@ bool convertToLLVMInProcess(const std::string& mlirText,
     // 阶段 2e：affine → scf/memref/arith（lower-affine）
     // 阶段 2f：scf → cf
     // 阶段 2g：one-shot MLIR → LLVM dialect（等价 mlir-opt --convert-to-llvm）
+    // gpuMode（CUDA 第 1 层）：GPU 覆盖集 op 跳过 2a/2b 的内联降级，由
+    // 2c 换发 @sg_gpu_*（运行时内部就绪判定 + CPU 回退）。
     mlir::PassManager pm(&ctx);
-    pm.addPass(scourge::aot::createLangToAffinePass());
-    pm.addPass(scourge::aot::createLangToLinalgPass());
-    pm.addPass(scourge::aot::createLangToLLVMPass());
+    pm.addPass(scourge::aot::createLangToAffinePass(gpuMode));
+    pm.addPass(scourge::aot::createLangToLinalgPass(gpuMode));
+    pm.addPass(scourge::aot::createLangToLLVMPass(gpuMode));
     pm.addPass(mlir::createConvertLinalgToLoopsPass());
     pm.addPass(mlir::createLowerAffinePass());
     pm.addPass(mlir::createSCFToControlFlowPass());

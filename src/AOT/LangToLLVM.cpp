@@ -41,6 +41,8 @@
 #include "llvm/ADT/SmallVector.h"
 #include "scourge/AOT/LangOps.h"
 
+#include "GpuCover.hpp"
+
 namespace scourge {
 namespace aot {
 
@@ -217,8 +219,9 @@ std::string deriveDisp(const std::string& sym) {
 
 class LangCallRewrite : public mlir::ConversionPattern {
 public:
-    explicit LangCallRewrite(mlir::MLIRContext* ctx)
-        : mlir::ConversionPattern(mlir::Pattern::MatchAnyOpTypeTag{}, 1, ctx) {}
+    explicit LangCallRewrite(mlir::MLIRContext* ctx, bool gpuMode)
+        : mlir::ConversionPattern(mlir::Pattern::MatchAnyOpTypeTag{}, 1, ctx),
+          gpuMode_(gpuMode) {}
 
     mlir::LogicalResult
     matchAndRewrite(mlir::Operation* op, mlir::ArrayRef<mlir::Value> operands,
@@ -227,6 +230,16 @@ public:
         if (!l) {
             op->emitError("未注册降级规则的 lang op");
             return mlir::failure();
+        }
+        // CUDA 第 1 层：GPU 覆盖集 op 换发 @sg_gpu_*（ABI 与 @sg_* 一致；
+        // 运行时内部做就绪判定，不可用即回退 CPU 实现）。符号派生：
+        // "sg_<rest>" → "sg_gpu_<rest>"。
+        llvm::StringRef sgSym(l->sg);
+        std::string gpuCallee;
+        if (gpuMode_ && gpu::covers(op)) {
+            gpuCallee = "sg_gpu_";
+            gpuCallee += l->sg + 3;
+            sgSym = gpuCallee;
         }
         mlir::Location loc = op->getLoc();
 
@@ -250,12 +263,13 @@ public:
         }
 
         auto call = rewriter.create<mlir::func::CallOp>(
-            loc, mlir::StringRef(l->sg), op->getResultTypes(), args);
+            loc, sgSym, op->getResultTypes(), args);
         rewriter.replaceOp(op, call.getResults());
         return mlir::success();
     }
 
 private:
+    const bool gpuMode_; // CUDA 第 1 层：GPU 覆盖集换发 @sg_gpu_*
     /// 恢复 op 所在函数的 panic 上下文寄存器（fn/file 入口块缓存 + 行号常量）。
     mlir::LogicalResult
     ensurePanicCtx(mlir::Operation* op,
@@ -333,6 +347,8 @@ class LangToLLVMPass
 public:
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LangToLLVMPass)
 
+    explicit LangToLLVMPass(bool gpuMode) : gpuMode_(gpuMode) {}
+
     mlir::StringRef getArgument() const override {
         return "scourge-lang-to-llvm";
     }
@@ -345,8 +361,9 @@ public:
         mlir::MLIRContext* ctx = &getContext();
 
         // 1) 模块级补插 @sg_* 外部声明（kExterns 表搬家；与原 MLIRGen 行为
-        //    一致——全量插入，未用符号无副作用）。
-        declareRuntimeExterns(mod, ctx);
+        //    一致——全量插入，未用符号无副作用）。gpuMode 下补插
+        //    @sg_gpu_* 覆盖集声明（ABI 与对应 @sg_* 一致）。
+        declareRuntimeExterns(mod, ctx, gpuMode_);
 
         // 2) 全量转换：lang 非法；builtin/func/arith/cf/llvm/memref/linalg
         //    /affine 合法——memref/linalg/affine 是前序降级 pass（LangToAffine/
@@ -365,15 +382,17 @@ public:
         target.addIllegalDialect<::scourge::aot::lang::LangDialect>();
 
         mlir::RewritePatternSet patterns(ctx);
-        patterns.add<LangCallRewrite>(ctx);
+        patterns.add<LangCallRewrite>(ctx, gpuMode_);
         if (mlir::failed(
                 mlir::applyFullConversion(mod, target, std::move(patterns))))
             signalPassFailure();
     }
 
 private:
+    const bool gpuMode_; // CUDA 第 1 层：覆盖集换发 @sg_gpu_* 并补插声明
+
     static void declareRuntimeExterns(mlir::ModuleOp mod,
-                                      mlir::MLIRContext* ctx) {
+                                      mlir::MLIRContext* ctx, bool gpuMode) {
         mlir::OpBuilder b(ctx);
         mlir::Location loc = mod.getLoc();
         mlir::OpBuilder::InsertionGuard guard(b);
@@ -388,13 +407,40 @@ private:
                 loc, l.sg, mlir::FunctionType::get(ctx, argTys, retTys));
             fn.setVisibility(mlir::SymbolTable::Visibility::Private);
         }
+        if (!gpuMode) return;
+        // GPU 覆盖集声明（sg_<rest> → sg_gpu_<rest>，ABI 逐一相同）。
+        // 覆盖集固定六类（GpuCover.hpp covers 判定的 op 全集），CPU 同名
+        // 函数仍然补插（未用符号无副作用；非覆盖形态仍需它们兜底）。
+        for (const OpLower& l : kLowerings) {
+            if (std::strncmp(l.lang, "lang.tensor_binop_", 18) != 0 &&
+                std::strcmp(l.lang, "lang.tensor_matmul") != 0 &&
+                std::strcmp(l.lang, "lang.tensor_sum_f") != 0 &&
+                std::strcmp(l.lang, "lang.tensor_transpose") != 0)
+                continue;
+            std::string sym = "sg_gpu_";
+            sym += l.sg + 3;
+            auto fn = b.create<mlir::func::FuncOp>(
+                loc, sym, typeForLowering(ctx, l));
+            fn.setVisibility(mlir::SymbolTable::Visibility::Private);
+        }
+    }
+
+    /// 按 OpLower 构造函数类型（与上方主循环的展开等价的辅助）。
+    static mlir::FunctionType typeForLowering(mlir::MLIRContext* ctx,
+                                              const OpLower& l) {
+        mlir::SmallVector<mlir::Type> argTys;
+        for (const char* c = l.externArgs; *c; ++c)
+            argTys.push_back(typeForCode(ctx, *c));
+        mlir::SmallVector<mlir::Type> retTys;
+        if (l.ret != 'v') retTys.push_back(typeForCode(ctx, l.ret));
+        return mlir::FunctionType::get(ctx, argTys, retTys);
     }
 };
 
 } // namespace
 
-std::unique_ptr<mlir::Pass> createLangToLLVMPass() {
-    return std::make_unique<LangToLLVMPass>();
+std::unique_ptr<mlir::Pass> createLangToLLVMPass(bool gpuMode) {
+    return std::make_unique<LangToLLVMPass>(gpuMode);
 }
 
 } // namespace aot

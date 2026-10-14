@@ -38,6 +38,7 @@
 #include "scourge/AOT/LangOps.h"
 
 #include "TensorBridge.hpp"
+#include "GpuCover.hpp"
 
 namespace scourge {
 namespace aot {
@@ -290,6 +291,8 @@ class LangToAffinePass
 public:
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LangToAffinePass)
 
+    explicit LangToAffinePass(bool gpuMode) : gpuMode_(gpuMode) {}
+
     StringRef getArgument() const override { return "scourge-lang-to-affine"; }
     StringRef getDescription() const override {
         return "Scourge Lang 张量逐元素/归约/转置 op（带静态形状属性）"
@@ -307,6 +310,7 @@ public:
     void runOnOperation() override {
         ModuleOp mod = getOperation();
         MLIRContext* ctx = &getContext();
+        const bool gpuMode = gpuMode_;
 
         declareBridgeExterns(mod);
 
@@ -321,13 +325,15 @@ public:
         target.addLegalDialect<::scourge::aot::lang::LangDialect>();
         // 覆盖集 op 仅在携带完整形状属性时非法（动态合法回调：缺任一
         // 属性 → legal，由后段兜底；属性齐全 → 本 pass 消费。panic 语义
-        // 零分叉）。注意：initializer_list 是临时数组视图，须在
-        // missingAttrs 存活期内拷贝为值语义容器再捕获，否则内层 lambda
-        // 读悬垂内存（曾致 hasAttr 误判 → 覆盖集全部漏判 legal → 静默
-        // 回退 sg_*）。
-        auto missingAttrs = [](std::initializer_list<llvm::StringRef> names) {
+        // 零分叉）。gpuMode：GPU 覆盖集 op（GpuCover.hpp，f64 静态形状）
+        // 一律 legal——留给 LangToLLVM 换发 @sg_gpu_*。注意：
+        // initializer_list 是临时数组视图，须在 missingAttrs 存活期内
+        // 拷贝为值语义容器再捕获，否则内层 lambda 读悬垂内存（曾致
+        // hasAttr 误判 → 覆盖集全部漏判 legal → 静默回退 sg_*）。
+        auto missingAttrs = [gpuMode](std::initializer_list<llvm::StringRef> names) {
             llvm::SmallVector<llvm::StringRef, 4> ns(names);
-            return [ns = std::move(ns)](Operation* op) {
+            return [ns = std::move(ns), gpuMode](Operation* op) {
+                if (gpuMode && gpu::covers(op)) return true; // GPU 接管 → 跳过
                 for (llvm::StringRef n : ns)
                     if (!op->hasAttr(n)) return true; // 未覆盖形态 → legal
                 return false; // 属性齐全 → 非法 → 降级
@@ -346,12 +352,15 @@ public:
         if (failed(applyPartialConversion(mod, target, std::move(patterns))))
             signalPassFailure();
     }
+
+private:
+    const bool gpuMode_; // CUDA 第 1 层：GPU 覆盖集跳过内联降级
 };
 
 } // namespace
 
-std::unique_ptr<Pass> createLangToAffinePass() {
-    return std::make_unique<LangToAffinePass>();
+std::unique_ptr<Pass> createLangToAffinePass(bool gpuMode) {
+    return std::make_unique<LangToAffinePass>(gpuMode);
 }
 
 } // namespace aot
