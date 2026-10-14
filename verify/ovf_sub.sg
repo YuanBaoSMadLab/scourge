@@ -1,0 +1,6 @@
+# ovf_sub.sg — 减法溢出探针（双模 panic 一致性）
+def main() -> int:
+    x = -9223372036854775807 - 1
+    y = x - 1
+    print(y)
+    return 0

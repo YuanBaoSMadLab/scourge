@@ -1,0 +1,7 @@
+# dvz_float.sg — 浮点除零探针（双模 panic 一致性）
+def main() -> int:
+    a = 1.0
+    b = 0.0
+    c = a / b
+    print(c)
+    return 0

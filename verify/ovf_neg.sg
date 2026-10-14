@@ -1,0 +1,6 @@
+# ovf_neg.sg — 取负溢出探针（双模 panic 一致性）
+def main() -> int:
+    x = -9223372036854775807 - 1
+    y = -x
+    print(y)
+    return 0

@@ -1,0 +1,9 @@
+# ovf_try.sg — try/except 捕获内联溢出 panic（双模一致）
+def main() -> int:
+    try:
+        x = 9223372036854775807
+        y = x + x
+        print(y)
+    except:
+        print("caught")
+    return 0

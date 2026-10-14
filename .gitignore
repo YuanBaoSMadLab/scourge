@@ -5,6 +5,10 @@ examples/
 tests/
 bin/
 release/
+dev_feedback/
+book/
+codebuddytest/
+.workbuddy/
 
 # CMake configure 过程泄漏的 tablegen 生成头（非仓库源码）
 include/mlir/

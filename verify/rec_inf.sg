@@ -1,0 +1,6 @@
+# rec_inf.sg — 无限递归：VM 侧护栏验证（调用深度超限 panic）
+def f(n: int) -> int:
+    return f(n + 1)
+
+def main() -> int:
+    return f(0)

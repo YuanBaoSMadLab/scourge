@@ -325,6 +325,10 @@ Value VM::pop() {
 void VM::push(Value v) { frames_.back().stack.push_back(std::move(v)); }
 
 void VM::doReturn(Value v) {
+    // 帧入池（保留 locals/stack 容量）——深递归/调用密集场景不再反复堆分配。
+    // 池上限取 maxDepth：帧总数受调用深度护栏约束，池不会无限增长。
+    if (freeFrames_.size() < opts_.maxDepth)
+        freeFrames_.push_back(std::move(frames_.back()));
     frames_.pop_back();
     // return 可能发生在 try 体内 → 清理随之失效的 catch 记录。
     while (!catches_.empty() && catches_.back().frameIndex >= frames_.size())
@@ -338,6 +342,17 @@ void VM::doReturn(Value v) {
 // ----------------------------------------------------------------------------
 // 调用
 // ----------------------------------------------------------------------------
+
+VM::Frame VM::takeFreeFrame() {
+    Frame fr;
+    if (!freeFrames_.empty()) {
+        fr = std::move(freeFrames_.back());
+        freeFrames_.pop_back();
+    }
+    fr.pc = 0;
+    fr.stack.clear(); // 析构旧值（引用计数正确回落），缓冲容量保留
+    return fr;
+}
 
 void VM::callFunc(int fidx, uint32_t argc) {
     const FuncBC& fn = program_.funcs[static_cast<size_t>(fidx)];
@@ -362,7 +377,7 @@ void VM::callFunc(int fidx, uint32_t argc) {
 
     if (frames_.empty()) {
         // 根调用（<top> / main 直启）：无调用者栈，实参只能来自缺省值。
-        Frame fr;
+        Frame fr = takeFreeFrame();
         fr.fn = &fn;
         fr.locals.resize(fn.nlocals);
         for (uint32_t k = argc; k < fn.paramCount; ++k) {
@@ -378,7 +393,7 @@ void VM::callFunc(int fidx, uint32_t argc) {
     Frame& caller = frames_.back();
     if (caller.stack.size() < argc) panicHere("VM 内部错误：实参栈下溢");
 
-    Frame fr;
+    Frame fr = takeFreeFrame();
     fr.fn = &fn;
     fr.locals.resize(fn.nlocals);
     size_t base = caller.stack.size() - argc;
@@ -644,6 +659,39 @@ void VM::dispatch(Instr in) {
     case Op::BinOp: {
         Value r = pop();
         Value l = pop();
+        // Int×Int 快路径：标量循环/递归的热点，绕过 doBinOp 的通用类型分派链。
+        // 覆盖 add/sub/mul（溢出 panic 文本与 doBinOp 逐字一致）与六种比较；
+        // 除法族/Pow/And/Or/In 及非 Int 操作数一律走通用路径，语义零分叉。
+        if (l.kind == Value::Kind::Int && r.kind == Value::Kind::Int) {
+            const int64_t x = l.i, y = r.i;
+            switch (static_cast<Bin>(in.a)) {
+            case Bin::Add: {
+                int64_t o;
+                if (__builtin_add_overflow(x, y, &o)) panicHere("整数加法溢出");
+                push(Value::makeInt(o));
+                return;
+            }
+            case Bin::Sub: {
+                int64_t o;
+                if (__builtin_sub_overflow(x, y, &o)) panicHere("整数减法溢出");
+                push(Value::makeInt(o));
+                return;
+            }
+            case Bin::Mul: {
+                int64_t o;
+                if (__builtin_mul_overflow(x, y, &o)) panicHere("整数乘法溢出");
+                push(Value::makeInt(o));
+                return;
+            }
+            case Bin::Lt: push(Value::makeBool(x < y)); return;
+            case Bin::Le: push(Value::makeBool(x <= y)); return;
+            case Bin::Gt: push(Value::makeBool(x > y)); return;
+            case Bin::Ge: push(Value::makeBool(x >= y)); return;
+            case Bin::Eq: push(Value::makeBool(x == y)); return;
+            case Bin::Ne: push(Value::makeBool(x != y)); return;
+            default: break; // 其余走 doBinOp
+            }
+        }
         push(doBinOp(static_cast<Bin>(in.a), l, r));
         return;
     }

@@ -1,0 +1,15 @@
+# bench_fib.sg — 递归函数调用基准（测 VM 帧分配与调用路径开销）
+# fib(28) ≈ 632k 次调用，递归深度 28（maxDepth 200 内）
+# 预期输出两行：317811 与耗时秒数
+def fib(n: int) -> int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def main() -> int:
+    t0 = now()
+    r = fib(28)
+    t1 = now()
+    print(r)
+    print("elapsed_s=" + str(t1 - t0))
+    return 0

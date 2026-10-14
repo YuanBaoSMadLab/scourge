@@ -13,6 +13,12 @@
 //  * fn/file 字符串全局（llvm.mlir.global internal constant）按 func 缓存，
 //    addressof 插入函数入口块——复刻原 MLIRGen panicCtx 的入口寄存器模型。
 //
+//  标量整数 add/sub/mul/neg 特例：IR 内联展开（llvm.sadd/ssub/smul.with.
+//  overflow + 条件 panic 块）而非 @sg_* 调用——纯标量热路径的跨 TU 函数
+//  调用 clang 无法内联，是 AOT 标量性能落后手写 C 的全部来源（实测
+//  bench_loop 11 倍差距；内联后与 C 持平）。溢出消息文本与 VM doBinOp /
+//  运行时 sg_*_i64 逐字一致，双模 panic 输出逐字节相同。
+//
 //  模块级补插全部 @sg_* 外部声明（kExterns 表搬家；未用符号无副作用）。
 //  全量转换（applyFullConversion）：任何未覆盖的 lang op 都会使转换显式失败，
 //  禁止静默残留——与"张量静默降级禁止"同一纪律。
@@ -22,12 +28,16 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <utility>
+
+#include <array>
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h" // v23 快照无独立 Affine.h；方言声明随此头提供
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h" // cf::CondBranchOp（方言头只含声明）
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -214,6 +224,248 @@ std::string deriveDisp(const std::string& sym) {
 }
 
 // ============================================================================
+// panic 上下文共享辅助（LangCallRewrite / LangInlineIntRewrite 共用）
+// ============================================================================
+
+/// func → 入口块 (fn, file) 寄存器缓存（单线程转换，pattern 生命周期内有效）。
+using PanicCtxCache =
+    llvm::DenseMap<mlir::Operation*, std::pair<mlir::Value, mlir::Value>>;
+
+/// 入口字符串全局：NUL 结尾的 i8 数组（internal constant，与原
+/// MLIRGen::internStr 产物等价）。
+void createStrGlobal(mlir::OpBuilder& b, mlir::Location loc,
+                     const std::string& sym, const std::string& text) {
+    mlir::MLIRContext* ctx = b.getContext();
+    auto i8Ty = b.getI8Type();
+    auto arrTy = mlir::LLVM::LLVMArrayType::get(i8Ty, text.size() + 1);
+    b.create<mlir::LLVM::GlobalOp>(loc, arrTy, /*isConstant=*/true,
+                                   mlir::LLVM::Linkage::Internal, sym,
+                                   mlir::StringAttr::get(ctx, text + '\0'));
+}
+
+/// 恢复 op 所在函数的 panic 上下文寄存器（fn/file 入口块缓存 + 行号常量）。
+mlir::LogicalResult
+ensurePanicCtx(mlir::Operation* op, mlir::ConversionPatternRewriter& rewriter,
+               PanicCtxCache& cache, mlir::Value& fnVal, mlir::Value& fileVal,
+               mlir::Value& lineVal) {
+    auto loc = mlir::dyn_cast<mlir::FileLineColLoc>(op->getLoc());
+    auto fn = op->getParentOfType<mlir::func::FuncOp>();
+    if (!loc || !fn) {
+        op->emitError("lang op 缺少 FileLineColLoc 或父函数，"
+                      "无法恢复 panic 上下文");
+        return mlir::failure();
+    }
+
+    auto it = cache.find(fn.getOperation());
+    if (it == cache.end()) {
+        mlir::MLIRContext* ctx = op->getContext();
+        mlir::ModuleOp mod = fn->getParentOfType<mlir::ModuleOp>();
+        mlir::Type ptrTy = mlir::LLVM::LLVMPointerType::get(ctx);
+        std::string fnName = deriveDisp(fn.getName().str());
+        std::string fileName = loc.getFilename().getValue().str();
+        std::string fnSym = ".sg_pfn_" + fn.getName().str();
+        std::string fileSym = ".sg_pfile_" + sanSym(fileName);
+
+        mlir::OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(mod.getBody());
+        if (!mlir::SymbolTable::lookupSymbolIn(mod, fileSym))
+            createStrGlobal(rewriter, loc, fileSym, fileName);
+        if (!mlir::SymbolTable::lookupSymbolIn(mod, fnSym))
+            createStrGlobal(rewriter, loc, fnSym, fnName);
+        rewriter.setInsertionPointToStart(&fn.getBody().front());
+        mlir::Value f = rewriter.create<mlir::LLVM::AddressOfOp>(
+            loc, ptrTy, mlir::FlatSymbolRefAttr::get(ctx, fnSym));
+        mlir::Value fl = rewriter.create<mlir::LLVM::AddressOfOp>(
+            loc, ptrTy, mlir::FlatSymbolRefAttr::get(ctx, fileSym));
+        it = cache.try_emplace(fn.getOperation(), f, fl).first;
+    }
+    fnVal = it->second.first;
+    fileVal = it->second.second;
+    lineVal = rewriter.create<mlir::arith::ConstantOp>(
+        op->getLoc(), rewriter.getI64Type(),
+        rewriter.getI64IntegerAttr(static_cast<int64_t>(loc.getLine())));
+    return mlir::success();
+}
+
+// ============================================================================
+// 降级 pattern：标量整数 addi/subi/muli/negi 的 IR 内联展开
+// ----------------------------------------------------------------------------
+// 纯标量热路径（循环/递归体逐行执行）的跨 TU @sg_* 调用 clang 无法内联，
+// 在 op 层直接展开为溢出 intrinsic + 条件分支 panic 块（panic 块仍调
+// @sg_panic，fn/file/line 上下文与消息文本双模逐字一致）。取负的溢出
+// 条件是 v == INT64_MIN（与 VM doNeg / sg_neg_i64 一致），结果 0 - v 在
+// 非溢出路径无 UB。GPU 覆盖集不含标量算术（仅张量 op），无路径冲突。
+// ============================================================================
+
+/// ExtractValueOp 位置常量：{0}=结果，{1}=溢出标志。
+constexpr int64_t kPosRes[] = {0};
+constexpr int64_t kPosFlag[] = {1};
+
+class LangInlineIntRewrite : public mlir::ConversionPattern {
+public:
+    explicit LangInlineIntRewrite(mlir::MLIRContext* ctx)
+        : mlir::ConversionPattern(mlir::Pattern::MatchAnyOpTypeTag{}, 10, ctx) {
+    }
+
+    mlir::LogicalResult
+    matchAndRewrite(mlir::Operation* op, mlir::ArrayRef<mlir::Value> operands,
+                    mlir::ConversionPatternRewriter& rewriter) const override {
+        const Kind kind = kindOf(op->getName().getStringRef());
+        if (kind == Kind::Other)
+            return mlir::failure(); // 非目标 op：让位 LangCallRewrite（低 benefit）
+        mlir::Location loc = op->getLoc();
+        mlir::MLIRContext* ctx = op->getContext();
+        mlir::Type i64Ty = rewriter.getI64Type();
+        mlir::Type i1Ty = rewriter.getI1Type();
+
+        // 框架已把插入点置于 op 前——先取所在块与位置（后续 panic 辅助会
+        // 挪动插入点；cf::AssertOp 降级同款结构）
+        mlir::Block* opBlock = rewriter.getInsertionBlock();
+        mlir::Block::iterator opPosition = rewriter.getInsertionPoint();
+
+        // panic 上下文与溢出消息全局（消息常量在模块级；AddressOf 必须
+        // 在函数入口块——与 fn/file 寄存器同模型，use 与定义同 region）
+        mlir::Value fnVal, fileVal, lineVal;
+        if (failed(ensurePanicCtx(op, rewriter, ctxCache_, fnVal, fileVal,
+                                  lineVal)))
+            return mlir::failure();
+        mlir::Value msgVal = ensureMsgGlobal(op, rewriter, kind);
+
+        // 分裂：opPosition 之后的一切（含 op 本体）进 contBlock；op 由
+        // replaceOp 删除，其结果的使用替换为 opBlock 内的新计算值
+        //（opBlock 经 cond_br 支配 contBlock，支配关系成立）
+        mlir::Block* contBlock = rewriter.splitBlock(opBlock, opPosition);
+
+        // panic 块（call @sg_panic + unreachable，region 末尾追加）
+        mlir::Block* panicBlock = rewriter.createBlock(opBlock->getParent());
+        rewriter.create<mlir::func::CallOp>(
+            loc, "sg_panic", mlir::TypeRange{},
+            mlir::ValueRange{fnVal, fileVal, lineVal, msgVal});
+        rewriter.create<mlir::LLVM::UnreachableOp>(loc);
+
+        // 溢出计算 + 标志（opBlock 尾部；随后 cond_br 接管终结符位置）
+        rewriter.setInsertionPointToEnd(opBlock);
+        mlir::Value flag; // true → panic
+        mlir::Value res;  // 运算结果
+        switch (kind) {
+        case Kind::Add:
+        case Kind::Sub:
+        case Kind::Mul: {
+            auto structTy = mlir::LLVM::LLVMStructType::getLiteral(
+                ctx, {i64Ty, i1Ty}, /*isPacked=*/false);
+            mlir::Value ovf;
+            switch (kind) {
+            case Kind::Add:
+                ovf = rewriter.create<mlir::LLVM::SAddWithOverflowOp>(
+                    loc, structTy, operands[0], operands[1]);
+                break;
+            case Kind::Sub:
+                ovf = rewriter.create<mlir::LLVM::SSubWithOverflowOp>(
+                    loc, structTy, operands[0], operands[1]);
+                break;
+            default:
+                ovf = rewriter.create<mlir::LLVM::SMulWithOverflowOp>(
+                    loc, structTy, operands[0], operands[1]);
+                break;
+            }
+            res = rewriter.create<mlir::LLVM::ExtractValueOp>(loc, i64Ty, ovf,
+                                                              kPosRes);
+            flag = rewriter.create<mlir::LLVM::ExtractValueOp>(loc, i1Ty, ovf,
+                                                               kPosFlag);
+            break;
+        }
+        case Kind::Neg: {
+            auto minC = rewriter.create<mlir::arith::ConstantOp>(
+                loc, i64Ty,
+                rewriter.getI64IntegerAttr(
+                    std::numeric_limits<int64_t>::min()));
+            auto zero = rewriter.create<mlir::arith::ConstantOp>(
+                loc, i64Ty, rewriter.getI64IntegerAttr(0));
+            flag = rewriter.create<mlir::LLVM::ICmpOp>(
+                loc, i1Ty, mlir::LLVM::ICmpPredicate::eq, operands[0], minC);
+            res = rewriter.create<mlir::LLVM::SubOp>(loc, i64Ty, zero,
+                                                     operands[0]);
+            break;
+        }
+        case Kind::Other:
+            break; // 入口已排除，不可达
+        }
+
+        // 条件分支：溢出 → panic 块；否则 → contBlock
+        rewriter.create<mlir::cf::CondBranchOp>(loc, flag, panicBlock,
+                                                contBlock);
+        rewriter.replaceOp(op, res);
+        return mlir::success();
+    }
+
+private:
+    enum class Kind { Add, Sub, Mul, Neg, Other };
+
+    /// 溢出消息全局：模块级补插 NUL 结尾常量（未用即缺），并返回函数入口
+    /// 块内的 AddressOf 寄存器（按 func × 消息缓存，与 fn/file 同模型）。
+    mlir::Value ensureMsgGlobal(mlir::Operation* op,
+                                mlir::ConversionPatternRewriter& rewriter,
+                                Kind kind) const {
+        const unsigned idx = static_cast<unsigned>(kind);
+        auto loc = op->getLoc();
+        auto fn = op->getParentOfType<mlir::func::FuncOp>();
+        auto it = msgCache_.find(fn.getOperation());
+        if (it == msgCache_.end())
+            it = msgCache_.try_emplace(fn.getOperation()).first;
+        mlir::MLIRContext* ctx = op->getContext();
+        if (!it->second[idx]) {
+            mlir::ModuleOp mod = fn->getParentOfType<mlir::ModuleOp>();
+            mlir::Type ptrTy = mlir::LLVM::LLVMPointerType::get(ctx);
+            {
+                mlir::OpBuilder::InsertionGuard guard(rewriter);
+                rewriter.setInsertionPointToStart(mod.getBody());
+                if (!mlir::SymbolTable::lookupSymbolIn(mod, msgSym(kind)))
+                    createStrGlobal(rewriter, loc, msgSym(kind), msgText(kind));
+            }
+            rewriter.setInsertionPointToStart(&fn.getBody().front());
+            it->second[idx] = rewriter.create<mlir::LLVM::AddressOfOp>(
+                loc, ptrTy, mlir::FlatSymbolRefAttr::get(ctx, msgSym(kind)));
+        }
+        return it->second[idx];
+    }
+
+    static Kind kindOf(llvm::StringRef name) {
+        if (name == "lang.addi") return Kind::Add;
+        if (name == "lang.subi") return Kind::Sub;
+        if (name == "lang.muli") return Kind::Mul;
+        if (name == "lang.negi") return Kind::Neg;
+        return Kind::Other;
+    }
+
+    /// 溢出消息全局符号（模块级确定性命名，两函数共享同一常量）。
+    static std::string msgSym(Kind k) {
+        switch (k) {
+        case Kind::Add: return ".sg_msg_addov";
+        case Kind::Sub: return ".sg_msg_subov";
+        case Kind::Mul: return ".sg_msg_mulov";
+        case Kind::Neg: return ".sg_msg_negov";
+        default: return "";
+        }
+    }
+
+    /// 溢出消息文本（与 VM doBinOp / doNeg / 运行时 sg_*_i64 逐字一致）。
+    static std::string msgText(Kind k) {
+        switch (k) {
+        case Kind::Add: return "整数加法溢出";
+        case Kind::Sub: return "整数减法溢出";
+        case Kind::Mul: return "整数乘法溢出";
+        case Kind::Neg: return "整数取负溢出";
+        default: return "";
+        }
+    }
+
+    mutable PanicCtxCache ctxCache_;
+    /// func → 四条溢出消息的入口 AddressOf 寄存器（[Add,Sub,Mul,Neg]）。
+    mutable llvm::DenseMap<mlir::Operation*, std::array<mlir::Value, 4>>
+        msgCache_;
+};
+
+// ============================================================================
 // 降级 pattern：每个 lang op → func.call @sg_*
 // ============================================================================
 
@@ -243,10 +495,11 @@ public:
         }
         mlir::Location loc = op->getLoc();
 
-        // panic 上下文（fn/file/line）恢复
+        // panic 上下文（fn/file/line）恢复（与内联 pattern 共享基建）
         mlir::Value fnVal, fileVal, lineVal;
         if (l->hasCtx &&
-            failed(ensurePanicCtx(op, rewriter, fnVal, fileVal, lineVal)))
+            failed(ensurePanicCtx(op, rewriter, ctxCache_, fnVal, fileVal,
+                                  lineVal)))
             return mlir::failure();
 
         mlir::SmallVector<mlir::Value> args;
@@ -270,67 +523,7 @@ public:
 
 private:
     const bool gpuMode_; // CUDA 第 1 层：GPU 覆盖集换发 @sg_gpu_*
-    /// 恢复 op 所在函数的 panic 上下文寄存器（fn/file 入口块缓存 + 行号常量）。
-    mlir::LogicalResult
-    ensurePanicCtx(mlir::Operation* op,
-                   mlir::ConversionPatternRewriter& rewriter, mlir::Value& fnVal,
-                   mlir::Value& fileVal, mlir::Value& lineVal) const {
-        auto loc = mlir::dyn_cast<mlir::FileLineColLoc>(op->getLoc());
-        auto fn = op->getParentOfType<mlir::func::FuncOp>();
-        if (!loc || !fn) {
-            op->emitError("lang op 缺少 FileLineColLoc 或父函数，"
-                          "无法恢复 panic 上下文");
-            return mlir::failure();
-        }
-
-        auto it = ctxCache_.find(fn.getOperation());
-        if (it == ctxCache_.end()) {
-            mlir::MLIRContext* ctx = op->getContext();
-            mlir::ModuleOp mod = fn->getParentOfType<mlir::ModuleOp>();
-            mlir::Type ptrTy = mlir::LLVM::LLVMPointerType::get(ctx);
-            std::string fnName = deriveDisp(fn.getName().str());
-            std::string fileName = loc.getFilename().getValue().str();
-            std::string fnSym = ".sg_pfn_" + fn.getName().str();
-            std::string fileSym = ".sg_pfile_" + sanSym(fileName);
-
-            mlir::OpBuilder::InsertionGuard guard(rewriter);
-            rewriter.setInsertionPointToStart(mod.getBody());
-            if (!mlir::SymbolTable::lookupSymbolIn(mod, fileSym))
-                createStrGlobal(rewriter, loc, fileSym, fileName);
-            if (!mlir::SymbolTable::lookupSymbolIn(mod, fnSym))
-                createStrGlobal(rewriter, loc, fnSym, fnName);
-            rewriter.setInsertionPointToStart(&fn.getBody().front());
-            mlir::Value f = rewriter.create<mlir::LLVM::AddressOfOp>(
-                loc, ptrTy, mlir::FlatSymbolRefAttr::get(ctx, fnSym));
-            mlir::Value fl = rewriter.create<mlir::LLVM::AddressOfOp>(
-                loc, ptrTy, mlir::FlatSymbolRefAttr::get(ctx, fileSym));
-            it = ctxCache_.try_emplace(fn.getOperation(), f, fl).first;
-        }
-        fnVal = it->second.first;
-        fileVal = it->second.second;
-        lineVal = rewriter.create<mlir::arith::ConstantOp>(
-            op->getLoc(), rewriter.getI64Type(),
-            rewriter.getI64IntegerAttr(static_cast<int64_t>(loc.getLine())));
-        return mlir::success();
-    }
-
-    /// 入口字符串全局：NUL 结尾的 i8 数组（internal constant，与原
-    /// MLIRGen::internStr 产物等价）。
-    void createStrGlobal(mlir::ConversionPatternRewriter& rewriter,
-                         mlir::Location loc, const std::string& sym,
-                         const std::string& text) const {
-        mlir::MLIRContext* ctx = rewriter.getContext();
-        auto i8Ty = rewriter.getI8Type();
-        auto arrTy = mlir::LLVM::LLVMArrayType::get(i8Ty, text.size() + 1);
-        rewriter.create<mlir::LLVM::GlobalOp>(
-            loc, arrTy, /*isConstant=*/true, mlir::LLVM::Linkage::Internal, sym,
-            mlir::StringAttr::get(ctx, text + '\0'));
-    }
-
-    /// func → 入口块 (fn, file) 寄存器缓存（单线程转换，pattern 生命周期内有效）。
-    mutable llvm::DenseMap<mlir::Operation*,
-                           std::pair<mlir::Value, mlir::Value>>
-        ctxCache_;
+    mutable PanicCtxCache ctxCache_;
 };
 
 } // namespace
@@ -382,6 +575,9 @@ public:
         target.addIllegalDialect<::scourge::aot::lang::LangDialect>();
 
         mlir::RewritePatternSet patterns(ctx);
+        // 标量 int add/sub/mul/neg 优先 IR 内联（benefit 10，非目标 op 返回
+        // failure 自动让位）；其余 lang op 走 @sg_* 运行时调用。
+        patterns.add<LangInlineIntRewrite>(ctx);
         patterns.add<LangCallRewrite>(ctx, gpuMode_);
         if (mlir::failed(
                 mlir::applyFullConversion(mod, target, std::move(patterns))))

@@ -1,0 +1,16 @@
+# bench_call.sg — 函数调用密集基准（2e6 次小函数调用 + while 循环）
+# 预期输出两行：2000000 与耗时秒数
+def inc(x: int) -> int:
+    return x + 1
+
+def main() -> int:
+    t0 = now()
+    s = 0
+    i = 0
+    while i < 2000000:
+        s = inc(s)
+        i = i + 1
+    t1 = now()
+    print(s)
+    print("elapsed_s=" + str(t1 - t0))
+    return 0

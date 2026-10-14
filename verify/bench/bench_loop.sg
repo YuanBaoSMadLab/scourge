@@ -1,0 +1,13 @@
+# bench_loop.sg — 纯标量循环基准（1e8 次 int 加法，AOT vs C 对齐用）
+# 预期输出两行：4999999950000000 与耗时秒数
+def main() -> int:
+    t0 = now()
+    s = 0
+    i = 0
+    while i < 100000000:
+        s = s + i
+        i = i + 1
+    t1 = now()
+    print(s)
+    print("elapsed_s=" + str(t1 - t0))
+    return 0

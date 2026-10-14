@@ -73,6 +73,7 @@ private:
     // ---- 调用 ------------------------------------------------------------------
     void callFunc(int fidx, uint32_t argc); ///< 内建直执行 / 用户函数压帧
     void doBuiltin(const FuncBC& fn, uint32_t argc);
+    Frame takeFreeFrame(); ///< 自帧池取帧复用（重置 pc、清操作数栈、保留容量）
 
     // ---- 运算（panic 语义集中在此） ---------------------------------------------
     Value doBinOp(Bin op, const Value& l, const Value& r);
@@ -106,6 +107,7 @@ private:
     Program program_;
     VMOptions opts_;
     std::vector<Frame> frames_;
+    std::vector<Frame> freeFrames_; ///< 弹出帧池：复用 locals/stack 容量，深递归零堆分配
     std::vector<CatchPoint> catches_;
     std::vector<Value> globals_; ///< 与 program_.globalNames 对齐
     Value lastReturn_;           ///< 最外层帧的返回值（main 的返回值）

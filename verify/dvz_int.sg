@@ -1,0 +1,7 @@
+# dvz_int.sg — 整数除零探针（双模 panic 一致性）
+def main() -> int:
+    a = 1
+    b = 0
+    c = a // b
+    print(c)
+    return 0
