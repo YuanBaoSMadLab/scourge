@@ -3,8 +3,9 @@
 //  Scourge 编译器 — 类型/形状/契约检查器（设计文档第四章，Stage B 核心）
 // ----------------------------------------------------------------------------
 //  职责与纪律：
-//  * 局部推断：变量从初始化表达式推断；函数（模块级）返回类型必须显式注解
-//    ——这是 ".sgi" 接口先行消费的前提（设计文档第六章第 3 条）。
+//  * 局部推断：变量从初始化表达式推断；模块级函数返回类型可由 return
+//    语句推断（0.9.2：多分支取数值宽化、无 return 为 None、递归/前向
+//    引用须显式注解）——推断完成即回填 .sgi 接口（设计文档第六章第 3 条）。
 //  * 形状检查：Tensor 逐维统一（"?" 动态维吸收具体维），静态不一致即 E2004。
 //  * 契约：requires 可静态验证子句在调用点常量求值（E3001）；
 //    不可静态验证子句降级为运行时断言并告警（W3001）。
@@ -17,6 +18,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "scourge/Common/Diagnostic.hpp"
@@ -32,6 +34,7 @@ struct FuncSig {
     TypePtr ret;
     size_t requiredArgs = 0; ///< 无默认值的参数个数（其余在尾部有默认值）
     bool isPure = false;
+    bool retPending = false; ///< 返回类型待推断（无注解，由 return 语句统一）
 
     /// 契约子句引用（表达式借用自 AST，生命周期由 Module 持有保证）。
     struct ContractRef {
@@ -73,6 +76,12 @@ public:
     /// 取走本轮检查积累的表达式类型注解表（move 语义；检查器实例即弃）。
     ExprTypeMap takeExprTypes() { return std::move(exprTypes_); }
 
+    /// 需要在存储/传参/返回/缺省值边界做 int→float 提升的表达式
+    /// （Q3 双模一致：VM 侧据此插转换，与 AOT storeTo 的 sitofp 对齐）。
+    std::unordered_set<const Expr*> takePromoteF64() {
+        return std::move(promoteF64_);
+    }
+
 private:
     // ---- 作用域 ---------------------------------------------------------------
     struct VarSym {
@@ -93,6 +102,12 @@ private:
                 if (f != it->end()) return &f->second;
             }
             return nullptr;
+        }
+        /// 仅查最内层（函数层）绑定——for 循环变量复用判定用：
+        /// 与外层（模块全局/导入名）同名属正常遮蔽，不算冲突。
+        const VarSym* findInBack(const std::string& name) const {
+            auto f = stack_.back().find(name);
+            return f == stack_.back().end() ? nullptr : &f->second;
         }
     private:
         std::vector<std::unordered_map<std::string, VarSym>> stack_;
@@ -142,10 +157,13 @@ private:
     Scope scope_;
     std::map<std::string, FuncSig> localFuncs_;
     TypePtr fnRet_ = tyErr();       ///< 当前函数返回类型
+    /// 返回类型推断中收集的 (return 值表达式, 值类型)——Q10 统一用
+    std::vector<std::pair<const Expr*, TypePtr>> pendingReturns_;
     int loopDepth_ = 0;
     bool inAsyncFn_ = false;        ///< 当前函数是否 async def（await 合法性）
     bool checkingEnsures_ = false;  ///< ensures 检查时绑定 result
     ExprTypeMap exprTypes_;         ///< 表达式类型注解表（单一事实源，见上）
+    std::unordered_set<const Expr*> promoteF64_; ///< 边界 int→float 提升集
 };
 
 } // namespace scourge

@@ -129,6 +129,7 @@ enum class Op : uint8_t {
     ForNext,     ///< a=tmp 槽, b=counter 槽 → 压入下一元素 + true，或仅压入 false（结束）
     MatMul,      ///< 两操作数（二维张量）→ 矩阵乘 (m, k) @ (k, n) → (m, n)
     NewTensor,   ///< b=元素个数 → 全标量压成一维张量 / 全张量行拼接升一维
+    IntToFloat,  ///< 弹出 int 压入等值 float（Q3 边界提升；追加于尾部，字节码兼容）
 };
 
 enum class Bin : uint8_t {

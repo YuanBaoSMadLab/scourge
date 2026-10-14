@@ -149,16 +149,45 @@ void DiagEngine::emitText(std::string& out) const {
         out += "\n";
 
         // 源码引用行（单行区间才展示插入符；跨行区间只给首行）。
+        // Q13：超长源行截断展示——保留插入符列的可见窗口（列前 20 字节
+        // 上下文），UTF-8 续字节边界对齐；JSON 通道不受影响（携带完整区间）。
         if (d.file != kInvalidFile && d.range.length > 0) {
             LineCol beg = src_.lineCol(d.file, d.range.offset);
             std::string line = src_.lineText(d.file, beg.line);
+            constexpr size_t kMaxShow = 200; ///< 展示窗口上限（字节）
+            constexpr size_t kHead = 160;    ///< 首选窗口宽度（插入符靠前时）
+            size_t col0 = beg.col - 1;       // 0 基列号（字节）
+            size_t start = 0, end = line.size();
+            bool truncated = false;
+            auto snapUtf8 = [&line](size_t p) {
+                while (p > 0 &&
+                       (static_cast<unsigned char>(line[p]) & 0xC0) == 0x80)
+                    --p;
+                return p;
+            };
+            if (line.size() > kMaxShow) {
+                truncated = true;
+                if (col0 < kHead) {
+                    end = snapUtf8(kHead);
+                } else {
+                    start = snapUtf8(col0 - 20); // 插入符列前留上下文
+                    end = snapUtf8(start + kMaxShow);
+                }
+                if (end <= start) { start = 0; end = kMaxShow; }
+                line = line.substr(start, end - start);
+            }
             // 行号 gutter 宽度对齐。
             std::snprintf(numbuf, sizeof(numbuf), "%u", beg.line);
             std::string gutterPad(numbuf);
-            out += "  " + gutterPad + " | " + line + "\n";
-            std::string pad(beg.col - 1, ' ');
+            std::string prefix = start > 0 ? "…" : "";
+            out += "  " + gutterPad + " | " + prefix + line +
+                   (truncated ? " …（截断）" : "") + "\n";
+            std::string pad((start > 0 ? 1 : 0) + (col0 >= start ? col0 - start : 0),
+                            ' ');
             uint32_t mark = d.range.length;
-            // 限制插入符长度到本行剩余部分（跨行时首行打省略号）。
+            // 限制插入符长度到展示窗口内剩余部分（跨行时首行打省略号）。
+            size_t room = end > col0 ? end - col0 : 1;
+            if (mark > room) mark = static_cast<uint32_t>(room);
             if (mark > 200) mark = 200;
             out += "  " + std::string(gutterPad.size(), ' ') + " | " + pad + "^";
             if (mark > 1) out += std::string(mark - 1, '~');

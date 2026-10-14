@@ -14,6 +14,8 @@
 #include "scourge/BC/Bytecode.hpp"
 #include "scourge/Common/Diagnostic.hpp"
 #include "scourge/Sema/TypeChecker.hpp"
+#include <unordered_set>
+
 #include "scourge/Syntax/AST.hpp"
 
 #include <map>
@@ -24,7 +26,10 @@ namespace bc {
 
 class Compiler {
 public:
-    Compiler(const SourceMgr& src, DiagEngine& diag, const ModuleRegistry& registry);
+    /// promoteF64：检查器标注的边界 int→float 提升表达式集（Q3 双模一致，
+    /// 与 AOT storeTo 的 sitofp 对齐）；可空（工具未接线时退化为旧行为）。
+    Compiler(const SourceMgr& src, DiagEngine& diag, const ModuleRegistry& registry,
+             const std::unordered_set<const Expr*>* promoteF64 = nullptr);
 
     /// 编译一个模块（声明遍 + 编译遍一次完成；多次调用累积进同一 Program）。
     bool compileModule(const Module& m);
@@ -72,6 +77,12 @@ private:
     const SourceMgr& src_;
     DiagEngine& diag_;
     const ModuleRegistry& registry_;
+    const std::unordered_set<const Expr*>* promoteF64_ = nullptr;
+
+    /// 该表达式是否需要在当前存储/传参/返回边界提升为 float（Q3）。
+    bool needsF64(const Expr& e) const {
+        return promoteF64_ && promoteF64_->count(&e) > 0;
+    }
     FileId file_ = kInvalidFile;
     std::string moduleName_;
     Program program_;

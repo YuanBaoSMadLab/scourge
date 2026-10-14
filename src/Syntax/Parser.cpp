@@ -335,17 +335,8 @@ StmtPtr Parser::parseDef(std::vector<Decorator> decorators, bool isAsync) {
     def->body = parseBlock();
     if (def->body.empty() && hasErrors()) return nullptr;
 
-    // @extern = C ABI 纯声明（文档第八章 FFI）：函数体只允许一条 pass。
-    bool hasExtern = false;
-    for (const auto& d : def->decorators) hasExtern |= (d.name == "extern");
-    if (hasExtern &&
-        !(def->body.size() == 1 && def->body[0]->kind == Stmt::Kind::Pass)) {
-        diag_.error(Errc::E1007_UnsupportedFeature, file_, def->nameRange,
-                    "@extern 函数必须是纯声明：函数体只允许一条 pass"
-                    "（实现在外部 C ABI 侧，不由本语言提供）");
-    }
-
     // docstring：函数体首语句为字符串表达式时提取为契约容器。
+    // （先于 @extern 校验：docstring 不计入函数体语句，D2 设计确认项。）
     if (!def->body.empty() && def->body[0]->kind == Stmt::Kind::ExprStmt) {
         auto* es = static_cast<ExprStmt*>(def->body[0].get());
         if (es->expr && es->expr->kind == Expr::Kind::StrLit) {
@@ -354,6 +345,17 @@ StmtPtr Parser::parseDef(std::vector<Decorator> decorators, bool isAsync) {
             def->docRange = sl->range;
             def->body.erase(def->body.begin());
         }
+    }
+    // @extern = C ABI 纯声明（文档第八章 FFI）：函数体只允许一条 pass 语句
+    // （docstring 已先行提取、不计入函数体——D2 设计确认项）。
+    bool hasExtern = false;
+    for (const auto& d : def->decorators) hasExtern |= (d.name == "extern");
+    if (hasExtern &&
+        !(def->body.empty() ||
+          (def->body.size() == 1 && def->body[0]->kind == Stmt::Kind::Pass))) {
+        diag_.error(Errc::E1007_UnsupportedFeature, file_, def->nameRange,
+                    "@extern 函数必须是纯声明：函数体只允许一条 pass 语句"
+                    "（docstring 不计入函数体；实现在外部 C ABI 侧，不由本语言提供）");
     }
     extractContracts(*def);
     return def;

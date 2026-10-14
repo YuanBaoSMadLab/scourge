@@ -353,7 +353,7 @@ bool Repl::compileSession(const std::string& source, bool execute) {
 
     // 字节码：import 模块先编译（依赖序），repl 轮模块最后——
     // 跨模块调用解析与 <top> 执行序与 run 命令完全一致。
-    bc::Compiler compiler(src, diag, session.registry());
+    bc::Compiler compiler(src, diag, session.registry(), &session.promoteF64());
     auto order = session.allModulesInDependencyOrder();
     for (const auto& n : order) {
         const Module* m = session.loadedModule(n);

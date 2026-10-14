@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "scourge/Common/Diagnostic.hpp"
@@ -68,6 +69,10 @@ public:
     /// 表达式类型注解表（检查时按 AST 节点缓存；check 成功后有效）。
     /// AOT MLIRGen 等后端直接查表消费类型/形状，emit 处只查不重算。
     const ExprTypeMap& exprTypes() const { return exprTypes_; }
+    /// 边界 int→float 提升集（Q3：VM 编译器与 AOT 共同消费，双模一致）
+    const std::unordered_set<const Expr*>& promoteF64() const {
+        return promoteF64_;
+    }
     /// 已加载模块（依赖层序：被依赖者在前，层内字典序）——字节码编译与
     /// <top> 执行共用此序，保证全局初始化先于使用且输出确定。
     std::vector<std::string> modulesInDependencyOrder(const std::string& entry) const;
@@ -114,6 +119,7 @@ private:
     /// 表达式类型注解表（全部模块合并；键为 AST 节点指针，跨模块不冲突，
     /// 主线程 mutex 内定序合并 → 与并发度无关）。
     ExprTypeMap exprTypes_;
+    std::unordered_set<const Expr*> promoteF64_;
 };
 
 } // namespace scourge

@@ -61,6 +61,15 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                 continue;
             }
 
+            // 内建名保留（Q14 与文档对齐）：模块级 def 与内建同名即拒绝，
+            // 杜绝"自定义函数被内建静默顶替"的正确性陷阱。
+            if (builtinType(f.name)) {
+                diag_.error(Errc::E2007_DuplicateDefinition, file_, f.nameRange,
+                            "函数名 '" + f.name +
+                                "' 与内建冲突（内建名不可重定义）；请改名");
+                continue;
+            }
+
             FuncSig sig;
             sig.name = f.name;
             sig.isPure = pure;
@@ -78,7 +87,12 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                 }
                 TypePtr t = resolveTypeExpr(*p.type);
                 sig.params.push_back(t);
+                // 缺省值边界 int→float 提升（Q3：与函数体注解赋值同规则）。
                 if (p.defaultValue) {
+                    TypePtr dv = checkExpr(*p.defaultValue);
+                    if (dv->kind == Type::Kind::Int &&
+                        t->kind == Type::Kind::Float)
+                        promoteF64_.insert(p.defaultValue.get());
                     sawDefault = true;
                 } else if (sawDefault) {
                     diag_.error(Errc::E2001_TypeMismatch, file_, p.range,
@@ -88,10 +102,10 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                 }
             }
             if (!f.retType) {
-                diag_.error(Errc::E2002_CannotInfer, file_, f.nameRange,
-                            "函数 '" + f.name +
-                                "' 缺少返回类型注解（模块级函数签名必须完整）");
-                sig.ret = tyErr();
+                // 返回类型推断（Q10，与文档对齐）：由函数体 return 语句统一
+                // 推导（checkFunction 完成后回填）；递归自引用以 Unknown 通配。
+                sig.ret = tyUnknown();
+                sig.retPending = true;
             } else {
                 sig.ret = resolveTypeExpr(*f.retType);
             }
@@ -119,11 +133,32 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                 break;
             }
             auto& n = static_cast<const Name&>(*a.target);
-            TypePtr vt = a.value ? checkExpr(*a.value) : tyUnknown();
+            // 内建名保留（Q14）：模块级赋值与内建同名即拒绝，与文档对齐。
+            if (builtinType(n.name)) {
+                diag_.error(Errc::E2007_DuplicateDefinition, file_, s.range,
+                            "变量名 '" + n.name +
+                                "' 与内建冲突（内建名不可重定义）；请改名");
+                break;
+            }
+            // Q1：无初值声明拒绝——Scourge 无未初始化变量，编译器对
+            // 纯声明语句会解引用空值（段错误根源），在检查期给出明确诊断。
+            if (!a.value) {
+                diag_.error(Errc::E2002_CannotInfer, file_, s.range,
+                            "变量 '" + n.name +
+                                "' 声明需要初值（Scourge 无未初始化变量）；"
+                                "请写作 " +
+                                n.name + ": <类型> = <初值>，或直接 " + n.name +
+                                " = <初值>");
+                break;
+            }
+            TypePtr vt = checkExpr(*a.value);
             TypePtr declared;
             if (a.ann) {
                 declared = resolveTypeExpr(*a.ann);
-                if (a.value && !isConvertible(vt, declared)) {
+                if (vt->kind == Type::Kind::Int &&
+                    declared->kind == Type::Kind::Float)
+                    promoteF64_.insert(a.value.get()); // Q3 边界提升
+                if (!isConvertible(vt, declared)) {
                     fail(Errc::E2001_TypeMismatch, a.value->range,
                          "赋值类型不匹配：" + typeToString(vt) + " 无法赋给 " +
                              typeToString(declared));
@@ -181,11 +216,12 @@ ModuleSymbols TypeChecker::check(Module& m) {
     return out;
 }
 
-void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols&) {
+void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols& out) {
     auto it = localFuncs_.find(f.name);
     if (it == localFuncs_.end()) return; // 签名阶段已报错
 
     fnRet_ = it->second.ret;
+    pendingReturns_.clear();
     scope_.push();
     loopDepth_ = 0;
     const bool prevAsync = inAsyncFn_;
@@ -203,6 +239,48 @@ void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols&) {
     checkContractDefs(f);
 
     checkStmtList(f.body);
+
+    // 返回类型推断（Q10）：统一全部 return 的值类型并回填签名。
+    // 递归自引用（Unknown）跳过；数值混返回取宽化（int+float → float，
+    // 与 isConvertible 的唯一隐式转换方向一致）；不一致即 E2006。
+    if (it->second.retPending) {
+        TypePtr inferred = tyNone(); // 无 return / 全裸 return → None
+        bool any = false, conflict = false;
+        for (const auto& [expr, vt] : pendingReturns_) {
+            if (!vt || vt->kind == Type::Kind::Unknown ||
+                vt->kind == Type::Kind::Err)
+                continue; // 递归自引用/错误占位
+            if (!any) {
+                inferred = vt;
+                any = true;
+                continue;
+            }
+            if (typeEquals(inferred, vt)) continue;
+            if (TypePtr w = unifyNumeric(inferred, vt)) {
+                inferred = w;
+                continue;
+            }
+            conflict = true;
+            diag_.error(Errc::E2006_ReturnTypeConflict, file_, f.nameRange,
+                        "函数 '" + f.name + "' 的返回类型推断冲突：" +
+                            typeToString(inferred) + " 与 " +
+                            typeToString(vt));
+            inferred = tyErr();
+            break;
+        }
+        if (!conflict) {
+            it->second.ret = inferred;
+            it->second.retPending = false;
+            out.funcs[f.name] = it->second; // 导出同步（.sgi/跨模块消费）
+            // 推断为 float 的 int 返回值补记边界提升（Q3 双模一致）。
+            if (inferred->kind == Type::Kind::Float) {
+                for (const auto& [expr, vt] : pendingReturns_)
+                    if (expr && vt->kind == Type::Kind::Int)
+                        promoteF64_.insert(expr);
+            }
+        }
+    }
+    pendingReturns_.clear();
     scope_.pop();
     inAsyncFn_ = prevAsync;
 }
@@ -274,14 +352,30 @@ void TypeChecker::checkStmt(const Stmt& s) {
     switch (s.kind) {
     case Stmt::Kind::Assign: {
         auto& a = static_cast<const Assign&>(s);
-        TypePtr vt = a.value ? checkExpr(*a.value) : tyUnknown();
+        // Q1：无初值声明拒绝（与模块级一致；编译器对纯声明解引用空值）。
+        if (!a.value) {
+            std::string nm = a.target->kind == Expr::Kind::Name
+                                 ? static_cast<const Name&>(*a.target).name
+                                 : "<目标>";
+            diag_.error(Errc::E2002_CannotInfer, file_, s.range,
+                        "变量 '" + nm +
+                            "' 声明需要初值（Scourge 无未初始化变量）；"
+                            "请写作 " +
+                            nm + ": <类型> = <初值>，或直接 " + nm +
+                            " = <初值>");
+            break;
+        }
+        TypePtr vt = checkExpr(*a.value);
 
         if (a.target->kind == Expr::Kind::Name) {
             auto& n = static_cast<const Name&>(*a.target);
             const VarSym* existing = scope_.find(n.name);
             if (a.ann) {
                 TypePtr declared = resolveTypeExpr(*a.ann);
-                if (a.value && !isConvertible(vt, declared)) {
+                if (vt->kind == Type::Kind::Int &&
+                    declared->kind == Type::Kind::Float)
+                    promoteF64_.insert(a.value.get()); // Q3 边界提升
+                if (!isConvertible(vt, declared)) {
                     fail(Errc::E2001_TypeMismatch, a.value->range,
                          "赋值类型不匹配：" + typeToString(vt) + " 无法赋给 " +
                              typeToString(declared));
@@ -303,6 +397,9 @@ void TypeChecker::checkStmt(const Stmt& s) {
                          "无法推断 '" + n.name + "' 的新值类型");
                     break;
                 }
+                if (vt->kind == Type::Kind::Int &&
+                    existing->type->kind == Type::Kind::Float)
+                    promoteF64_.insert(a.value.get()); // Q3 边界提升（重赋值）
                 if (!isConvertible(vt, existing->type)) {
                     fail(Errc::E2001_TypeMismatch, s.range,
                          "变量 '" + n.name + "' 已声明为 " +
@@ -445,9 +542,20 @@ void TypeChecker::checkStmt(const Stmt& s) {
         else if (it->kind != Type::Kind::Err)
             fail(Errc::E2001_TypeMismatch, st.iter->range,
                  "for 只能遍历 range 或 List，实际为 " + typeToString(it));
-        if (!scope_.declare(st.var, VarSym{elem, st.varRange})) {
-            diag_.error(Errc::E2007_DuplicateDefinition, file_, st.varRange,
-                        "循环变量 '" + st.var + "' 与外层名冲突");
+        // 循环变量声明（Q9，Python 式复用）：与函数层已有同名绑定且类型
+        // 相同 → 复用绑定（重绑定语义）；类型不同 → 明确报错。与外层
+        // （模块全局/导入名）同名属正常遮蔽，照常声明。
+        if (const VarSym* ex = scope_.findInBack(st.var)) {
+            if (typeEquals(ex->type, elem)) {
+                // 复用：沿用既有槽位与类型。
+            } else {
+                diag_.error(Errc::E2007_DuplicateDefinition, file_, st.varRange,
+                            "循环变量 '" + st.var + "' 与本函数内已声明的 " +
+                                typeToString(ex->type) + " 型变量冲突（类型 " +
+                                typeToString(elem) + "）；请换用其他名称");
+            }
+        } else {
+            scope_.declare(st.var, VarSym{elem, st.varRange});
         }
         ++loopDepth_;
         checkStmtList(st.body);
@@ -457,11 +565,19 @@ void TypeChecker::checkStmt(const Stmt& s) {
     case Stmt::Kind::Return: {
         auto& st = static_cast<const Return&>(s);
         TypePtr vt = st.value ? checkExpr(*st.value) : tyNone();
-        if (fnRet_->kind != Type::Kind::Err &&
-            !isConvertible(vt, fnRet_)) {
-            fail(Errc::E2006_ReturnTypeConflict, s.range,
-                 "返回类型不匹配：函数声明返回 " + typeToString(fnRet_) +
-                     "，实际返回 " + typeToString(vt));
+        if (fnRet_->kind == Type::Kind::Unknown) {
+            // 返回类型推断中（Q10）：收集待统一；int→float 提升待
+            // 统一结果为 float 时补记（见 checkFunction 尾部）。
+            pendingReturns_.push_back({st.value.get(), vt});
+        } else if (fnRet_->kind != Type::Kind::Err) {
+            if (vt->kind == Type::Kind::Int &&
+                fnRet_->kind == Type::Kind::Float && st.value)
+                promoteF64_.insert(st.value.get()); // Q3 边界提升（返回）
+            if (!isConvertible(vt, fnRet_)) {
+                fail(Errc::E2006_ReturnTypeConflict, s.range,
+                     "返回类型不匹配：函数声明返回 " + typeToString(fnRet_) +
+                         "，实际返回 " + typeToString(vt));
+            }
         }
         break;
     }
@@ -596,7 +712,7 @@ TypePtr TypeChecker::checkName(const Expr& e) {
     if (const VarSym* v = scope_.find(n.name)) return v->type;
     if (localFuncs_.count(n.name))
         return fail(Errc::E1007_UnsupportedFeature, e.range,
-                    "函数作为头等值将在 P1 提供；当前函数只能被调用");
+                    "函数 '" + n.name + "' 不能作为值使用（当前仅支持调用）");
 
     if (TypePtr b = builtinType(n.name)) return b;
 
@@ -896,15 +1012,55 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
                     "该表达式不是可调用函数：" + typeToString(callee));
     }
 
-    // Function 类型：params = [参数…] + 末位返回
+    // Function 类型：params = [参数…] + 末位返回。
+    // 缺省实参（Q2）：required = 无默认值参数个数，实参个数落在
+    // [required, nParams] 即合法，缺失尾部实参由调用点补默认值。
     size_t nParams = callee->params.size() - 1;
-    if (c.args.size() != nParams) {
-        return fail(Errc::E2001_TypeMismatch, e.range,
-                    "实参数量不匹配：期望 " + std::to_string(nParams) +
-                        "，实际 " + std::to_string(c.args.size()));
+    size_t required = nParams;
+    const FuncSig* calleeSig = nullptr;
+    if (c.callee->kind == Expr::Kind::Name) {
+        auto& n = static_cast<const Name&>(*c.callee);
+        if (auto f = localFuncs_.find(n.name); f != localFuncs_.end())
+            calleeSig = &f->second;
+    } else if (c.callee->kind == Expr::Kind::Attr) {
+        auto& at = static_cast<const Attr&>(*c.callee);
+        if (at.base->kind == Expr::Kind::Name) {
+            auto& mn = static_cast<const Name&>(*at.base);
+            if (auto it = imports_.find(mn.name); it != imports_.end()) {
+                if (auto f = it->second->funcs.find(at.name);
+                    f != it->second->funcs.end())
+                    calleeSig = &f->second;
+            }
+        }
     }
-    for (size_t i = 0; i < nParams; ++i) {
+    if (calleeSig) required = calleeSig->requiredArgs;
+    if (calleeSig && calleeSig->retPending) {
+        // Q10 边界：被调函数返回类型推断未完成（本模块内递归 / 前向引用）。
+        // 推断期无类型事实源，静态规则要求显式注解（与 Rust 同理）。
+        std::string nm;
+        if (c.callee->kind == Expr::Kind::Name)
+            nm = static_cast<const Name&>(*c.callee).name;
+        else if (c.callee->kind == Expr::Kind::Attr)
+            nm = static_cast<const Attr&>(*c.callee).name;
+        return fail(Errc::E2001_TypeMismatch, c.callee->range,
+                    "函数 '" + nm +
+                        "' 的返回类型为自动推断且尚未完成（递归 / 前向引用无法自动推断）；请为其显式注解返回类型");
+    }
+    if (c.args.size() < required || c.args.size() > nParams) {
+        std::string hint = required == nParams
+                               ? std::to_string(nParams)
+                               : std::to_string(required) + "–" +
+                                     std::to_string(nParams) + "（尾部参数有默认值）";
+        return fail(Errc::E2001_TypeMismatch, e.range,
+                    "实参数量不匹配：期望 " + hint + "，实际 " +
+                        std::to_string(c.args.size()));
+    }
+    // 实参类型检查只遍历调用点提供的实参（Q2：缺失尾部实参由默认值补位）。
+    for (size_t i = 0; i < c.args.size(); ++i) {
         TypePtr at = checkExpr(*c.args[i]);
+        if (at->kind == Type::Kind::Int &&
+            callee->params[i]->kind == Type::Kind::Float)
+            promoteF64_.insert(c.args[i].get()); // Q3 边界提升（实参）
         if (!isConvertible(at, callee->params[i])) {
             fail(Errc::E2001_TypeMismatch, c.args[i]->range,
                  "实参类型不匹配：参数 " + std::to_string(i + 1) + " 期望 " +

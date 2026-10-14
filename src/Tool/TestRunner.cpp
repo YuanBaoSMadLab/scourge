@@ -550,7 +550,7 @@ DriverRun runDriver(Session& session, const std::string& modName,
     }
 
     // 字节码：已加载模块依赖序在前，驱动模块最后（与 run/REPL 执行序一致）。
-    bc::Compiler compiler(src, diag, session.registry());
+    bc::Compiler compiler(src, diag, session.registry(), &session.promoteF64());
     auto order = session.allModulesInDependencyOrder();
     for (const auto& n : order) {
         const Module* m = session.loadedModule(n);

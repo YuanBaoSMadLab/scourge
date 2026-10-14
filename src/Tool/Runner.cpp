@@ -107,7 +107,7 @@ RunOutcome runOnce(const std::filesystem::path& inPath, bool useCache,
         // 字节码编译：按依赖层序逐模块编译进同一 Program
         //（跨模块函数经占位复用/补全，见 Compiler::compileModule）。
         bc::Compiler compiler(session.src(), session.diag(),
-                              session.registry());
+                              session.registry(), &session.promoteF64());
         for (const auto& name : order) {
             const Module* m = session.loadedModule(name);
             if (!m) continue;

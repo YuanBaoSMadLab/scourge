@@ -288,6 +288,14 @@ bool Lexer::lexOperator() {
     for (int i = 0; kOps1[i]; ++i)
         if (peek() == kOps1[i][0] && kOps1[i][1] == '\0') {
             advance();
+            // D1：括号深度计数——括号内换行由 lexLine 静默吞掉（隐式续行）。
+            switch (kOps1[i][0]) {
+            case '(': case '[': case '{': ++parenDepth_; break;
+            case ')': case ']': case '}':
+                if (parenDepth_ > 0) --parenDepth_;
+                break;
+            default: break;
+            }
             push(TokKind::Punct, begin, kOps1[i]);
             return true;
         }

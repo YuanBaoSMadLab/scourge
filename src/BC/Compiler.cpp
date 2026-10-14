@@ -134,13 +134,13 @@ bool fillTensorLit(const ListLit& ll, size_t depth, TensorLitAcc& acc) {
 } // namespace
 
 Compiler::Compiler(const SourceMgr& src, DiagEngine& diag,
-                   const ModuleRegistry& registry)
-    : src_(src), diag_(diag), registry_(registry) {}
+                   const ModuleRegistry& registry,
+                   const std::unordered_set<const Expr*>* promoteF64)
+    : src_(src), diag_(diag), registry_(registry), promoteF64_(promoteF64) {}
 
 void Compiler::error(const SourceRange& r, const std::string& msg) {
     diag_.error(Errc::E1007_UnsupportedFeature, file_, r,
-                "字节码后端暂不支持：" + msg +
-                    "（Dict 执行将随 P1 后续迭代进入调试模式）");
+                "字节码后端暂不支持：" + msg);
     throw CompileAbort{};
 }
 
@@ -248,6 +248,11 @@ uint32_t Compiler::addGlobal(const std::string& module, const std::string& name)
 Value Compiler::constOf(const Expr& e) const {
     switch (e.kind) {
     case Expr::Kind::IntLit:
+        // 缺省值边界 int→float 提升（Q3：浮点参数的整数字面量缺省值，
+        // 与 AOT 调用点 sitofp 一致）。
+        if (needsF64(e))
+            return Value::makeFloat(
+                static_cast<double>(static_cast<const IntLit&>(e).value));
         return Value::makeInt(static_cast<const IntLit&>(e).value);
     case Expr::Kind::FloatLit:
         return Value::makeFloat(static_cast<const FloatLit&>(e).value);
@@ -418,7 +423,10 @@ void Compiler::compileExpr(const Expr& e) {
                 if (mit != importedFuncs_.end()) {
                     auto fit = mit->second.find(at.name);
                     if (fit != mit->second.end()) {
-                        for (const auto& a : c.args) compileExpr(*a);
+                        for (const auto& a : c.args) {
+                            compileExpr(*a);
+                            if (needsF64(*a)) emit(Op::IntToFloat); // Q3
+                        }
                         emit(Op::Call, static_cast<uint32_t>(fit->second),
                              static_cast<uint32_t>(c.args.size()));
                         return;
@@ -442,7 +450,10 @@ void Compiler::compileExpr(const Expr& e) {
         auto& n = static_cast<const Name&>(*c.callee);
         int idx = lookupFunc(n.name);
         if (idx < 0) unsupported(e, "未解析的函数 '" + n.name + "'");
-        for (const auto& a : c.args) compileExpr(*a);
+        for (const auto& a : c.args) {
+            compileExpr(*a);
+            if (needsF64(*a)) emit(Op::IntToFloat); // Q3 边界提升（实参）
+        }
         emit(Op::Call, static_cast<uint32_t>(idx),
              static_cast<uint32_t>(c.args.size()));
         return;
@@ -514,6 +525,7 @@ void Compiler::compileStmt(const Stmt& s) {
         if (a.target->kind == Expr::Kind::Name) {
             auto& n = static_cast<const Name&>(*a.target);
             compileExpr(*a.value);
+            if (needsF64(*a.value)) emit(Op::IntToFloat); // Q3 边界提升
             if (fn_->isTopLevel) {
                 emit(Op::StoreGlobal, addGlobal(moduleName_, n.name));
             } else {
@@ -659,6 +671,7 @@ void Compiler::compileStmt(const Stmt& s) {
         auto& st = static_cast<const Return&>(s);
         if (st.value) {
             compileExpr(*st.value);
+            if (needsF64(*st.value)) emit(Op::IntToFloat); // Q3 边界提升（返回）
             emit(Op::Return);
         } else {
             emit(Op::ReturnNone);

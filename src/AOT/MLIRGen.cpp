@@ -464,6 +464,8 @@ private:
     std::string elemAddr8(const std::string& arr, const std::string& idxSsa);
     /// i64 值数组落盘：入口块 alloca N×i64 + 逐个 store；返回数组指针 SSA。
     std::string buildI64Array(const std::vector<Value>& items);
+    /// 全常量张量数据入模块级常量池（Q7/Q8）；返回全局符号。
+    std::string internTensorConst(bool isF, int64_t n, const std::string& dataText);
     /// 张量字面量：全标量 → 一维；全张量 → 行拼接（与 VM tensorNew 一致）。
     Value genTensorLit(const ListLit& ls);
 
@@ -514,6 +516,12 @@ private:
     std::map<std::string, std::string> strPool_;
     int strCounter_ = 0;
     std::vector<std::string> globalDefs_;
+    /// 张量字面量常量池（Q7/Q8）：全常量标量数据 → 模块级 llvm.global
+    /// 常量（.rdata），替代逐元素 alloca+store 的栈上物化——大字面量
+    /// 不再受线程栈上限约束，构建时间从 O(n) 个 op 降为单 op。
+    std::vector<std::string> tensorConstDefs_;
+    std::map<std::string, std::string> tensorConstPool_;
+    int tensorConstCounter_ = 0;
     std::vector<std::string> funcDefs_;
     /// 全部模块的顶级全局：module → name → {VK, 符号}
     std::map<std::string, std::map<std::string, GlobalSlot>> globals_;
@@ -1037,9 +1045,155 @@ std::string Gen::buildI64Array(const std::vector<Value>& items) {
     return arr;
 }
 
+/// 元素级常量判定（Q7）：IntLit / FloatLit / 一元负号包裹的字面量 →
+/// 文本形式（isF=true 时统一为 f64 文本）；非常量返回 false。
+static bool constScalarText(const Expr& e, bool isF, std::string& out) {
+    auto lit = [&](const Expr& x, std::string& dst) -> bool {
+        if (x.kind == Expr::Kind::IntLit) {
+            int64_t v = static_cast<const IntLit&>(x).value;
+            dst = isF ? fmtF64(static_cast<double>(v)) : std::to_string(v);
+            return true;
+        }
+        if (x.kind == Expr::Kind::FloatLit) {
+            if (!isF) return false; // 浮点元素只允许 f64 数据
+            dst = fmtF64(static_cast<const FloatLit&>(x).value);
+            return true;
+        }
+        return false;
+    };
+    if (lit(e, out)) return true;
+    if (e.kind == Expr::Kind::Unary) {
+        auto& u = static_cast<const Unary&>(e);
+        if (u.op == "-") {
+            std::string inner;
+            if (lit(*u.operand, inner)) {
+                out = "-" + inner;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// 常量标量是否为浮点（穿透一元负号）：决定字面量走 f64 还是 i64 数据。
+static bool floatConstExpr(const Expr& e) {
+    const Expr* p = &e;
+    if (p->kind == Expr::Kind::Unary) {
+        auto& u = static_cast<const Unary&>(*p);
+        if (u.op != "-") return false;
+        p = u.operand.get();
+    }
+    return p && p->kind == Expr::Kind::FloatLit;
+}
+
+/// 全常量张量字面量 → 常量池符号（Q7/Q8）。数据以 dense 属性入模块级
+/// llvm.global 常量，运行时由 sg_tensor_from_* 从常量区拷贝建堆句柄。
+/// 同一数据（精确文本匹配）跨字面量去重复用。
+std::string Gen::internTensorConst(bool isF, int64_t n,
+                                   const std::string& dataText) {
+    std::string key = (isF ? "f:" : "i:") + dataText;
+    if (auto it = tensorConstPool_.find(key); it != tensorConstPool_.end())
+        return it->second;
+    std::string sym = "@sg_tc" + std::to_string(tensorConstCounter_++);
+    const char* ty = isF ? "f64" : "i64";
+    tensorConstDefs_.push_back(
+        "llvm.mlir.global internal constant " + sym + "(dense<[" + dataText +
+        "]> : tensor<" + std::to_string(n) + " x " + ty + ">) : !llvm.array<" +
+        std::to_string(n) + " x " + ty + ">");
+    tensorConstPool_.emplace(std::move(key), sym);
+    return sym;
+}
+
 /// 张量字面量：全标量 → 一维（任一 Float → f64，与 VM tensorNew 一致）；
 /// 全张量 → 行拼接升维（只比形状不比 dtype，混合 → 提升 f64）。
 Value Gen::genTensorLit(const ListLit& ls) {
+    // ---- Q7/Q8 快路径：全常量字面量直发模块级常量区 ------------------------
+    // 在任何 genExpr 之前判定：逐元素 alloca+store 的栈上物化是大字面量
+    // 溢出线程栈、N 条独立 SSA op 拖慢构建的共同根源。含变量 / bool /
+    // 不规则形状时回落下方通用路径，语义不变。
+    if (!ls.elems.empty()) {
+        // 一维：全元素为常量标量
+        bool flat1D = true, flatF = false;
+        for (const auto& el : ls.elems) {
+            if (!el || el->kind == Expr::Kind::ListLit) { flat1D = false; break; }
+            std::string t;
+            if (!constScalarText(*el, /*isF=*/true, t)) { flat1D = false; break; }
+            if (floatConstExpr(*el)) flatF = true;
+        }
+        if (flat1D) {
+            const bool isF = flatF;
+            const int64_t n = (int64_t)ls.elems.size();
+            std::string data;
+            for (size_t k = 0; k < ls.elems.size(); ++k) {
+                if (k) data += ", ";
+                std::string t;
+                constScalarText(*ls.elems[k], isF, t); // 已探明必成功
+                data += t;
+            }
+            std::string sym = internTensorConst(isF, n, data);
+            std::string p = fresh();
+            emit(p + " = llvm.mlir.addressof " + sym + " : !llvm.ptr");
+            std::string ssa = fresh();
+            emit(ssa + " = \"lang.tensor_from_" + (isF ? "f64" : "i64") +
+                 "\"(" + intConst(n) + ", " + p +
+                 ") : (i64, !llvm.ptr) -> !llvm.ptr " + opLoc());
+            return Value{VK::Tensor, ssa, !isF, 1};
+        }
+
+        // 二维：全行为等宽全常量标量行（行内不得再嵌套 ListLit）
+        bool grid2D = true, gridF = false;
+        int64_t cols = -1;
+        for (const auto& el : ls.elems) {
+            if (!el || el->kind != Expr::Kind::ListLit) { grid2D = false; break; }
+            auto& row = static_cast<const ListLit&>(*el);
+            if (cols < 0) cols = (int64_t)row.elems.size();
+            if (cols <= 0 || (int64_t)row.elems.size() != cols) {
+                grid2D = false;
+                break;
+            }
+            for (const auto& re : row.elems) {
+                std::string t;
+                if (!re || !constScalarText(*re, /*isF=*/true, t)) {
+                    grid2D = false;
+                    break;
+                }
+                if (floatConstExpr(*re)) gridF = true;
+            }
+            if (!grid2D) break;
+        }
+        if (grid2D) {
+            const bool isF = gridF;
+            const int64_t rows = (int64_t)ls.elems.size();
+            std::string data;
+            bool first = true;
+            for (const auto& el : ls.elems) {
+                auto& row = static_cast<const ListLit&>(*el);
+                for (const auto& re : row.elems) {
+                    if (!first) data += ", ";
+                    first = false;
+                    std::string t;
+                    constScalarText(*re, isF, t); // 已探明必成功
+                    data += t;
+                }
+            }
+            std::string sym = internTensorConst(isF, rows * cols, data);
+            std::string p = fresh();
+            emit(p + " = llvm.mlir.addressof " + sym + " : !llvm.ptr");
+            std::string flat = fresh();
+            emit(flat + " = \"lang.tensor_from_" + (isF ? "f64" : "i64") +
+                 "\"(" + intConst(rows * cols) + ", " + p +
+                 ") : (i64, !llvm.ptr) -> !llvm.ptr " + opLoc());
+            std::string arr =
+                buildI64Array({Value{VK::Int, intConst(rows), true, 0},
+                               Value{VK::Int, intConst(cols), true, 0}});
+            std::string ssa = fresh();
+            emit(ssa + " = \"lang.tensor_reshape\"(" + flat + ", " +
+                 intConst(2) + ", " + arr +
+                 ") : (!llvm.ptr, i64, !llvm.ptr) -> !llvm.ptr " + opLoc());
+            return Value{VK::Tensor, ssa, !isF, 2};
+        }
+    }
+
     std::vector<Value> es;
     es.reserve(ls.elems.size());
     for (const auto& el : ls.elems) es.push_back(genExpr(*el));
@@ -1701,9 +1855,22 @@ Value Gen::genCall(const Call& c) {
                 std::vector<VK> paramVKs;
                 for (const auto& t : f->second.params)
                     paramVKs.push_back(vkOfType(t));
-                if (c.args.size() != paramVKs.size())
+                // 缺省实参（Q2）：实参个数落在 [requiredArgs, nParams]，
+                // 缺失尾部实参在调用点对缺省值表达式求值（emitCallRet
+                // 统一做 int→float 边界提升，与 VM constOf 一致）。
+                if (c.args.size() < f->second.requiredArgs ||
+                    c.args.size() > paramVKs.size())
                     unsupported(c.range, "函数 '" + n.name + "' 实参数量不符");
                 for (const auto& a : c.args) args.push_back(genExpr(*a));
+                for (size_t k = c.args.size(); k < paramVKs.size(); ++k) {
+                    const Param* p = nullptr;
+                    if (f->second.def && k < f->second.def->params.size())
+                        p = &f->second.def->params[k];
+                    if (!p || !p->defaultValue)
+                        unsupported(c.range,
+                                    "函数 '" + n.name + "' 缺少实参与缺省值");
+                    args.push_back(genExpr(*p->defaultValue));
+                }
                 return emitCallRet(funcSym(curModule_, n.name), args, paramVKs,
                                    vkOfType(f->second.ret), f->second.ret);
             }
@@ -1776,10 +1943,21 @@ Value Gen::genCall(const Call& c) {
                 std::vector<VK> paramVKs;
                 for (const auto& t : f->second.params)
                     paramVKs.push_back(vkOfType(t));
-                if (c.args.size() != paramVKs.size())
+                // 缺省实参（Q2）：跨模块同规则（FuncSig.def 指向定义方 AST）。
+                if (c.args.size() < f->second.requiredArgs ||
+                    c.args.size() > paramVKs.size())
                     unsupported(c.range, "函数 '" + mn.name + "." + at.name +
                                              "' 实参数量不符");
                 for (const auto& a : c.args) args.push_back(genExpr(*a));
+                for (size_t k = c.args.size(); k < paramVKs.size(); ++k) {
+                    const Param* p = nullptr;
+                    if (f->second.def && k < f->second.def->params.size())
+                        p = &f->second.def->params[k];
+                    if (!p || !p->defaultValue)
+                        unsupported(c.range, "函数 '" + mn.name + "." + at.name +
+                                                 "' 缺少实参与缺省值");
+                    args.push_back(genExpr(*p->defaultValue));
+                }
                 return emitCallRet(funcSym(mn.name, at.name), args, paramVKs,
                                    vkOfType(f->second.ret), f->second.ret);
             }
@@ -2714,6 +2892,7 @@ void Gen::assemble(std::string& out) {
     if (!emptyStrDef_.empty()) out += "  " + emptyStrDef_ + "\n";
     for (const auto& d : strDefs_) out += "  " + d + "\n";
     for (const auto& d : globalDefs_) out += "  " + d + "\n";
+    for (const auto& d : tensorConstDefs_) out += "  " + d + "\n";
     // try 蹦床：func.call 直连运行时（控制流设施例外——setjmp 双返回无法
     // 表达为无副作用 lang op；与 llvm.alloca 同类）。
     if (tryDeclsEmitted_) {

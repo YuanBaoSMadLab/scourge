@@ -918,6 +918,19 @@ void VM::dispatch(Instr in) {
         }
         panicHere("for 迭代源仅支持 range 与 list");
     }
+
+    case Op::IntToFloat: {
+        // Q3 边界提升：int → float（存储/传参/返回边界的双模一致转换）。
+        // 幂等：缺省值边界已在编译期（constOf）转为 f64，此处透传。
+        Value v = pop();
+        if (v.kind == Value::Kind::Int)
+            push(Value::makeFloat(static_cast<double>(v.i)));
+        else if (v.kind == Value::Kind::Float)
+            push(v);
+        else
+            panicHere("VM 内部错误：IntToFloat 操作数不是数值");
+        return;
+    }
     }
     panicHere("VM 内部错误：未知指令");
 }
