@@ -106,6 +106,24 @@ const OpLower kLowerings[] = {
     {"lang.sqrt", "sg_sqrt_f64", "f", "f", 'f', false},
     {"lang.exp", "sg_exp_f64", "f", "f", 'f', false},
     {"lang.log", "sg_log_f64", "f", "f", 'f', false},
+    // v0.9.3 标量数学/随机/排序（三角/双曲不 panic；取整族越界 panic 挂上下文）
+    {"lang.sin", "sg_sin_f64", "f", "f", 'f', false},
+    {"lang.cos", "sg_cos_f64", "f", "f", 'f', false},
+    {"lang.tan", "sg_tan_f64", "f", "f", 'f', false},
+    {"lang.asin", "sg_asin_f64", "f", "f", 'f', false},
+    {"lang.acos", "sg_acos_f64", "f", "f", 'f', false},
+    {"lang.atan", "sg_atan_f64", "f", "f", 'f', false},
+    {"lang.sinh", "sg_sinh_f64", "f", "f", 'f', false},
+    {"lang.cosh", "sg_cosh_f64", "f", "f", 'f', false},
+    {"lang.tanh", "sg_tanh_f64", "f", "f", 'f', false},
+    {"lang.atan2", "sg_atan2_f64", "ff", "ff", 'f', false},
+    {"lang.floor", "sg_floor_f64", "f", "fppi", 'i', true},
+    {"lang.ceil", "sg_ceil_f64", "f", "fppi", 'i', true},
+    {"lang.round", "sg_round_f64", "f", "fppi", 'i', true},
+    {"lang.trunc", "sg_trunc_f64", "f", "fppi", 'i', true},
+    {"lang.random", "sg_random", "", "", 'f', false},
+    {"lang.seed", "sg_seed", "i", "i", 'v', false},
+    {"lang.sorted", "sg_sorted", "p", "pppi", 'p', true},
     {"lang.now", "sg_now", "", "", 'f', false},
     // ---- 打印 ----
     {"lang.print_i64", "sg_print_i64", "i", "i", 'v', false},
@@ -313,6 +331,14 @@ public:
         const Kind kind = kindOf(op->getName().getStringRef());
         if (kind == Kind::Other)
             return mlir::failure(); // 非目标 op：让位 LangCallRewrite（低 benefit）
+        // affine.for 循环体内禁止内联展开：本 pattern 依赖 splitBlock +
+        // createBlock 建溢出 panic 分支，而 affine.for 要求 region 至多
+        // 1 块（曾致 verify "expects region #0 to have 0 or 1 blocks"）。
+        // 回退 LangCallRewrite 的 @sg_add_i64 等调用路径——张量路径
+        // sg_tiop 同一实现，panic 消息与触发点零分叉（仅省一次跨 TU
+        // 内联的优化机会，循环体逐元素语义不变）。
+        if (op->getParentOfType<mlir::affine::AffineForOp>())
+            return mlir::failure();
         mlir::Location loc = op->getLoc();
         mlir::MLIRContext* ctx = op->getContext();
         mlir::Type i64Ty = rewriter.getI64Type();
@@ -605,12 +631,13 @@ private:
         }
         if (!gpuMode) return;
         // GPU 覆盖集声明（sg_<rest> → sg_gpu_<rest>，ABI 逐一相同）。
-        // 覆盖集固定六类（GpuCover.hpp covers 判定的 op 全集），CPU 同名
+        // 覆盖集固定七类（GpuCover.hpp covers 判定的 op 全集），CPU 同名
         // 函数仍然补插（未用符号无副作用；非覆盖形态仍需它们兜底）。
         for (const OpLower& l : kLowerings) {
             if (std::strncmp(l.lang, "lang.tensor_binop_", 18) != 0 &&
                 std::strcmp(l.lang, "lang.tensor_matmul") != 0 &&
                 std::strcmp(l.lang, "lang.tensor_sum_f") != 0 &&
+                std::strcmp(l.lang, "lang.tensor_sum_i") != 0 &&
                 std::strcmp(l.lang, "lang.tensor_transpose") != 0)
                 continue;
             std::string sym = "sg_gpu_";

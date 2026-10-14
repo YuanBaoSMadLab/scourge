@@ -217,16 +217,22 @@ std::string san(const std::string& name) {
     return out + buf;
 }
 
-/// f64 → MLIR 字面量（%.17g；无 '.'/e/E 补 ".0"；nan/inf 走十六进制位型）。
+/// f64 → MLIR 字面量（%.17g；补 '.' 保证 MLIR 可解析——MLIR 浮点字面量
+/// 要求尾数含小数点：整数补 ".0"，指数形式（如 "1e+100"）在 'e' 前插 '.'；
+/// nan/inf 走十六进制位型）。
 std::string fmtF64(double d) {
     if (std::isnan(d)) return "0x7FF8000000000000";
     if (std::isinf(d)) return d > 0 ? "0x7FF0000000000000" : "0xFFF0000000000000";
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%.17g", d);
     std::string s = buf;
-    if (s.find('.') == std::string::npos && s.find('e') == std::string::npos &&
-        s.find('E') == std::string::npos)
-        s += ".0";
+    if (s.find('.') == std::string::npos) {
+        size_t e = s.find_first_of("eE");
+        if (e == std::string::npos)
+            s += ".0";
+        else
+            s.insert(e, 1, '.');
+    }
     return s;
 }
 
@@ -258,7 +264,11 @@ std::string escapeMlirStr(const std::string& text) {
 const char* builtinNames[] = {
     "print",    "str",  "len", "sum",       "now",   "range", "ok", "err",
     "abs",      "sqrt", "exp", "log",       "max",   "min",
-    "transpose", "reshape"};
+    "transpose", "reshape",
+    // v0.9.3 标量数学/随机/排序（与 BC::Compiler builtinNames 同表）
+    "sin",  "cos",  "tan",   "asin", "acos", "atan", "sinh", "cosh",
+    "tanh", "atan2", "floor", "ceil", "round", "trunc",
+    "random", "seed", "sorted"};
 
 bool isBuiltinName(const std::string& n) {
     for (const char* b : builtinNames)
@@ -963,6 +973,17 @@ VK Gen::inferVK(const Expr& e) const {
                 }
                 if (n.name == "sqrt" || n.name == "exp" || n.name == "log")
                     return VK::Float;
+                // v0.9.3 标量数学/随机/排序
+                if (n.name == "sin" || n.name == "cos" || n.name == "tan" ||
+                    n.name == "asin" || n.name == "acos" || n.name == "atan" ||
+                    n.name == "sinh" || n.name == "cosh" || n.name == "tanh" ||
+                    n.name == "atan2" || n.name == "random")
+                    return VK::Float;
+                if (n.name == "floor" || n.name == "ceil" ||
+                    n.name == "round" || n.name == "trunc")
+                    return VK::Int;
+                if (n.name == "seed") return VK::None;
+                if (n.name == "sorted") return VK::List;
                 if (n.name == "ok" || n.name == "err") return VK::Result;
                 return VK::Bad; // sum/max/min/transpose/reshape
             }
@@ -1677,15 +1698,21 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
             if (l.vk != VK::Tensor || r.vk != VK::Tensor)
                 unsupported(range, "'@' 需要两个张量操作数");
             // linalg 覆盖集：双 f64 + 两侧形状全静态 + 内维一致（内维不匹配
-            // 保留兜底 sg_*，运行时 panic 语义与 VM 零分叉）
-            std::string attrs;
-            if (!l.tInt && !r.tInt) {
+            // 保留兜底 sg_*，运行时 panic 语义与 VM 零分叉）。
+            // GPU 覆盖判定属性：dtype 恒写（GpuCover covers 依赖；动态形状
+            // matmul 由运行时 try 守卫校验秩/内维）；shape 属性仅双侧静态 +
+            // 内维相等时写（linalg 降级门槛，GPU 路径不依赖它）。
+            std::string attrs =
+                " {lhs_int = " + std::to_string(l.tInt ? 1 : 0) + " : i32" +
+                ", rhs_int = " + std::to_string(r.tInt ? 1 : 0) + " : i32";
+            {
                 auto lShape = staticF64Shape(lExpr);
                 auto rShape = staticF64Shape(rExpr);
                 if (lShape && rShape && (*lShape)[1] == (*rShape)[0])
-                    attrs = " {lhs_shape = " + shapeArrAttr(*lShape) +
-                            ", rhs_shape = " + shapeArrAttr(*rShape) + "}";
+                    attrs += ", lhs_shape = " + shapeArrAttr(*lShape) +
+                             ", rhs_shape = " + shapeArrAttr(*rShape);
             }
+            attrs += "}";
             std::string ssa = fresh();
             emit(ssa + " = \"lang.tensor_matmul\"(" + l.ssa + ", " + r.ssa +
                  ")" + attrs + " : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr " +
@@ -1698,16 +1725,21 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
             // 统一成静态结果，只查单侧会把动态张量误当静态降级（输入桥
             // 读错内存）；int 溢出/除零 panic 由逐元素 lang 标量 op 调用
             // 保持零分叉（sg_add_i64 等 == sg_tiop 同一实现）。
+            // GPU 覆盖判定属性：kind/dtype 恒写（GpuCover covers 依赖，
+            // 动态形状由运行时 try 守卫校验）；shape 仅双侧静态相等时写
+            // （linalg/affine 降级门槛——两 pass 合法性回调以"缺 shape
+            // 属性 = 合法"兜底，GPU 路径不依赖它）。
             std::string attrs;
             if (tOp >= 0) {
+                attrs = " {kind = " + std::to_string(tOp) + " : i32" +
+                        ", lhs_int = " + std::to_string(l.tInt ? 1 : 0) +
+                        " : i32, rhs_int = " + std::to_string(r.tInt ? 1 : 0) +
+                        " : i32";
                 auto lShape = staticShapeOf(lExpr);
                 auto rShape = staticShapeOf(rExpr);
                 if (lShape && rShape && *lShape == *rShape)
-                    attrs = " {kind = " + std::to_string(tOp) + " : i32" +
-                            ", shape = " + shapeArrAttr(*lShape) +
-                            ", lhs_int = " + std::to_string(l.tInt ? 1 : 0) +
-                            " : i32, rhs_int = " +
-                            std::to_string(r.tInt ? 1 : 0) + " : i32}";
+                    attrs += ", shape = " + shapeArrAttr(*lShape);
+                attrs += "}";
             }
             std::string ssa = fresh();
             emit(ssa + " = \"lang.tensor_binop_tt\"(" + i32Const(tOp) + ", " +
@@ -1740,19 +1772,21 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         }
         std::string si = i32Const(sc.vk != VK::Float ? 1 : 0);
         Value t = l.vk == VK::Tensor ? l : r;
-        // 张量降级覆盖集：+ - * / // % **（0-6）全 dtype 组合、张量侧形状
-        // 全静态（标量广播任意形状合法）。t_int/s_int 告知降级 pass 张量
-        // 元素与标量槽位（vi/sf）的 dtype；float 张量 × int 标量走 vf（
-        // MLIRGen 已 sitofp），int 张量 × float 标量降级处 sitofp 元素。
-        //（ts 查左表达式、st 查右表达式——张量所在侧）
+        // 张量降级覆盖集：+ - * / // % **（0-6）全 dtype 组合。GPU 覆盖判
+        // 定属性：kind/dtype 恒写（covers 依赖，动态形状运行时守卫）；shape
+        // 仅张量侧静态时写（linalg/affine 降级门槛）。t_int/s_int 告知降
+        // 级 pass 张量元素与标量槽位（vi/sf）的 dtype；float 张量 × int 标
+        // 量走 vf（MLIRGen 已 sitofp），int 张量 × float 标量降级处 sitofp
+        // 元素。（ts 查左表达式、st 查右表达式——张量所在侧）
         std::string attrs;
         if (tOp >= 0) {
+            attrs = " {kind = " + std::to_string(tOp) + " : i32" +
+                    ", t_int = " + std::to_string(t.tInt ? 1 : 0) + " : i32" +
+                    ", s_int = " + std::to_string(sc.vk != VK::Float ? 1 : 0) +
+                    " : i32";
             if (auto sh = staticShapeOf(l.vk == VK::Tensor ? lExpr : rExpr))
-                attrs = " {kind = " + std::to_string(tOp) + " : i32" +
-                        ", shape = " + shapeArrAttr(*sh) +
-                        ", t_int = " + std::to_string(t.tInt ? 1 : 0) +
-                        " : i32, s_int = " +
-                        std::to_string(sc.vk != VK::Float ? 1 : 0) + " : i32}";
+                attrs += ", shape = " + shapeArrAttr(*sh);
+            attrs += "}";
         }
         std::string ssa = fresh();
         if (l.vk == VK::Tensor) { // 张量 op 标量 → ts
@@ -2093,6 +2127,66 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         emit(ssa + " = \"" + uop->uSym + "\"(" + vf.ssa + ") : (f64) -> f64 " +
              opLoc());
         return Value{VK::Float, ssa};
+    }
+    // ---- v0.9.3 标量数学/随机/排序（仅标量与列表，不触碰张量路径） ----
+    // 三角/双曲/atan2：int 提升 f64，恒返回 float（依 IEEE 754，不 panic）。
+    if (name == "sin" || name == "cos" || name == "tan" || name == "asin" ||
+        name == "acos" || name == "atan" || name == "sinh" || name == "cosh" ||
+        name == "tanh") {
+        need(1);
+        Value vf = promoteF64(genExpr(*c.args[0]));
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang." + name + "\"(" + vf.ssa + ") : (f64) -> f64 " +
+             opLoc());
+        return Value{VK::Float, ssa};
+    }
+    if (name == "atan2") {
+        need(2);
+        Value vy = promoteF64(genExpr(*c.args[0]));
+        Value vx = promoteF64(genExpr(*c.args[1]));
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang.atan2\"(" + vy.ssa + ", " + vx.ssa +
+             ") : (f64, f64) -> f64 " + opLoc());
+        return Value{VK::Float, ssa};
+    }
+    // 取整族：int 输入恒等返回（大整数经 f64 会失真，禁止绕道）；
+    // float 输入 → i64，越界/NaN 由运行时 panic（挂上下文）。
+    if (name == "floor" || name == "ceil" || name == "round" ||
+        name == "trunc") {
+        need(1);
+        Value v = genExpr(*c.args[0]);
+        if (v.vk == VK::Int) return v;
+        if (v.vk != VK::Float)
+            unsupported(c.args[0]->range, name + "() 仅支持标量数值");
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang." + name + "\"(" + v.ssa + ") : (f64) -> i64 " +
+             opLoc());
+        return Value{VK::Int, ssa};
+    }
+    if (name == "random") {
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang.random\"() : () -> f64");
+        return Value{VK::Float, ssa};
+    }
+    if (name == "seed") {
+        need(1);
+        Value v = genExpr(*c.args[0]);
+        if (v.vk != VK::Int)
+            unsupported(c.args[0]->range, "seed() 参数必须是 int");
+        emit("\"lang.seed\"(" + v.ssa + ") : (i64) -> ()");
+        return Value{VK::None, ""};
+    }
+    // sorted：AOT 列表恒同质（SgList etag），运行时按 etag 泛型稳定升序。
+    if (name == "sorted") {
+        need(1);
+        Value v = genExpr(*c.args[0]);
+        if (v.vk != VK::List)
+            unsupported(c.args[0]->range, "sorted() 仅支持列表");
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang.sorted\"(" + v.ssa + ") : (!llvm.ptr) -> !llvm.ptr " +
+             opLoc());
+        // 元素类型透传（lElem 驱动后续 list_get_* 分派）
+        return Value{VK::List, ssa, false, 0, v.lElem};
     }
     if (name == "sum") {
         need(1);

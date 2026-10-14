@@ -83,9 +83,13 @@ bool convertToLLVMInProcess(const std::string& mlirText,
     mlir::MLIRContext ctx(registry, mlir::MLIRContext::Threading::DISABLED);
 
     // 诊断聚合：parse / pass / translate 的错误统一收集进 diagBuf。
+    // 附带位置（op emitError 的 FileLineColLoc）——默认 handler 被消费后
+    // 不会再补打，无位置信息则无法定位出错 op 与 pass 阶段。
     std::string diagBuf;
     mlir::ScopedDiagnosticHandler handler(&ctx, [&](mlir::Diagnostic& d) {
         llvm::raw_string_ostream os(diagBuf);
+        d.getLocation().print(os); // UnknownLoc 打为 loc(unknown)，无害
+        os << ": ";
         os << d.str() << "\n";
         return mlir::success(); // 消费诊断，不向默认 handler 传播
     });

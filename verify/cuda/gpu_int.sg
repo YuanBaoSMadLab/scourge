@@ -1,0 +1,40 @@
+# gpu_int.sg - GPU 覆盖集探针：int dtype 逐元素与归约（+ - * sum 走 GPU 溢出仿真 kernel，/ // % ** 走 CPU）
+def main() -> int:
+    ti = [[2, 4, 6], [8, 16, 32]]
+    tj = [[1, 2, 3], [4, 8, 16]]
+
+    # int tt kind 0-2（GPU：sadd/ssub/smul.with.overflow 仿真，无溢出与 CPU 逐位一致）
+    print("ti_add=" + str(ti + tj))
+    print("ti_sub=" + str(ti - tj))
+    print("ti_mul=" + str(ti * tj))
+
+    # int tt kind 3-6（CPU：'/' 恒 f64、'//'、'%'、'**'）
+    print("ti_div=" + str(ti / tj))
+    print("ti_floordiv=" + str(ti // tj))
+    print("ti_mod=" + str(ti % tj))
+    tp = [[2, 3], [4, 5]]
+    tq = [[3, 2], [2, 3]]
+    print("ti_pow=" + str(tp ** tq))
+
+    # int ts/st（GPU：标量取 vi 槽位 i64 值）
+    print("ts_add=" + str(ti + 100))
+    print("ts_sub=" + str(ti - 7))
+    print("ts_mul=" + str(ti * 3))
+    print("st_add=" + str(100 + ti))
+    print("st_sub=" + str(1000 - ti))
+    print("st_mul=" + str(3 * ti))
+
+    # int 归约（GPU：单线程升序 sadd.with.overflow 累加）
+    print("sum_i2d=" + str(sum(ti)))
+    print("sum_i1d=" + str(sum(ti[0])))
+    big = [[10000000000, 1], [1, 1]]
+    print("sum_i_big=" + str(sum(big)))
+
+    # 链式：GPU int 逐元素 → GPU int 归约；GPU 逐元素 → CPU f64 通道
+    print("chain=" + str(sum(ti * 2 + tj)))
+    print("mix_f=" + str((ti + tj) / 2))
+
+    # 溢出 panic 探针（末位）：CPU/GPU 同一溢出判定与同一 sg_panic 文本，四模一致 exit=1
+    huge = [[9223372036854775807, 1], [2, 3]]
+    print("ovf=" + str(huge + huge))
+    return 0

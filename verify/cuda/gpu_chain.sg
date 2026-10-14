@@ -1,0 +1,45 @@
+# gpu_chain.sg - 设备缓冲复用 + 惰性回拷探针：链式 GPU op 中间值驻留设备
+# （hostStale=1 免每步 DtoH/HtoD/MemFree），host 读入口（print/get/slice/sum）
+# 惰性回拷，host 写入（下标赋值）整体失效后 GPU op 重新上传。四模一致性即验证。
+def main() -> int:
+    a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    b = [[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]
+
+    # f64 长链：中间值全部驻留设备，仅最终 print 回拷一次
+    c = a * 2.0 + b
+    d = c - 1.0
+    e = (d + a) * b
+    print("chain=" + str(e))
+
+    # 中途 host 读（get 惰性回拷）后继续 GPU 链（设备块仍在，免再上传）
+    print("get=" + str(c[0, 1]))
+    f = c * 3.0
+    print("after_get=" + str(f))
+
+    # host 写入失效：下标赋值后 GPU op 重新上传
+    a[0, 0] = 100.0
+    print("set_then_gpu=" + str(a + b))
+
+    # GPU 输出喂 CPU 通道（'/' 恒 CPU）：CPU 入口回拷
+    print("cpu_div=" + str(e / 2.0))
+
+    # GPU 链喂 matmul/transpose/slice（跨 kernel 设备输入复用）
+    m1 = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+    m2 = [[1.0, 0.0, 2.0], [0.0, 1.0, 3.0]]
+    h = m1 @ m2
+    g = h + h
+    print("mm_chain=" + str(g))
+    print("tr=" + str(transpose(g)))
+    print("slice=" + str(g[0]))
+    print("sum_f=" + str(sum(g)))
+    print("mmsum=" + str(sum(m1 @ m2)))
+
+    # int 链：GPU int 逐元素 → int 归约（hostStale 链 + set 失效）
+    ti = [[2, 4, 6], [8, 16, 32]]
+    tj = [[1, 2, 3], [4, 8, 16]]
+    tk = ti * 2 + tj
+    print("ichain=" + str(tk))
+    print("isum=" + str(sum(tk)))
+    ti[0, 0] = 999
+    print("iset=" + str(ti * 2))
+    return 0

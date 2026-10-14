@@ -1,6 +1,9 @@
-# run_gpu_verify.ps1 - three-mode byte-identical verification for CUDA layer 1.
-# Modes per probe: (1) scourge run  (2) build CPU  (3) build --gpu  (4) build --gpu with SCOURGE_NO_GPU=1.
-# Compares stdout/stderr bytes (SHA256) and exit codes; also compares .mlir between CPU/GPU builds.
+# run_gpu_verify.ps1 - five-mode byte-identical verification for the GPU layer.
+# Modes per probe: (1) scourge run  (2) build CPU  (3) build --gpu (cuda default)
+#                  (4) build --gpu with SCOURGE_NO_GPU=1 (cpu fallback)
+#                  (5) build --gpu with SCOURGE_GPU_BACKEND=opencl
+# Compares stdout/stderr bytes (SHA256) and exit codes across all five modes;
+# also compares .mlir between CPU/GPU builds.
 # Layout: probes (source assets) live in d:\Scourge\verify\cuda (git-tracked);
 #         all generated artifacts go to d:\Scourge\build-rel\verify\cuda (git-ignored).
 # ASCII only (PowerShell 5.1 GBK lesson).
@@ -9,19 +12,24 @@ $scourge = "d:\Scourge\build-rel\scourge.exe"
 $src     = "d:\Scourge\verify\cuda"
 $dir     = "d:\Scourge\build-rel\verify\cuda"
 New-Item -ItemType Directory -Force $dir | Out-Null
-$probes  = @("gpu_ew", "gpu_mm", "gpu_sum_tr", "gpu_panic")
+$probes  = @("gpu_ew", "gpu_mm", "gpu_mm_tile", "gpu_sum_tr", "gpu_panic", "gpu_dyn", "gpu_int", "gpu_chain")
 
-function Invoke-Net([string]$exe, [string]$argStr, [string]$tag, [bool]$noGpu) {
+# $mode: "run" | "cpu" | "gpu" | "fb" | "ocl"
+function Invoke-Net([string]$exe, [string]$argStr, [string]$tag, [string]$mode) {
     $outF = Join-Path $dir ("{0}.out" -f $tag)
     $errF = Join-Path $dir ("{0}.err" -f $tag)
     Remove-Item $outF, $errF -ErrorAction SilentlyContinue
-    if ($noGpu) { $env:SCOURGE_NO_GPU = "1" } else { Remove-Item Env:SCOURGE_NO_GPU -ErrorAction SilentlyContinue }
+    Remove-Item Env:SCOURGE_NO_GPU -ErrorAction SilentlyContinue
+    Remove-Item Env:SCOURGE_GPU_BACKEND -ErrorAction SilentlyContinue
+    if ($mode -eq "fb") { $env:SCOURGE_NO_GPU = "1" }
+    elseif ($mode -eq "ocl") { $env:SCOURGE_GPU_BACKEND = "opencl" }
     if ($argStr) {
         $p = Start-Process -FilePath $exe -ArgumentList $argStr -RedirectStandardOutput $outF -RedirectStandardError $errF -NoNewWindow -Wait -PassThru
     } else {
         $p = Start-Process -FilePath $exe -RedirectStandardOutput $outF -RedirectStandardError $errF -NoNewWindow -Wait -PassThru
     }
-    if ($noGpu) { Remove-Item Env:SCOURGE_NO_GPU -ErrorAction SilentlyContinue }
+    Remove-Item Env:SCOURGE_NO_GPU -ErrorAction SilentlyContinue
+    Remove-Item Env:SCOURGE_GPU_BACKEND -ErrorAction SilentlyContinue
     return @($p.ExitCode, $outF, $errF)
 }
 
@@ -46,23 +54,29 @@ foreach ($name in $probes) {
     Remove-Item (Join-Path $dir ("{0}.sgbc" -f $name)) -ErrorAction SilentlyContinue
 
     # mode 1: scourge run (VM)
-    $r1 = Invoke-Net $scourge ("run `"{0}`"" -f $sg) ("{0}_run" -f $name) $false
+    $r1 = Invoke-Net $scourge ("run `"{0}`"" -f $sg) ("{0}_run" -f $name) "run"
 
-    # mode 2: build CPU
-    $rb = Invoke-Net $scourge ("build `"{0}`" -o `"{1}`"" -f $sg, $cpuExe) ("{0}_bcpu" -f $name) $false
+    # mode 2: build CPU (--no-cache: full pipeline must re-dump .mlir/.ll artifacts
+    #          every run; obj-cache hit path skips artifact writing by design)
+    $rb = Invoke-Net $scourge ("build --no-cache `"{0}`" -o `"{1}`"" -f $sg, $cpuExe) ("{0}_bcpu" -f $name) "run"
     if ($rb[0] -ne 0) { Write-Host "[$name] BUILD-CPU FAILED exit=$($rb[0])"; Get-Content ($rb[2]); $fail++; continue }
-    $r2 = Invoke-Net $cpuExe "" ("{0}_cpu" -f $name) $false
+    $r2 = Invoke-Net $cpuExe "" ("{0}_cpu" -f $name) "cpu"
 
-    # mode 3: build --gpu
-    $rg = Invoke-Net $scourge ("build --gpu `"{0}`" -o `"{1}`"" -f $sg, $gpuExe) ("{0}_bgpu" -f $name) $false
+    # mode 3: build --gpu (default backend: cuda)
+    $rg = Invoke-Net $scourge ("build --gpu --no-cache `"{0}`" -o `"{1}`"" -f $sg, $gpuExe) ("{0}_bgpu" -f $name) "run"
     if ($rg[0] -ne 0) { Write-Host "[$name] BUILD-GPU FAILED exit=$($rg[0])"; Get-Content ($rg[2]); $fail++; continue }
-    $r3 = Invoke-Net $gpuExe "" ("{0}_gpu" -f $name) $false
+    $r3 = Invoke-Net $gpuExe "" ("{0}_gpu" -f $name) "gpu"
 
     # mode 4: build --gpu + SCOURGE_NO_GPU=1 (runtime CPU fallback)
-    $r4 = Invoke-Net $gpuExe "" ("{0}_gpufb" -f $name) $true
+    $r4 = Invoke-Net $gpuExe "" ("{0}_gpufb" -f $name) "fb"
 
-    # .mlir must be byte-identical between CPU and GPU builds
-    $mlirSame = (Get-Hash2 $cpuMlir) -eq (Get-Hash2 $gpuMlir)
+    # mode 5: build --gpu + SCOURGE_GPU_BACKEND=opencl (OpenCL backend)
+    $r5 = Invoke-Net $gpuExe "" ("{0}_gpuaocl" -f $name) "ocl"
+
+    # .mlir must be byte-identical between CPU and GPU builds (missing = FAIL,
+    # e.g. stale obj cache skipped regeneration)
+    $mlirSame = (Test-Path $cpuMlir) -and (Test-Path $gpuMlir) -and `
+        ((Get-Hash2 $cpuMlir) -eq (Get-Hash2 $gpuMlir))
 
     # GPU exe must actually reference sg_gpu_* symbols
     $llTxt = ""
@@ -70,10 +84,11 @@ foreach ($name in $probes) {
     $hasGpuSym = $llTxt -match "sg_gpu_"
 
     $ok = $true
-    if ($r1[0] -ne $r2[0] -or $r2[0] -ne $r3[0] -or $r3[0] -ne $r4[0]) { $ok = $false }
-    foreach ($k in 1,2) {
-        $h1 = Get-Hash2 $r1[$k]; $h2 = Get-Hash2 $r2[$k]; $h3 = Get-Hash2 $r3[$k]; $h4 = Get-Hash2 $r4[$k]
-        if ($h1 -ne $h2 -or $h2 -ne $h3 -or $h3 -ne $h4) { $ok = $false }
+    foreach ($pair in @($r1, $r2, $r3, $r4, $r5)) {
+        if ($pair[0] -ne $r1[0]) { $ok = $false }
+        for ($k = 1; $k -le 2; $k++) {
+            if ((Get-Hash2 $pair[$k]) -ne (Get-Hash2 $r1[$k])) { $ok = $false }
+        }
     }
     if (-not $mlirSame) { $ok = $false }
 
@@ -81,8 +96,12 @@ foreach ($name in $probes) {
     if (-not $ok) { $status = "DIFFER"; $fail++ }
     Write-Host ("[{0}] {1} exit={2} mlir_same={3} gpu_syms={4}" -f $name, $status, $r3[0], $mlirSame, $hasGpuSym)
     if (-not $ok) {
-        Write-Host ("  hashes: run_out={0} cpu_out={1} gpu_out={2} fb_out={3}" -f (Get-Hash2 $r1[1]), (Get-Hash2 $r2[1]), (Get-Hash2 $r3[1]), (Get-Hash2 $r4[1]))
-        Write-Host ("  hashes: run_err={0} cpu_err={1} gpu_err={2} fb_err={3}" -f (Get-Hash2 $r1[2]), (Get-Hash2 $r2[2]), (Get-Hash2 $r3[2]), (Get-Hash2 $r4[2]))
+        $tags = @("run", "cpu", "gpu", "fb", "ocl")
+        $all = @($r1, $r2, $r3, $r4, $r5)
+        for ($k = 1; $k -le 2; $k++) {
+            $hs = ($tags | ForEach-Object { $i = $tags.IndexOf($_); ("{0}={1}" -f $_, (Get-Hash2 $all[$i][$k])) }) -join " "
+            Write-Host ("  hashes {0}: {1}" -f $(if ($k -eq 1) { "out" } else { "err" }), $hs)
+        }
     }
 }
 

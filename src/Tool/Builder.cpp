@@ -276,6 +276,61 @@ double sg_sqrt_f64(double v) { return sqrt(v); }
 double sg_exp_f64(double v) { return exp(v); }
 double sg_log_f64(double v) { return log(v); }
 
+/* ---- v0.9.3 标量数学/随机（与 VM::doBuiltin 语义逐字一致） ----
+ * 三角/双曲依 IEEE 754（asin(2) → nan），不 panic。 */
+double sg_sin_f64(double v) { return sin(v); }
+double sg_cos_f64(double v) { return cos(v); }
+double sg_tan_f64(double v) { return tan(v); }
+double sg_asin_f64(double v) { return asin(v); }
+double sg_acos_f64(double v) { return acos(v); }
+double sg_atan_f64(double v) { return atan(v); }
+double sg_sinh_f64(double v) { return sinh(v); }
+double sg_cosh_f64(double v) { return cosh(v); }
+double sg_tanh_f64(double v) { return tanh(v); }
+double sg_atan2_f64(double y, double x) { return atan2(y, x); }
+
+/* 取整族公共尾：NaN/±inf/结果超 int64 范围 panic（消息与 VM panicHere
+ * 逐字一致），不回绕。round = 半到偶（nearbyint，默认舍入模式）。 */
+static int64_t sg_int_range(double r, const char* fn, const char* file,
+                            int64_t line, const char* name) {
+    if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0)) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "%s() 结果超出 int64 范围", name);
+        sg_panic(fn, file, line, buf);
+    }
+    return (int64_t)r;
+}
+int64_t sg_floor_f64(double v, const char* fn, const char* file, int64_t line) {
+    return sg_int_range(floor(v), fn, file, line, "floor");
+}
+int64_t sg_ceil_f64(double v, const char* fn, const char* file, int64_t line) {
+    return sg_int_range(ceil(v), fn, file, line, "ceil");
+}
+int64_t sg_round_f64(double v, const char* fn, const char* file, int64_t line) {
+    return sg_int_range(nearbyint(v), fn, file, line, "round");
+}
+int64_t sg_trunc_f64(double v, const char* fn, const char* file, int64_t line) {
+    return sg_int_range(trunc(v), fn, file, line, "trunc");
+}
+
+/* ---- random/seed：splitmix64（与 VM::rngNext 逐位一致；默认状态 0，
+ * 每次进程运行序列确定——确定性红线，禁用时间/地址熵）。 ---- */
+static uint64_t sg_rng_state = 0;
+
+static uint64_t sg_rng_next(void) {
+    sg_rng_state += 0x9E3779B97F4A7C15ull;
+    uint64_t z = sg_rng_state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+double sg_random(void) {
+    return (double)(sg_rng_next() >> 11) * (1.0 / 9007199254740992.0);
+}
+
+void sg_seed(int64_t v) { sg_rng_state = (uint64_t)v; }
+
 double sg_now(void) {
 #ifdef _WIN32
     /* 单调时钟秒数（QPC，与 MSVC steady_clock 同源） */
@@ -312,7 +367,19 @@ typedef struct {
     int isInt;      /* 1 = i64 元素，0 = f64 */
     int64_t* i64;   /* isInt 时有效 */
     double* f64;    /* !isInt 时有效 */
+    void* dev;      /* GPU 设备副本（CUdeviceptr；非 0 = 设备驻留，GPU 构建专用） */
+    int hostStale;  /* dev 非 0 时 1 = 设备较新（GPU 输出惰性回拷） */
 } SgTensor;
+
+/* ---- 设备缓冲同步钩子：GPU 构建由分派层（同 TU 后段 kGpuRuntimeC）在初始化
+ * 成功后安装真实实现；其余构建恒空操作（dev 恒 0，零开销分支）。sg_tsync =
+ * host 读入口回拷（设备较新时）；sg_tdirty = host 写入口整体失效设备副本。 ---- */
+static void sg_tsync_nop(SgTensor* t) { (void)t; }
+static void sg_tdirty_nop(SgTensor* t) { (void)t; }
+static void (*sg_tsync_fn)(SgTensor*) = sg_tsync_nop;
+static void (*sg_tdirty_fn)(SgTensor*) = sg_tdirty_nop;
+static void sg_tsync(SgTensor* t) { sg_tsync_fn(t); }
+static void sg_tdirty(SgTensor* t) { sg_tdirty_fn(t); }
 
 static void* sg_xmalloc(size_t n) {
     void* p = malloc(n);
@@ -382,6 +449,8 @@ SgTensor* sg_tensor_from_i64(int64_t n, const int64_t* data) {
     t->isInt = 1;
     t->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
     t->f64 = 0;
+    t->dev = 0;
+    t->hostStale = 0;
     for (int64_t k = 0; k < n; ++k) t->i64[k] = data[k];
     return t;
 }
@@ -394,6 +463,8 @@ SgTensor* sg_tensor_from_f64(int64_t n, const double* data) {
     t->isInt = 0;
     t->i64 = 0;
     t->f64 = (double*)sg_xmalloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+    t->dev = 0;
+    t->hostStale = 0;
     for (int64_t k = 0; k < n; ++k) t->f64[k] = data[k];
     return t;
 }
@@ -407,6 +478,8 @@ SgTensor* sg_tensor_empty(void) {
     t->isInt = 1;
     t->i64 = 0;
     t->f64 = 0;
+    t->dev = 0;
+    t->hostStale = 0;
     return t;
 }
 
@@ -414,6 +487,7 @@ SgTensor* sg_tensor_empty(void) {
 
 /* 数据指针直取（按 isInt 分派 i64/f64 存储；LangToLinalg 输入桥用） */
 void* sg_tensor_data(SgTensor* t) {
+    sg_tsync(t); /* 设备驻留时先回拷（GPU 覆盖集输出喂 linalg 输入桥） */
     return t->isInt ? (void*)t->i64 : (void*)t->f64;
 }
 
@@ -429,6 +503,8 @@ SgTensor* sg_tensor_alloc(int isInt, int64_t rank, const int64_t* shape) {
         n *= shape[k];
     }
     t->isInt = isInt;
+    t->dev = 0;
+    t->hostStale = 0;
     if (isInt) {
         t->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
         t->f64 = 0;
@@ -443,6 +519,7 @@ SgTensor* sg_tensor_alloc(int isInt, int64_t rank, const int64_t* shape) {
  * 该内存同样为 malloc 且程序生命周期持有（AOT 运行时不 free），与
  * sg_xmalloc 的 arena 纪律一致，无双重所有权问题） */
 void sg_tensor_adopt(SgTensor* t, void* data) {
+    sg_tdirty(t); /* 数据指针被替换：旧设备副本（如有）整体失效 */
     if (t->isInt)
         t->i64 = (int64_t*)data;
     else
@@ -468,7 +545,10 @@ SgTensor* sg_tensor_concat(int64_t nrows, const SgTensor** rows,
         }
     }
     int allInt = 1;
-    for (int64_t k = 0; k < nrows; ++k) allInt &= rows[k]->isInt;
+    for (int64_t k = 0; k < nrows; ++k) {
+        sg_tsync((SgTensor*)rows[k]); /* 设备驻留行先回拷 */
+        allInt &= rows[k]->isInt;
+    }
 
     SgTensor* t = (SgTensor*)sg_xmalloc(sizeof(SgTensor));
     t->rank = r0->rank + 1;
@@ -476,6 +556,8 @@ SgTensor* sg_tensor_concat(int64_t nrows, const SgTensor** rows,
     t->shape[0] = nrows;
     for (int64_t d = 0; d < r0->rank; ++d) t->shape[d + 1] = r0->shape[d];
     t->isInt = allInt;
+    t->dev = 0;
+    t->hostStale = 0;
     int64_t rowN = sg_tsize(r0);
     int64_t total = nrows * rowN;
     if (allInt) {
@@ -595,11 +677,15 @@ static SgTensor* sg_tbinop(int op, const SgTensor* a, const SgTensor* tb,
     const int rInt = tb ? tb->isInt : (scalarLeft ? a->isInt : si64);
     const int outInt = (op != 3) && lInt && rInt;
     const int64_t n = sg_tsize(a);
+    sg_tsync((SgTensor*)a); /* 设备驻留输入先回拷（GPU try 失败回退 CPU 时） */
+    if (tb) sg_tsync((SgTensor*)tb);
     SgTensor* t = (SgTensor*)sg_xmalloc(sizeof(SgTensor));
     t->rank = a->rank;
     t->shape = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)a->rank);
     memcpy(t->shape, a->shape, sizeof(int64_t) * (size_t)a->rank);
     t->isInt = outInt;
+    t->dev = 0;
+    t->hostStale = 0;
     if (outInt) {
         /* outInt 时双侧必为整型（检查器已保证标量侧非 float） */
         t->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)n);
@@ -674,12 +760,16 @@ SgTensor* sg_tensor_matmul(SgTensor* a, SgTensor* b, const char* fn,
         sg_panic(fn, file, line, msg);
     }
     const int64_t m = a->shape[0], k = a->shape[1], n = b->shape[1];
+    sg_tsync(a); /* 设备驻留输入先回拷（GPU try 失败回退 CPU 时） */
+    sg_tsync(b);
     SgTensor* t = (SgTensor*)sg_xmalloc(sizeof(SgTensor));
     t->rank = 2;
     t->shape = (int64_t*)sg_xmalloc(sizeof(int64_t) * 2);
     t->shape[0] = m;
     t->shape[1] = n;
     t->isInt = a->isInt && b->isInt;
+    t->dev = 0;
+    t->hostStale = 0;
     const int64_t count = m * n;
     if (t->isInt) {
         t->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)count);
@@ -713,17 +803,20 @@ SgTensor* sg_tensor_matmul(SgTensor* a, SgTensor* b, const char* fn,
 
 int64_t sg_tensor_get_i(SgTensor* t, int64_t n, const int64_t* idx,
                         const char* fn, const char* file, int64_t line) {
+    sg_tsync(t); /* 设备驻留先回拷（GPU 输出惰性回拷读入口） */
     return t->i64[sg_tflat(t, n, idx, fn, file, line)];
 }
 
 double sg_tensor_get_f(SgTensor* t, int64_t n, const int64_t* idx,
                        const char* fn, const char* file, int64_t line) {
+    sg_tsync(t); /* 设备驻留先回拷（GPU 输出惰性回拷读入口） */
     return sg_tget_f64(t, sg_tflat(t, n, idx, fn, file, line));
 }
 
 /* 部分索引 → 子张量拷贝（行主序连续切片，与 VM tensorIndexRead 一致） */
 SgTensor* sg_tensor_slice(SgTensor* t, int64_t n, const int64_t* idx,
                           const char* fn, const char* file, int64_t line) {
+    sg_tsync(t); /* 设备驻留先回拷 */
     if (n > t->rank) {
         char msg[128];
         snprintf(msg, sizeof msg, "下标数量 %lld 超过张量秩 %lld",
@@ -738,6 +831,8 @@ SgTensor* sg_tensor_slice(SgTensor* t, int64_t n, const int64_t* idx,
     s->shape = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)(s->rank > 0 ? s->rank : 1));
     for (int64_t k = 0; k < s->rank; ++k) s->shape[k] = t->shape[n + k];
     s->isInt = t->isInt;
+    s->dev = 0;
+    s->hostStale = 0;
     const int64_t start = flat * rest;
     if (t->isInt) {
         s->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)rest);
@@ -761,6 +856,7 @@ void sg_tensor_set_i(SgTensor* t, int64_t n, const int64_t* idx, int64_t v,
         sg_panic(fn, file, line, msg);
     }
     t->i64[sg_tflat(t, n, idx, fn, file, line)] = v;
+    sg_tdirty(t); /* host 写入：设备副本整体失效 */
 }
 
 void sg_tensor_set_f(SgTensor* t, int64_t n, const int64_t* idx, double v,
@@ -773,11 +869,13 @@ void sg_tensor_set_f(SgTensor* t, int64_t n, const int64_t* idx, double v,
         sg_panic(fn, file, line, msg);
     }
     t->f64[sg_tflat(t, n, idx, fn, file, line)] = v;
+    sg_tdirty(t); /* host 写入：设备副本整体失效 */
 }
 
 int64_t sg_tensor_sum_i(SgTensor* t, const char* fn, const char* file,
                         int64_t line) {
     int64_t acc = 0;
+    sg_tsync(t); /* 设备驻留先回拷（GPU try 失败回退 CPU 时） */
     for (int64_t k = 0, n = sg_tsize(t); k < n; ++k) {
         int64_t out = 0;
         if (__builtin_add_overflow(acc, t->i64[k], &out))
@@ -789,6 +887,7 @@ int64_t sg_tensor_sum_i(SgTensor* t, const char* fn, const char* file,
 
 double sg_tensor_sum_f(SgTensor* t) {
     double acc = 0.0;
+    sg_tsync(t); /* 设备驻留先回拷（GPU try 失败回退 CPU 时） */
     for (int64_t k = 0, n = sg_tsize(t); k < n; ++k) acc += t->f64[k];
     return acc;
 }
@@ -797,12 +896,15 @@ double sg_tensor_sum_f(SgTensor* t) {
 SgTensor* sg_tensor_un(int fnid, SgTensor* t, const char* fn,
                        const char* file, int64_t line) {
     const int64_t n = sg_tsize(t);
+    sg_tsync(t); /* 设备驻留先回拷 */
     SgTensor* r = (SgTensor*)sg_xmalloc(sizeof(SgTensor));
     r->rank = t->rank;
     r->shape = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)t->rank);
     memcpy(r->shape, t->shape, sizeof(int64_t) * (size_t)t->rank);
     const int outInt = (fnid == 0) && t->isInt;
     r->isInt = outInt;
+    r->dev = 0;
+    r->hostStale = 0;
     if (outInt) {
         r->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)n);
         r->f64 = 0;
@@ -832,6 +934,7 @@ int64_t sg_tensor_reduce_i(int isMax, SgTensor* t, const char* name,
         snprintf(msg, sizeof msg, "%s() 不支持空张量", name);
         sg_panic(fn, file, line, msg);
     }
+    sg_tsync(t); /* 设备驻留先回拷 */
     int64_t best = t->i64[0];
     for (int64_t k = 1, n = sg_tsize(t); k < n; ++k) {
         int64_t x = t->i64[k];
@@ -847,6 +950,7 @@ double sg_tensor_reduce_f(int isMax, SgTensor* t, const char* name,
         snprintf(msg, sizeof msg, "%s() 不支持空张量", name);
         sg_panic(fn, file, line, msg);
     }
+    sg_tsync(t); /* 设备驻留先回拷 */
     double best = t->f64[0];
     for (int64_t k = 1, n = sg_tsize(t); k < n; ++k) {
         double x = t->f64[k];
@@ -864,12 +968,15 @@ SgTensor* sg_tensor_transpose(SgTensor* t, const char* fn, const char* file,
         sg_panic(fn, file, line, msg);
     }
     const int64_t m = t->shape[0], c = t->shape[1];
+    sg_tsync(t); /* 设备驻留先回拷（GPU try 失败回退 CPU 时） */
     SgTensor* r = (SgTensor*)sg_xmalloc(sizeof(SgTensor));
     r->rank = 2;
     r->shape = (int64_t*)sg_xmalloc(sizeof(int64_t) * 2);
     r->shape[0] = c;
     r->shape[1] = m;
     r->isInt = t->isInt;
+    r->dev = 0;
+    r->hostStale = 0;
     if (t->isInt) {
         r->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)(m * c));
         r->f64 = 0;
@@ -905,7 +1012,10 @@ SgTensor* sg_tensor_reshape(SgTensor* t, int64_t rank, const int64_t* dims,
     r->shape = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)rank);
     memcpy(r->shape, dims, sizeof(int64_t) * (size_t)rank);
     r->isInt = t->isInt;
+    r->dev = 0;
+    r->hostStale = 0;
     const int64_t n = sg_tsize(t);
+    sg_tsync(t); /* 设备驻留先回拷 */
     if (t->isInt) {
         r->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)n);
         r->f64 = 0;
@@ -956,6 +1066,7 @@ static const char* sg_tfmt(const SgTensor* t) {
     static char buf[1 << 20]; /* 1MB 静态缓冲；print 立即消费 */
     char sb[256];
     char* p = buf;
+    sg_tsync((SgTensor*)t); /* 设备驻留先回拷（print/str 读入口） */
     p += sprintf(p, "Tensor%s ", sg_shape_str(sb, sizeof sb, t));
     sg_tfmt_rec(t, 0, 0, &p);
     *p = 0;
@@ -1116,17 +1227,103 @@ const char* sg_list_get_s(SgList* l, int64_t idx, const char* fn,
                           const char* file, int64_t line) {
     return ((char**)l->data)[sg_list_norm(l, idx, fn, file, line)];
 }
+
+/* ---- sorted（v0.9.3）：按 etag 稳定升序，返回新列表。
+ * 稳定性经 (值, 原下标) 装饰 + qsort 实现（qsort 不稳定，下标决胜）。
+ * NaN 显式拒绝：NaN 不可比破坏全序，panic 而非静默（与 VM 同语义同消息）。
+ * etag 0=i64 1=f64 2=str 3=bool（bool 借道 i64 路径，false<true）。 ---- */
+typedef struct { int64_t key; int64_t idx; } SgSortI64;
+typedef struct { double key; int64_t idx; } SgSortF64;
+typedef struct { const char* key; int64_t idx; } SgSortStr;
+
+static int sg_sort_i64(const void* x, const void* y) {
+    const SgSortI64* a = (const SgSortI64*)x;
+    const SgSortI64* b = (const SgSortI64*)y;
+    if (a->key != b->key) return a->key < b->key ? -1 : 1;
+    return a->idx < b->idx ? -1 : 1;
+}
+static int sg_sort_f64(const void* x, const void* y) {
+    const SgSortF64* a = (const SgSortF64*)x;
+    const SgSortF64* b = (const SgSortF64*)y;
+    if (a->key != b->key) return a->key < b->key ? -1 : 1;
+    return a->idx < b->idx ? -1 : 1;
+}
+static int sg_sort_str(const void* x, const void* y) {
+    const SgSortStr* a = (const SgSortStr*)x;
+    const SgSortStr* b = (const SgSortStr*)y;
+    int c = strcmp(a->key, b->key);
+    if (c != 0) return c;
+    return a->idx < b->idx ? -1 : 1;
+}
+
+SgList* sg_sorted(SgList* l, const char* fn, const char* file, int64_t line) {
+    SgList* out = sg_list_empty();
+    out->len = l->len;
+    out->etag = l->etag;
+    int64_t n = l->len;
+    if (n <= 0) return out;
+    if (l->etag == 0 || l->etag == 3) {
+        SgSortI64* tmp = (SgSortI64*)malloc(sizeof(SgSortI64) * (size_t)n);
+        if (!tmp) exit(1);
+        for (int64_t k = 0; k < n; ++k) {
+            tmp[k].key = ((const int64_t*)l->data)[k];
+            tmp[k].idx = k;
+        }
+        qsort(tmp, (size_t)n, sizeof(SgSortI64), sg_sort_i64);
+        out->data = malloc(sizeof(int64_t) * (size_t)n);
+        if (!out->data) exit(1);
+        for (int64_t k = 0; k < n; ++k) ((int64_t*)out->data)[k] = tmp[k].key;
+        free(tmp);
+        return out;
+    }
+    if (l->etag == 1) {
+        const double* a = (const double*)l->data;
+        for (int64_t k = 0; k < n; ++k)
+            if (isnan(a[k]))
+                sg_panic(fn, file, line, "sorted() 不支持含 NaN 的浮点元素");
+        SgSortF64* tmp = (SgSortF64*)malloc(sizeof(SgSortF64) * (size_t)n);
+        if (!tmp) exit(1);
+        for (int64_t k = 0; k < n; ++k) {
+            tmp[k].key = a[k];
+            tmp[k].idx = k;
+        }
+        qsort(tmp, (size_t)n, sizeof(SgSortF64), sg_sort_f64);
+        out->data = malloc(sizeof(double) * (size_t)n);
+        if (!out->data) exit(1);
+        for (int64_t k = 0; k < n; ++k) ((double*)out->data)[k] = tmp[k].key;
+        free(tmp);
+        return out;
+    }
+    /* etag 2：str 按字节序（与 sg_str_cmp / VM str 比较一致）。 */
+    SgSortStr* tmp = (SgSortStr*)malloc(sizeof(SgSortStr) * (size_t)n);
+    if (!tmp) exit(1);
+    for (int64_t k = 0; k < n; ++k) {
+        tmp[k].key = ((const char* const*)l->data)[k];
+        tmp[k].idx = k;
+    }
+    qsort(tmp, (size_t)n, sizeof(SgSortStr), sg_sort_str);
+    out->data = malloc(sizeof(char*) * (size_t)n);
+    if (!out->data) exit(1);
+    for (int64_t k = 0; k < n; ++k) ((char**)out->data)[k] = (char*)tmp[k].key;
+    free(tmp);
+    return out;
+}
 )RT";
 
 // ----------------------------------------------------------------------------
 // CUDA 第 1 层：GPU kernel PTX 与分派运行时（--gpu 时追加写入 _rt.c）
 // ----------------------------------------------------------------------------
-// PTX 由 build-rel/verify/cuda/sg_kernels.ll 经 E:\llvm llc
-// (-march=nvptx64 -mcpu=sm_120) 生成——五个形状参数化 kernel：
-//   sg_ew_tt / sg_ew_ts（逐元素 + - *，ts/st 经 sleft 选择子方向）、
-//   sg_mm（matmul，k 串行升序）、sg_sum（单线程升序归约）、sg_tr（2D 转置）。
-// 确定性红线：kernel 浮点运算顺序与 CPU 路径逐位一致（add.rn.f64 IEEE RN，
-// mm/sum 串行升序累加），三模输出逐字节可比；sm_120 之外机型 JIT 失败 →
+// PTX 由 verify/cuda/sg_kernels.ll 经 D:\LLVM\bin\llc
+// (-march=nvptx64 -mcpu=sm_120) 生成——八个形状参数化 kernel：
+//   sg_ew_tt / sg_ew_ts（f64 逐元素 + - *，ts/st 经 sleft 选择子方向）、
+//   sg_ew_ti / sg_ew_tsi（int 逐元素 + - *，sadd/ssub/smul.with.overflow
+//   溢出仿真 + atomicrmw or 状态上报）、
+//   sg_mm（matmul shared-memory tiling 32×32，p 串行升序累加）、
+//   sg_sum（f64 单线程升序归约）、
+//   sg_sum_i（int 归约，同款溢出仿真）、sg_tr（2D 转置）。
+// 确定性红线：kernel 浮点/整数运算顺序与 CPU 路径逐位一致（add.rn.f64
+// IEEE RN，mm/sum 串行升序累加，int 溢出判定与 __builtin_*_overflow 同一
+// intrinsic），三模输出逐字节可比；sm_120 之外机型 JIT 失败 →
 // 运行时自动回退 CPU（语义一致，仅性能降级）。
 const char kGpuPtxC[] = R"PTX(//
 // Generated by LLVM NVPTX Back-End
@@ -1137,6 +1334,8 @@ const char kGpuPtxC[] = R"PTX(//
 .address_size 64
 
 	// .globl	sg_ew_tt                // -- Begin function sg_ew_tt
+// sg_mm_at has been demoted
+// sg_mm_bt has been demoted
                                         // @sg_ew_tt
 .visible .entry sg_ew_tt(
 	.param .u64 .ptr .align 1 sg_ew_tt_param_0,
@@ -1257,6 +1456,160 @@ $L__BB1_8:                              // %exit
 	ret;
                                         // -- End function
 }
+	// .globl	sg_ew_ti                // -- Begin function sg_ew_ti
+.visible .entry sg_ew_ti(
+	.param .u64 .ptr .align 1 sg_ew_ti_param_0,
+	.param .u64 .ptr .align 1 sg_ew_ti_param_1,
+	.param .u64 .ptr .align 1 sg_ew_ti_param_2,
+	.param .u64 sg_ew_ti_param_3,
+	.param .u32 sg_ew_ti_param_4,
+	.param .u64 .ptr .align 1 sg_ew_ti_param_5
+)                                       // @sg_ew_ti
+{
+	.reg .pred 	%p<11>;
+	.reg .b32 	%r<6>;
+	.reg .b64 	%rd<22>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd8, [sg_ew_ti_param_0];
+	ld.param.b64 	%rd9, [sg_ew_ti_param_1];
+	cvta.to.global.u64 	%rd1, %rd9;
+	ld.param.b64 	%rd10, [sg_ew_ti_param_2];
+	cvta.to.global.u64 	%rd2, %rd10;
+	ld.param.b64 	%rd11, [sg_ew_ti_param_5];
+	cvta.to.global.u64 	%rd3, %rd11;
+	ld.param.b64 	%rd12, [sg_ew_ti_param_3];
+	cvta.to.global.u64 	%rd4, %rd8;
+	mov.u32 	%r2, %tid.x;
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r4, %ctaid.x;
+	cvt.u64.u32 	%rd13, %r2;
+	mul.wide.u32 	%rd14, %r4, %r3;
+	add.s64 	%rd5, %rd14, %rd13;
+	setp.ge.s64 	%p1, %rd5, %rd12;
+	@%p1 bra 	$L__BB2_10;
+// %bb.1:                               // %do
+	ld.param.b32 	%r1, [sg_ew_ti_param_4];
+	shl.b64 	%rd15, %rd5, 3;
+	add.s64 	%rd16, %rd1, %rd15;
+	add.s64 	%rd17, %rd2, %rd15;
+	ld.global.b64 	%rd6, [%rd16];
+	ld.global.b64 	%rd7, [%rd17];
+	setp.eq.b32 	%p2, %r1, 2;
+	@%p2 bra 	$L__BB2_6;
+// %bb.2:                               // %do
+	setp.eq.b32 	%p3, %r1, 1;
+	@%p3 bra 	$L__BB2_5;
+// %bb.3:                               // %do
+	setp.ne.b32 	%p4, %r1, 0;
+	@%p4 bra 	$L__BB2_10;
+// %bb.4:                               // %add
+	add.s64 	%rd21, %rd6, %rd7;
+	setp.lt.s64 	%p7, %rd21, %rd6;
+	setp.lt.s64 	%p8, %rd7, 0;
+	xor.pred 	%p10, %p8, %p7;
+	bra.uni 	$L__BB2_7;
+$L__BB2_5:                              // %sub
+	setp.lt.s64 	%p5, %rd6, %rd7;
+	sub.s64 	%rd21, %rd6, %rd7;
+	setp.lt.s64 	%p6, %rd21, 0;
+	xor.pred 	%p10, %p5, %p6;
+	bra.uni 	$L__BB2_7;
+$L__BB2_6:                              // %mul
+	mul.hi.s64 	%rd18, %rd6, %rd7;
+	mul.lo.s64 	%rd21, %rd6, %rd7;
+	shr.s64 	%rd19, %rd21, 63;
+	setp.ne.b64 	%p10, %rd18, %rd19;
+$L__BB2_7:                              // %chk
+	not.pred 	%p9, %p10;
+	@%p9 bra 	$L__BB2_9;
+// %bb.8:                               // %ovf
+	atom.relaxed.sys.global.or.b32 	%r5, [%rd3], 1;
+$L__BB2_9:                              // %wr
+	add.s64 	%rd20, %rd4, %rd15;
+	st.global.b64 	[%rd20], %rd21;
+$L__BB2_10:                             // %exit
+	ret;
+                                        // -- End function
+}
+	// .globl	sg_ew_tsi               // -- Begin function sg_ew_tsi
+.visible .entry sg_ew_tsi(
+	.param .u64 .ptr .align 1 sg_ew_tsi_param_0,
+	.param .u64 .ptr .align 1 sg_ew_tsi_param_1,
+	.param .u64 sg_ew_tsi_param_2,
+	.param .u64 sg_ew_tsi_param_3,
+	.param .u32 sg_ew_tsi_param_4,
+	.param .u32 sg_ew_tsi_param_5,
+	.param .u64 .ptr .align 1 sg_ew_tsi_param_6
+)                                       // @sg_ew_tsi
+{
+	.reg .pred 	%p<12>;
+	.reg .b32 	%r<7>;
+	.reg .b64 	%rd<21>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd8, [sg_ew_tsi_param_0];
+	ld.param.b64 	%rd9, [sg_ew_tsi_param_1];
+	cvta.to.global.u64 	%rd1, %rd9;
+	ld.param.b64 	%rd10, [sg_ew_tsi_param_6];
+	cvta.to.global.u64 	%rd2, %rd10;
+	cvta.to.global.u64 	%rd3, %rd8;
+	ld.param.b64 	%rd11, [sg_ew_tsi_param_3];
+	mov.u32 	%r3, %tid.x;
+	mov.u32 	%r4, %ntid.x;
+	mov.u32 	%r5, %ctaid.x;
+	cvt.u64.u32 	%rd12, %r3;
+	mul.wide.u32 	%rd13, %r5, %r4;
+	add.s64 	%rd4, %rd13, %rd12;
+	setp.ge.s64 	%p1, %rd4, %rd11;
+	@%p1 bra 	$L__BB3_10;
+// %bb.1:                               // %do
+	ld.param.b32 	%r2, [sg_ew_tsi_param_5];
+	ld.param.b32 	%r1, [sg_ew_tsi_param_4];
+	ld.param.b64 	%rd7, [sg_ew_tsi_param_2];
+	shl.b64 	%rd14, %rd4, 3;
+	add.s64 	%rd15, %rd1, %rd14;
+	ld.global.b64 	%rd16, [%rd15];
+	setp.ne.b32 	%p2, %r2, 0;
+	selp.b64 	%rd5, %rd7, %rd16, %p2;
+	selp.b64 	%rd6, %rd16, %rd7, %p2;
+	setp.eq.b32 	%p3, %r1, 2;
+	@%p3 bra 	$L__BB3_6;
+// %bb.2:                               // %do
+	setp.eq.b32 	%p4, %r1, 1;
+	@%p4 bra 	$L__BB3_5;
+// %bb.3:                               // %do
+	setp.ne.b32 	%p5, %r1, 0;
+	@%p5 bra 	$L__BB3_10;
+// %bb.4:                               // %add
+	add.s64 	%rd20, %rd5, %rd6;
+	setp.lt.s64 	%p8, %rd20, %rd5;
+	setp.lt.s64 	%p9, %rd6, 0;
+	xor.pred 	%p11, %p9, %p8;
+	bra.uni 	$L__BB3_7;
+$L__BB3_5:                              // %sub
+	setp.lt.s64 	%p6, %rd5, %rd6;
+	sub.s64 	%rd20, %rd5, %rd6;
+	setp.lt.s64 	%p7, %rd20, 0;
+	xor.pred 	%p11, %p6, %p7;
+	bra.uni 	$L__BB3_7;
+$L__BB3_6:                              // %mul
+	mul.hi.s64 	%rd17, %rd5, %rd6;
+	mul.lo.s64 	%rd20, %rd5, %rd6;
+	shr.s64 	%rd18, %rd20, 63;
+	setp.ne.b64 	%p11, %rd17, %rd18;
+$L__BB3_7:                              // %chk
+	not.pred 	%p10, %p11;
+	@%p10 bra 	$L__BB3_9;
+// %bb.8:                               // %ovf
+	atom.relaxed.sys.global.or.b32 	%r6, [%rd2], 1;
+$L__BB3_9:                              // %wr
+	add.s64 	%rd19, %rd3, %rd14;
+	st.global.b64 	[%rd19], %rd20;
+$L__BB3_10:                             // %exit
+	ret;
+                                        // -- End function
+}
 	// .globl	sg_mm                   // -- Begin function sg_mm
 .visible .entry sg_mm(
 	.param .u64 .ptr .align 1 sg_mm_param_0,
@@ -1267,75 +1620,109 @@ $L__BB1_8:                              // %exit
 	.param .u64 sg_mm_param_5
 )                                       // @sg_mm
 {
-	.reg .pred 	%p<4>;
-	.reg .b32 	%r<9>;
-	.reg .b64 	%rd<32>;
-
+	.reg .pred 	%p<12>;
+	.reg .b32 	%r<5>;
+	.reg .b64 	%rd<54>;
+	// demoted variable
+	.shared .align 8 .b8 sg_mm_at[8192];
+	// demoted variable
+	.shared .align 8 .b8 sg_mm_bt[8192];
 // %bb.0:                               // %entry
-	ld.param.b64 	%rd6, [sg_mm_param_4];
-	ld.param.b64 	%rd8, [sg_mm_param_0];
-	ld.param.b64 	%rd9, [sg_mm_param_1];
-	cvta.to.global.u64 	%rd1, %rd9;
-	ld.param.b64 	%rd10, [sg_mm_param_2];
-	cvta.to.global.u64 	%rd2, %rd10;
-	cvta.to.global.u64 	%rd3, %rd8;
-	ld.param.b64 	%rd11, [sg_mm_param_3];
+	ld.param.b64 	%rd14, [sg_mm_param_5];
+	ld.param.b64 	%rd13, [sg_mm_param_4];
+	ld.param.b64 	%rd12, [sg_mm_param_3];
+	ld.param.b64 	%rd15, [sg_mm_param_0];
+	ld.param.b64 	%rd16, [sg_mm_param_1];
+	cvta.to.global.u64 	%rd1, %rd16;
+	ld.param.b64 	%rd17, [sg_mm_param_2];
+	cvta.to.global.u64 	%rd2, %rd17;
+	cvta.to.global.u64 	%rd3, %rd15;
 	mov.u32 	%r1, %tid.x;
-	mov.u32 	%r2, %ntid.x;
+	mov.u32 	%r2, %tid.y;
 	mov.u32 	%r3, %ctaid.x;
-	cvt.u64.u32 	%rd12, %r1;
-	mul.wide.u32 	%rd13, %r3, %r2;
-	add.s64 	%rd4, %rd13, %rd12;
-	mul.lo.s64 	%rd14, %rd11, %rd6;
-	setp.ge.s64 	%p1, %rd4, %rd14;
-	@%p1 bra 	$L__BB2_8;
-// %bb.1:                               // %do
-	ld.param.b64 	%rd7, [sg_mm_param_5];
-	or.b64 	%rd15, %rd4, %rd6;
-	and.b64 	%rd16, %rd15, -4294967296;
-	setp.ne.b64 	%p2, %rd16, 0;
-	@!%p2 bra 	$L__BB2_2;
-// %bb.3:
-	div.s64 	%rd26, %rd4, %rd6;
-	mul.lo.s64 	%rd17, %rd26, %rd6;
-	sub.s64 	%rd27, %rd4, %rd17;
-	bra.uni 	$L__BB2_4;
-$L__BB2_2:
-	cvt.u32.u64 	%r4, %rd6;
-	cvt.u32.u64 	%r5, %rd4;
-	div.u32 	%r6, %r5, %r4;
-	mul.lo.s32 	%r7, %r6, %r4;
-	sub.s32 	%r8, %r5, %r7;
-	cvt.u64.u32 	%rd26, %r6;
-	cvt.u64.u32 	%rd27, %r8;
-$L__BB2_4:                              // %do.split
-	shl.b64 	%rd18, %rd27, 3;
-	add.s64 	%rd29, %rd2, %rd18;
-	shl.b64 	%rd5, %rd6, 3;
-	mul.lo.s64 	%rd19, %rd26, %rd7;
-	shl.b64 	%rd20, %rd19, 3;
-	add.s64 	%rd28, %rd1, %rd20;
-	mov.b64 	%rd31, 0d0000000000000000;
-	mov.b64 	%rd30, 0;
-$L__BB2_5:                              // %lp
-                                        // =>This Inner Loop Header: Depth=1
-	setp.ge.s64 	%p3, %rd30, %rd7;
-	@%p3 bra 	$L__BB2_7;
-// %bb.6:                               // %body
-                                        //   in Loop: Header=BB2_5 Depth=1
-	ld.global.b64 	%rd23, [%rd28];
-	ld.global.b64 	%rd24, [%rd29];
-	mul.rn.f64 	%rd25, %rd23, %rd24;
-	add.rn.f64 	%rd31, %rd31, %rd25;
-	add.s64 	%rd30, %rd30, 1;
-	add.s64 	%rd29, %rd29, %rd5;
-	add.s64 	%rd28, %rd28, 8;
-	bra.uni 	$L__BB2_5;
-$L__BB2_7:                              // %done
-	shl.b64 	%rd21, %rd4, 3;
-	add.s64 	%rd22, %rd3, %rd21;
-	st.global.b64 	[%rd22], %rd31;
-$L__BB2_8:                              // %exit
+	mov.u32 	%r4, %ctaid.y;
+	cvt.u64.u32 	%rd4, %r1;
+	cvt.u64.u32 	%rd5, %r2;
+	mul.wide.u32 	%rd18, %r3, 32;
+	mul.wide.u32 	%rd19, %r4, 32;
+	add.s64 	%rd6, %rd19, %rd5;
+	add.s64 	%rd7, %rd18, %rd4;
+	setp.lt.s64 	%p2, %rd6, %rd12;
+	setp.lt.s64 	%p3, %rd7, %rd13;
+	and.pred 	%p1, %p2, %p3;
+	mul.wide.u32 	%rd20, %r2, 32;
+	add.s64 	%rd8, %rd20, %rd4;
+	mul.wide.u32 	%rd21, %r1, 8;
+	mov.b64 	%rd22, sg_mm_bt;
+	add.s64 	%rd9, %rd22, %rd21;
+	mul.wide.u32 	%rd23, %r2, 256;
+	mov.b64 	%rd24, sg_mm_at;
+	add.s64 	%rd10, %rd24, %rd23;
+	mov.b64 	%rd50, 0d0000000000000000;
+	mov.b64 	%rd49, 0;
+	shl.b64 	%rd41, %rd8, 3;
+$L__BB4_1:                              // %blk
+                                        // =>This Loop Header: Depth=1
+                                        //     Child Loop BB4_3 Depth 2
+	setp.ge.s64 	%p4, %rd49, %rd14;
+	@%p4 bra 	$L__BB4_5;
+// %bb.2:                               // %load
+                                        //   in Loop: Header=BB4_1 Depth=1
+	add.s64 	%rd27, %rd49, %rd4;
+	setp.lt.s64 	%p6, %rd27, %rd14;
+	and.pred 	%p7, %p2, %p6;
+	mad.lo.s64 	%rd28, %rd6, %rd14, %rd27;
+	selp.b64 	%rd29, %rd28, 0, %p7;
+	shl.b64 	%rd30, %rd29, 3;
+	add.s64 	%rd31, %rd1, %rd30;
+	ld.global.b64 	%rd32, [%rd31];
+	selp.f64 	%rd33, %rd32, 0d0000000000000000, %p7;
+	add.s64 	%rd34, %rd49, %rd5;
+	setp.lt.s64 	%p8, %rd34, %rd14;
+	and.pred 	%p9, %p8, %p3;
+	mad.lo.s64 	%rd35, %rd34, %rd13, %rd7;
+	selp.b64 	%rd36, %rd35, 0, %p9;
+	shl.b64 	%rd37, %rd36, 3;
+	add.s64 	%rd38, %rd2, %rd37;
+	ld.global.b64 	%rd39, [%rd38];
+	selp.f64 	%rd40, %rd39, 0d0000000000000000, %p9;
+	add.s64 	%rd42, %rd24, %rd41;
+	st.shared.b64 	[%rd42], %rd33;
+	add.s64 	%rd43, %rd22, %rd41;
+	st.shared.b64 	[%rd43], %rd40;
+	bar.sync 	0;
+	mov.b64 	%rd53, 0;
+	mov.b64 	%rd51, %rd10;
+	mov.b64 	%rd52, %rd9;
+$L__BB4_3:                              // %inner
+                                        //   Parent Loop BB4_1 Depth=1
+                                        // =>  This Inner Loop Header: Depth=2
+	add.s64 	%rd44, %rd49, %rd53;
+	ld.shared.b64 	%rd45, [%rd51];
+	ld.shared.b64 	%rd46, [%rd52];
+	mul.rn.f64 	%rd47, %rd45, %rd46;
+	add.rn.f64 	%rd48, %rd50, %rd47;
+	setp.lt.s64 	%p10, %rd44, %rd14;
+	selp.f64 	%rd50, %rd48, %rd50, %p10;
+	add.s64 	%rd53, %rd53, 1;
+	add.s64 	%rd52, %rd52, 256;
+	add.s64 	%rd51, %rd51, 8;
+	setp.ne.b64 	%p11, %rd53, 32;
+	@%p11 bra 	$L__BB4_3;
+// %bb.4:                               // %bar2
+                                        //   in Loop: Header=BB4_1 Depth=1
+	bar.sync 	0;
+	add.s64 	%rd49, %rd49, 32;
+	bra.uni 	$L__BB4_1;
+$L__BB4_5:                              // %done
+	not.pred 	%p5, %p1;
+	@%p5 bra 	$L__BB4_7;
+// %bb.6:                               // %wr
+	mad.lo.s64 	%rd25, %rd6, %rd13, %rd7;
+	shl.b64 	%rd26, %rd25, 3;
+	add.s64 	%rd11, %rd3, %rd26;
+	st.global.b64 	[%rd11], %rd50;
+$L__BB4_7:                              // %exit
 	ret;
                                         // -- End function
 }
@@ -1359,25 +1746,82 @@ $L__BB2_8:                              // %exit
 	mov.u32 	%r2, %ctaid.x;
 	or.b32 	%r3, %r1, %r2;
 	setp.ne.b32 	%p1, %r3, 0;
-	@%p1 bra 	$L__BB3_5;
+	@%p1 bra 	$L__BB5_5;
 // %bb.1:                               // %lp.preheader
 	ld.param.b64 	%rd2, [sg_sum_param_2];
 	mov.b64 	%rd8, 0d0000000000000000;
 	mov.b64 	%rd7, 0;
-$L__BB3_2:                              // %lp
+$L__BB5_2:                              // %lp
                                         // =>This Inner Loop Header: Depth=1
 	setp.ge.s64 	%p2, %rd7, %rd2;
-	@%p2 bra 	$L__BB3_4;
+	@%p2 bra 	$L__BB5_4;
 // %bb.3:                               // %body
-                                        //   in Loop: Header=BB3_2 Depth=1
+                                        //   in Loop: Header=BB5_2 Depth=1
 	ld.global.b64 	%rd5, [%rd6];
 	add.rn.f64 	%rd8, %rd8, %rd5;
 	add.s64 	%rd7, %rd7, 1;
 	add.s64 	%rd6, %rd6, 8;
-	bra.uni 	$L__BB3_2;
-$L__BB3_4:                              // %done
+	bra.uni 	$L__BB5_2;
+$L__BB5_4:                              // %done
 	st.global.b64 	[%rd1], %rd8;
-$L__BB3_5:                              // %exit
+$L__BB5_5:                              // %exit
+	ret;
+                                        // -- End function
+}
+	// .globl	sg_sum_i                // -- Begin function sg_sum_i
+.visible .entry sg_sum_i(
+	.param .u64 .ptr .align 1 sg_sum_i_param_0,
+	.param .u64 .ptr .align 1 sg_sum_i_param_1,
+	.param .u64 .ptr .align 1 sg_sum_i_param_2,
+	.param .u64 sg_sum_i_param_3
+)                                       // @sg_sum_i
+{
+	.reg .pred 	%p<7>;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<12>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd5, [sg_sum_i_param_0];
+	ld.param.b64 	%rd6, [sg_sum_i_param_2];
+	cvta.to.global.u64 	%rd9, %rd6;
+	ld.param.b64 	%rd7, [sg_sum_i_param_1];
+	cvta.to.global.u64 	%rd1, %rd7;
+	cvta.to.global.u64 	%rd2, %rd5;
+	mov.u32 	%r1, %tid.x;
+	mov.u32 	%r2, %ctaid.x;
+	or.b32 	%r3, %r1, %r2;
+	setp.ne.b32 	%p1, %r3, 0;
+	@%p1 bra 	$L__BB6_7;
+// %bb.1:                               // %lp.preheader
+	ld.param.b64 	%rd4, [sg_sum_i_param_3];
+	mov.b64 	%rd11, 0;
+	mov.b64 	%rd10, %rd11;
+	bra.uni 	$L__BB6_2;
+$L__BB6_5:                              // %cont
+                                        //   in Loop: Header=BB6_2 Depth=1
+	add.s64 	%rd10, %rd10, 1;
+	add.s64 	%rd9, %rd9, 8;
+	mov.b64 	%rd11, %rd3;
+$L__BB6_2:                              // %lp
+                                        // =>This Inner Loop Header: Depth=1
+	setp.ge.s64 	%p2, %rd10, %rd4;
+	@%p2 bra 	$L__BB6_6;
+// %bb.3:                               // %body
+                                        //   in Loop: Header=BB6_2 Depth=1
+	ld.global.b64 	%rd8, [%rd9];
+	add.s64 	%rd3, %rd11, %rd8;
+	setp.lt.s64 	%p3, %rd3, %rd11;
+	setp.lt.s64 	%p4, %rd8, 0;
+	xor.pred 	%p5, %p4, %p3;
+	not.pred 	%p6, %p5;
+	@%p6 bra 	$L__BB6_5;
+// %bb.4:                               // %ovf
+                                        //   in Loop: Header=BB6_2 Depth=1
+	st.global.b32 	[%rd1], 1;
+	bra.uni 	$L__BB6_5;
+$L__BB6_6:                              // %done
+	st.global.b64 	[%rd2], %rd11;
+$L__BB6_7:                              // %exit
 	ret;
                                         // -- End function
 }
@@ -1408,18 +1852,18 @@ $L__BB3_5:                              // %exit
 	add.s64 	%rd3, %rd9, %rd8;
 	mul.lo.s64 	%rd10, %rd4, %rd5;
 	setp.ge.s64 	%p1, %rd3, %rd10;
-	@%p1 bra 	$L__BB4_5;
+	@%p1 bra 	$L__BB7_5;
 // %bb.1:                               // %do
 	or.b64 	%rd11, %rd3, %rd4;
 	and.b64 	%rd12, %rd11, -4294967296;
 	setp.ne.b64 	%p2, %rd12, 0;
-	@!%p2 bra 	$L__BB4_2;
+	@!%p2 bra 	$L__BB7_2;
 // %bb.3:
 	div.s64 	%rd20, %rd3, %rd4;
 	mul.lo.s64 	%rd13, %rd20, %rd4;
 	sub.s64 	%rd21, %rd3, %rd13;
-	bra.uni 	$L__BB4_4;
-$L__BB4_2:
+	bra.uni 	$L__BB7_4;
+$L__BB7_2:
 	cvt.u32.u64 	%r4, %rd4;
 	cvt.u32.u64 	%r5, %rd3;
 	div.u32 	%r6, %r5, %r4;
@@ -1427,7 +1871,7 @@ $L__BB4_2:
 	sub.s32 	%r8, %r5, %r7;
 	cvt.u64.u32 	%rd20, %r6;
 	cvt.u64.u32 	%rd21, %r8;
-$L__BB4_4:                              // %do.split
+$L__BB7_4:                              // %do.split
 	mad.lo.s64 	%rd14, %rd21, %rd5, %rd20;
 	shl.b64 	%rd15, %rd14, 3;
 	add.s64 	%rd16, %rd1, %rd15;
@@ -1435,19 +1879,225 @@ $L__BB4_4:                              // %do.split
 	shl.b64 	%rd18, %rd3, 3;
 	add.s64 	%rd19, %rd2, %rd18;
 	st.global.b64 	[%rd19], %rd17;
-$L__BB4_5:                              // %exit
+$L__BB7_5:                              // %exit
 	ret;
                                         // -- End function
 }
 )PTX";
 
-// GPU 分派运行时：六个 sg_gpu_* 函数 ABI 与对应 sg_* 逐一相同。sg_gpu_ready
-// 惰性初始化（LoadLibraryA nvcuda.dll → driver API（内存/拷贝类一律 _v2 导出）
-// → cuInit → PrimaryCtx → cuModuleLoadData JIT 内嵌 PTX）。任何环节失败：
-// sg_gpu_state=0 永久回退 CPU 实现（语义一致仅性能降级）；SCOURGE_NO_GPU=1
-// 环境变量强制 CPU（逃生门兼回退路径测试钩子）。覆盖集 op 均 f64 且类型
-// 检查器已保证形状合法（无 panic 路径），fn/file/line 形参仅为 ABI 对齐。
-const char kGpuRuntimeC[] = R"GP(/* ==== CUDA 第 1 层：GPU 分派（f64 静态形状覆盖集） ==== */
+// OpenCL C kernel 源（OpenCL 后端 clBuildProgram 运行时 JIT）。与
+// verify/cuda/sg_kernels.ll 逐 kernel 镜像——.ll 为语义权威，两文件改动必须
+// 同步：确定性纪律同 .ll 头注（浮点/整数运算顺序与 CPU 逐位一致——mm/sum
+// 串行升序归约，逐元素每元素恰一次 IEEE RN 运算；int 溢出判定与 CPU
+// __builtin_*_overflow 逐位一致，回绕值照常写回，panic 由运行时回读状态后
+// 以同一 sg_panic 终止）。FP_CONTRACT OFF + -cl-fmad=false 禁止 fma 收缩
+// （sg_mm 的 mul+add 必须保持两条 IEEE 运算，与 CPU 逐位一致）。
+static const char kGpuOpenCLC[] = R"OCL(/* sg_kernels.cl — Scourge OpenCL 后端 kernel（sg_kernels.ll 逐 kernel 镜像；
+ * .ll 为语义权威）。覆盖集：sg_ew_tt/ts/ti/tsi、sg_mm、sg_sum/sg_sum_i、
+ * sg_tr。索引取全局线性 id（1D）或 (row=gid.y, col=gid.x)（2D 32x32 tile），
+ * 与 CUDA launch 的 ctaid*ntid+tid 覆盖同一索引集；越界线程空转。 */
+#pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#pragma OPENCL FP_CONTRACT OFF
+
+/* ---- int 溢出仿真（llvm.sadd/ssub/smul.with.overflow.i64 同构） ----
+ * 回绕结果经无符号运算构造（规避有符号溢出 UB，位型与硬件回绕一致）；
+ * 判定式：
+ *   add: ((x^r)&(y^r))<0（同号相加得异号）
+ *   sub: ((x^y)&(x^r))<0（异号相减与 x 异号）
+ *   mul: 0/±1 特判（避开 -1 x INT64_MIN 除法陷阱）后 r/y != x——若 r/y==x
+ *        则 r=x*y+s、|s|<|y|，而 r≡x*y (mod 2^64) 强制 s=0 即无溢出；
+ *        逆否：溢出必 r/y != x。除法操作数排除 0/-1 后无陷阱。 */
+static inline long sg_wadd(long x, long y) {
+    return (long)((unsigned long)x + (unsigned long)y);
+}
+static inline long sg_wsub(long x, long y) {
+    return (long)((unsigned long)x - (unsigned long)y);
+}
+static inline long sg_wmul(long x, long y) {
+    return (long)((unsigned long)x * (unsigned long)y);
+}
+static inline int sg_ovf_add(long x, long y, long r) {
+    return (int)(((x ^ r) & (y ^ r)) < 0);
+}
+static inline int sg_ovf_sub(long x, long y, long r) {
+    return (int)(((x ^ y) & (x ^ r)) < 0);
+}
+static inline int sg_ovf_mul(long x, long y, long r) {
+    if (x == 0 || y == 0) return 0;
+    if (x == -1) return y == (-0x7fffffffffffffffL - 1);
+    if (y == -1) return x == (-0x7fffffffffffffffL - 1);
+    return r / y != x;
+}
+
+/* ---- sg_ew_tt：out[i] = a[i] op b[i]，op 0=+ 1=- 2=* ---- */
+__kernel void sg_ew_tt(__global double *out, __global const double *a,
+                       __global const double *b, long n, int op) {
+    long idx = (long)get_global_id(0);
+    if (idx >= n) return;
+    double va = a[idx], vb = b[idx], r;
+    if (op == 0)
+        r = va + vb;
+    else if (op == 1)
+        r = va - vb;
+    else if (op == 2)
+        r = va * vb;
+    else
+        return;
+    out[idx] = r;
+}
+
+/* ---- sg_ew_ts：sleft=0 -> a[i] op s；1 -> s op a[i] ---- */
+__kernel void sg_ew_ts(__global double *out, __global const double *a,
+                       double s, long n, int op, int sleft) {
+    long idx = (long)get_global_id(0);
+    if (idx >= n) return;
+    double va = a[idx];
+    double x = sleft ? s : va;
+    double y = sleft ? va : s;
+    double r;
+    if (op == 0)
+        r = x + y;
+    else if (op == 1)
+        r = x - y;
+    else if (op == 2)
+        r = x * y;
+    else
+        return;
+    out[idx] = r;
+}
+
+/* ---- sg_ew_ti：int tt，溢出 atomic_or 上报（回绕值照常写回） ---- */
+__kernel void sg_ew_ti(__global long *out, __global const long *a,
+                       __global const long *b, long n, int op,
+                       __global int *status) {
+    long idx = (long)get_global_id(0);
+    if (idx >= n) return;
+    long va = a[idx], vb = b[idx], r;
+    int f;
+    if (op == 0) {
+        r = sg_wadd(va, vb);
+        f = sg_ovf_add(va, vb, r);
+    } else if (op == 1) {
+        r = sg_wsub(va, vb);
+        f = sg_ovf_sub(va, vb, r);
+    } else if (op == 2) {
+        r = sg_wmul(va, vb);
+        f = sg_ovf_mul(va, vb, r);
+    } else
+        return;
+    if (f) atomic_or(status, 1);
+    out[idx] = r;
+}
+
+/* ---- sg_ew_tsi：int ts/st，标量 i64；溢出上报同 sg_ew_ti ---- */
+__kernel void sg_ew_tsi(__global long *out, __global const long *a, long s,
+                        long n, int op, int sleft, __global int *status) {
+    long idx = (long)get_global_id(0);
+    if (idx >= n) return;
+    long va = a[idx];
+    long x = sleft ? s : va;
+    long y = sleft ? va : s;
+    long r;
+    int f;
+    if (op == 0) {
+        r = sg_wadd(x, y);
+        f = sg_ovf_add(x, y, r);
+    } else if (op == 1) {
+        r = sg_wsub(x, y);
+        f = sg_ovf_sub(x, y, r);
+    } else if (op == 2) {
+        r = sg_wmul(x, y);
+        f = sg_ovf_mul(x, y, r);
+    } else
+        return;
+    if (f) atomic_or(status, 1);
+    out[idx] = r;
+}
+
+/* ---- sg_mm：shared-memory tiling 32x32（local 必须由 launch 固定 32x32）。
+ * 每输出元素仍按 p=0..k-1 升序 acc += a[i][p]*b[p][j]（mul/add 两条 IEEE
+ * 运算，FP_CONTRACT OFF 保证不收缩 fma）；p>=k 的 padding 乘加经 if 丢弃
+ * （保 -0.0 符号）；tile 装载越界格读 (0,0) 安全地址、写 0.0。 ---- */
+__kernel void sg_mm(__global double *out, __global const double *a,
+                    __global const double *b, long m, long n, long k) {
+    __local double sg_mm_at[1024], sg_mm_bt[1024];
+    long tx = (long)get_local_id(0);
+    long ty = (long)get_local_id(1);
+    long col = (long)get_global_id(0);
+    long row = (long)get_global_id(1);
+    int ok = (row < m) && (col < n);
+    long tidx2 = ty * 32 + tx;
+    double acc = 0.0;
+    for (long p0 = 0; p0 < k; p0 += 32) {
+        long ac = p0 + tx;
+        int al = (row < m) && (ac < k);
+        long asafe = al ? (row * k + ac) : (long)0;
+        double va = a[asafe];
+        sg_mm_at[tidx2] = al ? va : 0.0;
+        long brw = p0 + ty;
+        int bl = (brw < k) && (col < n);
+        long bsafe = bl ? (brw * n + col) : (long)0;
+        double vb = b[bsafe];
+        sg_mm_bt[tidx2] = bl ? vb : 0.0;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        for (long p2 = 0; p2 < 32; ++p2) {
+            double va2 = sg_mm_at[ty * 32 + p2];
+            double vb2 = sg_mm_bt[p2 * 32 + tx];
+            double pr = va2 * vb2;
+            double f = acc + pr;
+            if (p0 + p2 < k) acc = f;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (ok) out[row * n + col] = acc;
+}
+
+/* ---- sg_sum：单线程 k 升序 fadd 累加（与 CPU 逐位一致） ---- */
+__kernel void sg_sum(__global double *out, __global const double *a, long n) {
+    if (get_global_id(0) != 0) return;
+    double acc = 0.0;
+    for (long kk = 0; kk < n; ++kk) acc = acc + a[kk];
+    out[0] = acc;
+}
+
+/* ---- sg_sum_i：单线程升序 sadd 溢出仿真累加；溢出普通 store（单写者） ---- */
+__kernel void sg_sum_i(__global long *out, __global int *status,
+                       __global const long *a, long n) {
+    if (get_global_id(0) != 0) return;
+    long acc = 0;
+    for (long kk = 0; kk < n; ++kk) {
+        long v = a[kk];
+        long r = sg_wadd(acc, v);
+        if (sg_ovf_add(acc, v, r)) *status = 1;
+        acc = r;
+    }
+    *out = acc;
+}
+
+/* ---- sg_tr：out[i*m+j] = a[j*n+i]（a 为 m x n，out 为 n x m） ---- */
+__kernel void sg_tr(__global double *out, __global const double *a, long m,
+                    long n) {
+    long idx = (long)get_global_id(0);
+    long cnt = m * n;
+    if (idx >= cnt) return;
+    long i = idx / m;
+    long j = idx % m;
+    out[idx] = a[j * n + i];
+}
+")OCL";
+
+// GPU 分派运行时：后端抽象（SgGpuBe vtbl 六原语 alloc/mfree/h2d/d2h/launch1d/
+// launch2d）+ 双后端——CUDA（nvcuda.dll driver API + 内嵌 PTX JIT）与 OpenCL
+// （OpenCL.dll ICD loader + 内嵌 OpenCL C 源码 JIT，kernel 与 sg_kernels.ll
+// 一一镜像、.ll 为语义权威）。SCOURGE_GPU_BACKEND=cuda|opencl|cpu 选择（缺省
+// 自适应：先 CUDA 后 OpenCL fp64 GPU）；SCOURGE_NO_GPU=1 强制 CPU（逃生门兼
+// 回退路径测试钩子）。任何初始化/launch 失败：sg_gpu_state=0 永久回退 CPU
+// 实现（语义一致仅性能降级）。动态形状放宽后覆盖判定不查 shape 属性：
+// dtype/秩/形状一致/内维由各 try 函数运行时守卫校验，不匹配返回 NULL 回退
+// CPU（panic 消息逐字一致）。int 覆盖集（ew_ti/tsi/sum_i）的溢出由 kernel
+// 以状态缓冲上报：回读非 0 即以与 CPU 同一 sg_panic 终止（fn/file/line 为
+// 调用点 ABI 形参，f64 覆盖集无 panic 路径仅对齐用）。
+const char kGpuRuntimeC[] = R"GP(/* ==== GPU 分派第 1 层（后端抽象 + CUDA/OpenCL 覆盖集） ==== */
 #ifdef _WIN32
 typedef int CUresult;
 typedef struct CUctx_st *CUcontext;
@@ -1457,8 +2107,12 @@ typedef unsigned long long CUdeviceptr;
 
 static CUcontext sg_gpu_ctx = NULL;
 static CUmodule sg_gpu_mod = NULL;
-static CUfunction sg_gpu_f_tt, sg_gpu_f_ts, sg_gpu_f_mm, sg_gpu_f_sum,
-    sg_gpu_f_tr;
+/* kernel 句柄数组（后端无关索引；CUDA 存 CUfunction） */
+enum {
+    SG_K_TT = 0, SG_K_TS, SG_K_TI, SG_K_TSI, SG_K_MM, SG_K_SUM, SG_K_SUMI,
+    SG_K_TR, SG_K_N
+};
+static CUfunction sg_cu_fn[SG_K_N];
 static CUresult (*sg_cuMemAlloc)(CUdeviceptr *, size_t);
 static CUresult (*sg_cuMemFree)(CUdeviceptr);
 static CUresult (*sg_cuMemcpyHtoD)(CUdeviceptr, const void *, size_t);
@@ -1469,13 +2123,30 @@ static CUresult (*sg_cuLaunchKernel)(CUfunction, unsigned, unsigned, unsigned,
 static CUresult (*sg_cuCtxSynchronize)(void);
 static int sg_gpu_state = -1; /* -1 未初始化 0 不可用 1 就绪 */
 
+/* ---- 后端原语 vtbl：CUDA/OpenCL 各自填充，try 函数与缓存层后端无关 ----
+ * dev 句柄统一 void*（CUDA CUdeviceptr / OpenCL cl_mem，x64 上均 8 字节）；
+ * launch 自带完成同步（CUDA CtxSynchronize / OpenCL clFinish），一次调用
+ * 返回即 kernel 已完成——try 函数读回/panic 时序与缓存逐出假设依赖此点。 */
+typedef struct {
+    int (*alloc)(void **out, size_t bytes);
+    void (*mfree)(void *p);
+    int (*h2d)(void *dev, const void *host, size_t bytes);
+    int (*d2h)(void *host, const void *dev, size_t bytes);
+    int (*launch1d)(int k, int64_t n, void **args);
+    int (*launch2d)(int k, int64_t gx, int64_t gy, void **args);
+} SgGpuBe;
+static SgGpuBe sg_be;
+
+/* 设备缓冲钩子实现（定义见后段注册表块；sg_gpu_init 安装） */
+static void sg_tsync_impl(SgTensor *t);
+static void sg_tdirty_impl(SgTensor *t);
+
 static void sg_gpu_fail(void) { sg_gpu_state = 0; }
 
-static void sg_gpu_init(void) {
-    sg_gpu_state = 0;
-    if (getenv("SCOURGE_NO_GPU")) return; /* 逃生门：强制 CPU */
+/* ---- CUDA 后端（nvcuda.dll driver API + 内嵌 PTX JIT；原路径） ---- */
+static int sg_cuda_init(void) {
     HMODULE h = LoadLibraryA("nvcuda.dll");
-    if (!h) return;
+    if (!h) return 1;
     CUresult (*cuInit)(unsigned) = (void *)GetProcAddress(h, "cuInit");
     CUresult (*cuDeviceGet)(int *, int) =
         (void *)GetProcAddress(h, "cuDeviceGet");
@@ -1497,20 +2168,268 @@ static void sg_gpu_init(void) {
         !sg_cuCtxSynchronize || !cuModLoad || !cuModFn || !sg_cuMemAlloc ||
         !sg_cuMemFree || !sg_cuMemcpyHtoD || !sg_cuMemcpyDtoH ||
         !sg_cuLaunchKernel)
-        return;
-    if (cuInit(0)) return;
+        return 1;
+    if (cuInit(0)) return 1;
     int dev = 0;
-    if (cuDeviceGet(&dev, 0)) return;
-    if (cuRetain(&sg_gpu_ctx, dev)) return;
-    if (cuSetCtx(sg_gpu_ctx)) return;
-    if (cuModLoad(&sg_gpu_mod, sg_gpu_ptx)) return;
-    if (cuModFn(&sg_gpu_f_tt, sg_gpu_mod, "sg_ew_tt") ||
-        cuModFn(&sg_gpu_f_ts, sg_gpu_mod, "sg_ew_ts") ||
-        cuModFn(&sg_gpu_f_mm, sg_gpu_mod, "sg_mm") ||
-        cuModFn(&sg_gpu_f_sum, sg_gpu_mod, "sg_sum") ||
-        cuModFn(&sg_gpu_f_tr, sg_gpu_mod, "sg_tr"))
+    if (cuDeviceGet(&dev, 0)) return 1;
+    if (cuRetain(&sg_gpu_ctx, dev)) return 1;
+    if (cuSetCtx(sg_gpu_ctx)) return 1;
+    if (cuModLoad(&sg_gpu_mod, sg_gpu_ptx)) return 1;
+    if (cuModFn(&sg_cu_fn[SG_K_TT], sg_gpu_mod, "sg_ew_tt") ||
+        cuModFn(&sg_cu_fn[SG_K_TS], sg_gpu_mod, "sg_ew_ts") ||
+        cuModFn(&sg_cu_fn[SG_K_TI], sg_gpu_mod, "sg_ew_ti") ||
+        cuModFn(&sg_cu_fn[SG_K_TSI], sg_gpu_mod, "sg_ew_tsi") ||
+        cuModFn(&sg_cu_fn[SG_K_MM], sg_gpu_mod, "sg_mm") ||
+        cuModFn(&sg_cu_fn[SG_K_SUM], sg_gpu_mod, "sg_sum") ||
+        cuModFn(&sg_cu_fn[SG_K_SUMI], sg_gpu_mod, "sg_sum_i") ||
+        cuModFn(&sg_cu_fn[SG_K_TR], sg_gpu_mod, "sg_tr"))
+        return 1;
+    return 0;
+}
+
+/* ---- CUDA vtbl 实现（launch 自带 CtxSynchronize，返回即 kernel 完成） ---- */
+static int sg_cu_be_alloc(void **out, size_t b) {
+    CUdeviceptr d = 0;
+    if (sg_cuMemAlloc(&d, b)) return 1;
+    *out = (void *)d;
+    return 0;
+}
+static void sg_cu_be_free(void *p) { sg_cuMemFree((CUdeviceptr)p); }
+static int sg_cu_be_h2d(void *d, const void *h, size_t b) {
+    return sg_cuMemcpyHtoD((CUdeviceptr)d, h, b);
+}
+static int sg_cu_be_d2h(void *h, const void *d, size_t b) {
+    return sg_cuMemcpyDtoH(h, (CUdeviceptr)d, b);
+}
+static int sg_cu_be_launch1d(int k, int64_t n, void **args) {
+    unsigned th = 256, bl = (unsigned)((n + 255) / 256);
+    if (bl == 0) bl = 1;
+    if (sg_cuLaunchKernel(sg_cu_fn[k], bl, 1, 1, th, 1, 1, 0, 0, args, NULL))
+        return 1;
+    return sg_cuCtxSynchronize();
+}
+static int sg_cu_be_launch2d(int k, int64_t gx, int64_t gy, void **args) {
+    if (sg_cuLaunchKernel(sg_cu_fn[k], (unsigned)gx, (unsigned)gy, 1, 32, 32,
+                          1, 0, 0, args, NULL))
+        return 1;
+    return sg_cuCtxSynchronize();
+}
+
+/* ---- OpenCL 后端（OpenCL.dll ICD loader + OpenCL C 源码运行时 JIT；
+ * kernel 源 kGpuOpenCLC 与 sg_kernels.ll 一一镜像，.ll 为语义权威） ---- */
+typedef struct _cl_platform_id *cl_platform_id;
+typedef struct _cl_device_id *cl_device_id;
+typedef struct _cl_context *cl_context;
+typedef struct _cl_command_queue *cl_command_queue;
+typedef struct _cl_program *cl_program;
+typedef struct _cl_mem *cl_mem;
+typedef struct _cl_kernel *cl_kernel;
+static cl_context sg_ocl_ctx = NULL;
+static cl_command_queue sg_ocl_q = NULL;
+static cl_kernel sg_ocl_kn[SG_K_N];
+/* 各 kernel 参数尺寸表（clSetKernelArg 用；指针=cl_mem 8B、u64/f64 8B、
+ * u32 4B——与 try 函数 args 数组的实参类型逐一对应） */
+static const unsigned char sg_ocl_asz[SG_K_N][8] = {
+    {8, 8, 8, 8, 4, 0, 0, 0}, /* TT:   out,a,b,n,op */
+    {8, 8, 8, 8, 4, 4, 0, 0}, /* TS:   out,a,s,n,op,sleft */
+    {8, 8, 8, 8, 4, 8, 0, 0}, /* TI:   out,a,b,n,op,status */
+    {8, 8, 8, 8, 4, 4, 8, 0}, /* TSI:  out,a,s,n,op,sleft,status */
+    {8, 8, 8, 8, 8, 8, 0, 0}, /* MM:   out,a,b,m,n,k */
+    {8, 8, 8, 0, 0, 0, 0, 0}, /* SUM:  out,a,n */
+    {8, 8, 8, 8, 0, 0, 0, 0}, /* SUMI: out,status,a,n */
+    {8, 8, 8, 8, 0, 0, 0, 0}  /* TR:   out,a,m,n */
+};
+static const unsigned char sg_ocl_an[SG_K_N] = {5, 6, 6, 7, 6, 3, 4, 4};
+static int (*sg_clGetPlatformIDs)(unsigned, cl_platform_id *, unsigned *);
+static int (*sg_clGetDeviceIDs)(cl_platform_id, unsigned long long, unsigned,
+                                cl_device_id *, unsigned *);
+static int (*sg_clGetDeviceInfo)(cl_device_id, unsigned, size_t, void *,
+                                 size_t *);
+static cl_context (*sg_clCreateContext)(const intptr_t *, unsigned,
+                                        cl_device_id *, void *, void *, int *);
+static cl_command_queue (*sg_clCreateCommandQueue)(cl_context, cl_device_id,
+                                                   unsigned long long, int *);
+static cl_program (*sg_clCreateProgramWithSource)(cl_context, unsigned,
+                                                  const char **, const size_t *,
+                                                  int *);
+static int (*sg_clBuildProgram)(cl_program, unsigned, cl_device_id *,
+                                const char *, void *, void *);
+static cl_kernel (*sg_clCreateKernel)(cl_program, const char *, int *);
+static int (*sg_clSetKernelArg)(cl_kernel, unsigned, size_t, const void *);
+static int (*sg_clEnqueueNDRangeKernel)(cl_command_queue, cl_kernel, unsigned,
+                                        const size_t *, const size_t *,
+                                        const size_t *, unsigned, void *,
+                                        void *);
+static int (*sg_clEnqueueWriteBuffer)(cl_command_queue, cl_mem, unsigned,
+                                      size_t, size_t, const void *, unsigned,
+                                      void *, void *);
+static int (*sg_clEnqueueReadBuffer)(cl_command_queue, cl_mem, unsigned,
+                                     size_t, size_t, void *, unsigned, void *,
+                                     void *);
+static int (*sg_clFinish)(cl_command_queue);
+static int (*sg_clReleaseMemObject)(cl_mem);
+static cl_mem (*sg_clCreateBuffer)(cl_context, unsigned long long, size_t,
+                                   void *, int *);
+
+static int sg_ocl_be_alloc(void **out, size_t b) {
+    int err = 0;
+    cl_mem m = sg_clCreateBuffer(sg_ocl_ctx, 4ull /*CL_MEM_READ_WRITE*/,
+                                 b ? b : 1, NULL, &err);
+    if (!m || err) return 1;
+    *out = (void *)m;
+    return 0;
+}
+static void sg_ocl_be_free(void *p) { sg_clReleaseMemObject((cl_mem)p); }
+static int sg_ocl_be_h2d(void *d, const void *h, size_t b) {
+    /* 阻塞传输（CL_TRUE）：与 vtbl「调用返回即数据就位」纪律一致 */
+    return sg_clEnqueueWriteBuffer(sg_ocl_q, (cl_mem)d, 1, 0, b, h, 0, NULL,
+                                   NULL)
+               ? 1
+               : 0;
+}
+static int sg_ocl_be_d2h(void *h, const void *d, size_t b) {
+    return sg_clEnqueueReadBuffer(sg_ocl_q, (cl_mem)d, 1, 0, b, h, 0, NULL,
+                                  NULL)
+               ? 1
+               : 0;
+}
+static int sg_ocl_launch(int k, unsigned dim, const size_t *gws,
+                         const size_t *lws, void **args) {
+    cl_kernel kn = sg_ocl_kn[k];
+    for (int i = 0; i < sg_ocl_an[k]; ++i)
+        if (sg_clSetKernelArg(kn, (unsigned)i, sg_ocl_asz[k][i], args[i]))
+            return 1;
+    if (sg_clEnqueueNDRangeKernel(sg_ocl_q, kn, dim, NULL, gws, lws, 0, NULL,
+                                  NULL))
+        return 1;
+    return sg_clFinish(sg_ocl_q) ? 1 : 0;
+}
+static int sg_ocl_be_launch1d(int k, int64_t n, void **args) {
+    size_t g = (size_t)((n + 255) / 256) * 256;
+    if (g == 0) g = 256; /* kernel 侧 idx>=n 守卫，多余线程空转 */
+    return sg_ocl_launch(k, 1, &g, NULL, args);
+}
+static int sg_ocl_be_launch2d(int k, int64_t gx, int64_t gy, void **args) {
+    size_t g[2] = {(size_t)gx * 32, (size_t)gy * 32};
+    size_t l[2] = {32, 32}; /* sg_mm tiling：local 必须 32×32 */
+    return sg_ocl_launch(k, 2, g, l, args);
+}
+
+static void sg_opencl_init(void) {
+    HMODULE h = LoadLibraryA("OpenCL.dll");
+    if (!h) return;
+    sg_clGetPlatformIDs = (void *)GetProcAddress(h, "clGetPlatformIDs");
+    sg_clGetDeviceIDs = (void *)GetProcAddress(h, "clGetDeviceIDs");
+    sg_clGetDeviceInfo = (void *)GetProcAddress(h, "clGetDeviceInfo");
+    sg_clCreateContext = (void *)GetProcAddress(h, "clCreateContext");
+    sg_clCreateCommandQueue = (void *)GetProcAddress(h, "clCreateCommandQueue");
+    sg_clCreateProgramWithSource =
+        (void *)GetProcAddress(h, "clCreateProgramWithSource");
+    sg_clBuildProgram = (void *)GetProcAddress(h, "clBuildProgram");
+    sg_clCreateKernel = (void *)GetProcAddress(h, "clCreateKernel");
+    sg_clSetKernelArg = (void *)GetProcAddress(h, "clSetKernelArg");
+    sg_clEnqueueNDRangeKernel =
+        (void *)GetProcAddress(h, "clEnqueueNDRangeKernel");
+    sg_clEnqueueWriteBuffer = (void *)GetProcAddress(h, "clEnqueueWriteBuffer");
+    sg_clEnqueueReadBuffer = (void *)GetProcAddress(h, "clEnqueueReadBuffer");
+    sg_clFinish = (void *)GetProcAddress(h, "clFinish");
+    sg_clReleaseMemObject = (void *)GetProcAddress(h, "clReleaseMemObject");
+    sg_clCreateBuffer = (void *)GetProcAddress(h, "clCreateBuffer");
+    if (!sg_clGetPlatformIDs || !sg_clGetDeviceIDs || !sg_clGetDeviceInfo ||
+        !sg_clCreateContext || !sg_clCreateCommandQueue ||
+        !sg_clCreateProgramWithSource || !sg_clBuildProgram ||
+        !sg_clCreateKernel || !sg_clSetKernelArg || !sg_clEnqueueNDRangeKernel ||
+        !sg_clEnqueueWriteBuffer || !sg_clEnqueueReadBuffer || !sg_clFinish ||
+        !sg_clReleaseMemObject || !sg_clCreateBuffer)
         return;
+    unsigned np = 0;
+    if (sg_clGetPlatformIDs(0, NULL, &np) || np == 0) return;
+    cl_platform_id *plats =
+        (cl_platform_id *)malloc(sizeof(cl_platform_id) * np);
+    if (!plats) return;
+    if (sg_clGetPlatformIDs(np, plats, NULL)) {
+        free(plats);
+        return;
+    }
+    /* 取首个带 fp64 的 GPU 设备（CL_DEVICE_TYPE_GPU 过滤 CPU 设备；
+     * 无 fp64 → 覆盖集需 f64 → CPU 回退） */
+    cl_device_id dev = NULL;
+    for (unsigned i = 0; i < np && !dev; ++i) {
+        cl_device_id d = NULL;
+        unsigned nd = 0;
+        if (sg_clGetDeviceIDs(plats[i], 4 /*CL_DEVICE_TYPE_GPU*/, 1, &d, &nd) ||
+            nd == 0)
+            continue;
+        unsigned long long fp64 = 0;
+        if (sg_clGetDeviceInfo(d, 0x0F02 /*CL_DEVICE_DOUBLE_FP_CONFIG*/,
+                               sizeof(fp64), &fp64, NULL) || !fp64)
+            continue;
+        dev = d;
+    }
+    free(plats);
+    if (!dev) return;
+    int err = 0;
+    sg_ocl_ctx = sg_clCreateContext(NULL, 1, &dev, NULL, NULL, &err);
+    if (!sg_ocl_ctx || err) return;
+    sg_ocl_q = sg_clCreateCommandQueue(sg_ocl_ctx, dev, 0, &err);
+    if (!sg_ocl_q || err) return;
+    const char *src = sg_gpu_oclc;
+    size_t srclen = strlen(src);
+    cl_program prog =
+        sg_clCreateProgramWithSource(sg_ocl_ctx, 1, &src, &srclen, &err);
+    if (!prog || err) return;
+    if (sg_clBuildProgram(prog, 1, &dev, "-cl-std=CL1.2 -cl-fmad=false", NULL,
+                          NULL))
+        return;
+    {
+        static const char *kn[SG_K_N] = {"sg_ew_tt", "sg_ew_ts", "sg_ew_ti",
+                                         "sg_ew_tsi", "sg_mm", "sg_sum",
+                                         "sg_sum_i", "sg_tr"};
+        for (int i = 0; i < SG_K_N; ++i) {
+            sg_ocl_kn[i] = sg_clCreateKernel(prog, kn[i], &err);
+            if (!sg_ocl_kn[i]) return;
+        }
+    }
+    sg_be.alloc = sg_ocl_be_alloc;
+    sg_be.mfree = sg_ocl_be_free;
+    sg_be.h2d = sg_ocl_be_h2d;
+    sg_be.d2h = sg_ocl_be_d2h;
+    sg_be.launch1d = sg_ocl_be_launch1d;
+    sg_be.launch2d = sg_ocl_be_launch2d;
+    sg_tsync_fn = sg_tsync_impl;
+    sg_tdirty_fn = sg_tdirty_impl;
     sg_gpu_state = 1;
+}
+
+/* 后端选择：SCOURGE_GPU_BACKEND=cuda|opencl|cpu（缺省自适应——NVIDIA 优先
+ * CUDA PTX 路径，失败/缺失落 OpenCL fp64 GPU，再失败 CPU）；SCOURGE_NO_GPU=1
+ * 恒 CPU（逃生门兼回退测试钩子）。后端选择发生在运行时，不进构建缓存键。 */
+static void sg_gpu_init(void) {
+    sg_gpu_state = 0;
+    if (getenv("SCOURGE_NO_GPU")) return;
+    const char *be = getenv("SCOURGE_GPU_BACKEND");
+    int tryCuda = 1, tryOcl = 1;
+    if (be) {
+        if (!strcmp(be, "cuda"))
+            tryOcl = 0;
+        else if (!strcmp(be, "opencl"))
+            tryCuda = 0;
+        else if (!strcmp(be, "cpu"))
+            tryCuda = tryOcl = 0; /* 其他值：按缺省自适应 */
+    }
+    if (tryCuda && !sg_cuda_init()) {
+        sg_be.alloc = sg_cu_be_alloc;
+        sg_be.mfree = sg_cu_be_free;
+        sg_be.h2d = sg_cu_be_h2d;
+        sg_be.d2h = sg_cu_be_d2h;
+        sg_be.launch1d = sg_cu_be_launch1d;
+        sg_be.launch2d = sg_cu_be_launch2d;
+        sg_tsync_fn = sg_tsync_impl;
+        sg_tdirty_fn = sg_tdirty_impl;
+        sg_gpu_state = 1;
+        return;
+    }
+    if (tryOcl) sg_opencl_init();
 }
 
 static int sg_gpu_ready(void) {
@@ -1518,41 +2437,183 @@ static int sg_gpu_ready(void) {
     return sg_gpu_state;
 }
 
-/* 一维启动（grid = ceil(n/256) x 256 线程）+ 同步；成功返回 0 */
-static int sg_gpu_run1d(CUfunction f, int64_t n, void **args) {
-    unsigned th = 256;
-    unsigned bl = (unsigned)((n + 255) / 256);
-    if (bl == 0) bl = 1;
-    if (sg_cuLaunchKernel(f, bl, 1, 1, th, 1, 1, 0, 0, args, NULL))
-        return 1;
-    return sg_cuCtxSynchronize();
+/* ---- 设备缓冲复用 + 惰性回拷（LRU 容量管理） ----
+ * SgTensor.dev 非 0 = 设备驻留副本；hostStale=1 = 设备比 host 新（GPU 输出
+ * 延迟回拷，host 读入口经 sg_tsync_impl 回拷）。不变量：dev 非 0 时设备副本
+ * 恒为最新——host 写入走 sg_tdirty_impl 整体失效释放，故输入复用无需比对。
+ * 注册表只做容量管理：驻留总量超 SCOURGE_GPU_CACHE_MB（默认 512MB）按 LRU
+ * 逐出（hostStale 条目先回拷——数据唯一副本在设备）。释放纪律与 host arena
+ * 一致：进程生命周期持有，仅容量/失效路径释放（进程退出由驱动统一回收）。 */
+typedef struct {
+    SgTensor *t;
+    void *d;
+    size_t bytes;
+    uint64_t use;
+} DevEnt;
+static DevEnt *sg_devtab = NULL;
+static int sg_devn = 0, sg_devcap = 0;
+static size_t sg_devbytes = 0;
+static uint64_t sg_devclk = 0;
+
+/* 张量数据字节数（i64/f64 元素均 8 字节）；空张量占位 8 字节哑分配 */
+static size_t sg_dev_bytes(const SgTensor *t) {
+    size_t b = (size_t)sg_tsize(t) * 8;
+    return b ? b : 8;
+}
+
+/* 预算：SCOURGE_GPU_CACHE_MB（MB），非法/未设取 512 */
+static size_t sg_dev_budget(void) {
+    static size_t budget = 0;
+    if (!budget) {
+        const char *e = getenv("SCOURGE_GPU_CACHE_MB");
+        long v = e ? atol(e) : 512;
+        if (v <= 0) v = 512;
+        budget = (size_t)v * 1024 * 1024;
+    }
+    return budget;
+}
+
+/* LRU 逐出：驻留总量 + need 超预算时逐出最旧条目直至达标；p1/p2 为保护
+ * 张量（本轮仍需其设备块的输入，NULL 可省）——受保护条目全时软预算放行。 */
+static void sg_dev_evict(size_t need, const SgTensor *p1, const SgTensor *p2) {
+    size_t budget = sg_dev_budget();
+    while (sg_devn > 0 && sg_devbytes + need > budget) {
+        int old = -1;
+        for (int k = 0; k < sg_devn; ++k) {
+            SgTensor *tk = sg_devtab[k].t;
+            if (tk == p1 || tk == p2) continue;
+            if (old < 0 || sg_devtab[k].use < sg_devtab[old].use) old = k;
+        }
+        if (old < 0) return;
+        SgTensor *t = sg_devtab[old].t;
+        void *d = sg_devtab[old].d;
+        if (t->hostStale) { /* 数据唯一副本在设备：先回拷再释放 */
+            void *h = t->isInt ? (void *)t->i64 : (void *)t->f64;
+            if (sg_be.d2h(h, d, sg_devtab[old].bytes))
+                sg_gpu_fail(); /* 上下文整体已坏（拷贝通道随 launch 级失败
+                                  存活，实际不可达）； arena 纪律不恢复 */
+            else
+                t->hostStale = 0;
+        }
+        sg_be.mfree(d);
+        t->dev = NULL;
+        sg_devbytes -= sg_devtab[old].bytes;
+        sg_devtab[old] = sg_devtab[--sg_devn];
+    }
+}
+
+/* 登记（dget/devown 共用）：容量翻倍扩表，失败返回 0（调用方释放设备块） */
+static int sg_dev_reg(SgTensor *t, void *d, size_t bytes, int stale) {
+    if (sg_devn == sg_devcap) {
+        int cap = sg_devcap ? sg_devcap * 2 : 64;
+        DevEnt *nt = (DevEnt *)realloc(sg_devtab, (size_t)cap * sizeof(DevEnt));
+        if (!nt) return 0;
+        sg_devtab = nt;
+        sg_devcap = cap;
+    }
+    sg_devtab[sg_devn].t = t;
+    sg_devtab[sg_devn].d = d;
+    sg_devtab[sg_devn].bytes = bytes;
+    sg_devtab[sg_devn].use = ++sg_devclk;
+    ++sg_devn;
+    sg_devbytes += bytes;
+    t->dev = d;
+    t->hostStale = stale;
+    return 1;
+}
+
+/* dget：取输入张量当前设备块——已驻留直接复用（含 hostStale：设备仍最新，
+ * 免拷贝吃链），未驻留上传并登记。prot 为本轮已取得、kernel 尚未运行、
+ * 不可被逐出的输入张量（NULL 可省）；失败返回 0 → 调用方整体回退 CPU。 */
+static void *sg_gpu_dget(SgTensor *t, const SgTensor *prot) {
+    size_t bytes = sg_dev_bytes(t);
+    if (t->dev) {
+        for (int k = 0; k < sg_devn; ++k)
+            if (sg_devtab[k].t == t) sg_devtab[k].use = ++sg_devclk;
+        return t->dev;
+    }
+    sg_dev_evict(bytes, prot, NULL);
+    void *h = t->isInt ? (void *)t->i64 : (void *)t->f64;
+    void *d = NULL;
+    if (sg_be.alloc(&d, bytes) || sg_be.h2d(d, h, bytes)) {
+        if (d) sg_be.mfree(d);
+        return 0;
+    }
+    if (!sg_dev_reg(t, d, bytes, 0)) {
+        sg_be.mfree(d);
+        return 0;
+    }
+    return d;
+}
+
+/* devown：GPU 输出设备块归属张量（hostStale=1 惰性回拷）。失败释放并返回
+ * 0 → 调用方回退 CPU 重算（此刻 kernel 已同步完成，输入设备块仍有效缓存）。 */
+static int sg_gpu_devown(SgTensor *t, void *d, size_t bytes) {
+    sg_dev_evict(bytes, NULL, NULL); /* kernel 已同步：输入设备块可逐出 */
+    if (!sg_dev_reg(t, d, bytes, 1)) {
+        sg_be.mfree(d);
+        return 0;
+    }
+    return 1;
+}
+
+/* tsync 实现：host 读入口回拷（仅 hostStale 时有一次 DtoH，其余零开销） */
+static void sg_tsync_impl(SgTensor *t) {
+    if (!t->dev || !t->hostStale) return;
+    void *h = t->isInt ? (void *)t->i64 : (void *)t->f64;
+    if (sg_be.d2h(h, t->dev, sg_dev_bytes(t)))
+        sg_gpu_fail(); /* 同上：上下文整体已坏，实际不可达 */
+    else
+        t->hostStale = 0;
+}
+
+/* tdirty 实现：host 写入口整体失效（host 为新权威，设备副本释放） */
+static void sg_tdirty_impl(SgTensor *t) {
+    if (!t->dev) return;
+    sg_be.mfree(t->dev);
+    for (int k = 0; k < sg_devn; ++k) {
+        if (sg_devtab[k].t == t) {
+            sg_devbytes -= sg_devtab[k].bytes;
+            sg_devtab[k] = sg_devtab[--sg_devn];
+            break;
+        }
+    }
+    t->dev = NULL;
+    t->hostStale = 0;
 }
 
 /* ---- GPU try 函数：单次尝试，失败置 state=0 并返回 NULL/!ok → 调用方 ----
  * 回退 CPU。args 数组逐项取局部变量地址，顺序与各 kernel 参数一一对应
  * （指针 .u64 / 整形维度 .u64 / op 与方向标志 .u32 / 标量 .f64）。 ---- */
 
-/* 逐元素 tt（kernel sg_ew_tt(out,a,b,n,op)；op 0=+ 1=- 2=*） */
+/* 逐元素 tt（kernel sg_ew_tt(out,a,b,n,op)；op 0=+ 1=- 2=*）。
+ * 动态形状放宽后覆盖判定不查 shape 属性：秩/逐维一致与 dtype 由本守卫
+ * 运行时校验，不匹配返回 NULL → CPU panic 语义逐字一致。 */
 static SgTensor *sg_gpu_ew_tt_try(int op, const SgTensor *a,
                                   const SgTensor *b) {
     if (op < 0 || op > 2) return NULL; /* 防御：覆盖集外 → CPU */
+    if (a->isInt || b->isInt) return NULL; /* f64 kernel 防御 */
+    if (a->rank != b->rank) return NULL;
+    for (int64_t k = 0; k < a->rank; ++k)
+        if (a->shape[k] != b->shape[k]) return NULL;
     int64_t n = sg_tsize(a);
     SgTensor *t = sg_tensor_alloc(0, a->rank, a->shape);
     if (n == 0) return t; /* 空张量：与 CPU 同为空结果，免 launch */
-    CUdeviceptr da = 0, db = 0, dout = 0;
+    void *da = sg_gpu_dget((SgTensor *)a, NULL); /* 复用或上传 */
+    void *db = sg_gpu_dget((SgTensor *)b, a);    /* 逐出保护 a */
+    void *dout = NULL;
     int32_t op32 = (int32_t)op;
     void *args[] = {&dout, &da, &db, &n, &op32};
-    int bad = sg_cuMemAlloc(&da, (size_t)n * 8) ||
-              sg_cuMemcpyHtoD(da, a->f64, (size_t)n * 8) ||
-              sg_cuMemAlloc(&db, (size_t)n * 8) ||
-              sg_cuMemcpyHtoD(db, b->f64, (size_t)n * 8) ||
-              sg_cuMemAlloc(&dout, (size_t)n * 8) ||
-              sg_gpu_run1d(sg_gpu_f_tt, n, args) ||
-              sg_cuMemcpyDtoH(t->f64, dout, (size_t)n * 8);
-    if (da) sg_cuMemFree(da);
-    if (db) sg_cuMemFree(db);
-    if (dout) sg_cuMemFree(dout);
+    int bad = !da || !db || sg_be.alloc(&dout, (size_t)n * 8) ||
+              sg_be.launch1d(SG_K_TT, n, args);
     if (bad) {
+        if (dout) sg_be.mfree(dout);
+        sg_gpu_fail();
+        return NULL; /* 输入设备块仍有效缓存，留给后续复用 */
+    }
+    /* 惰性回拷：输出驻留设备（hostStale=1），链式 GPU op 直接以其为输入，
+     * host 读入口经 sg_tsync 回拷——免除每调用 HtoD/DtoH/MemFree。 */
+    if (!sg_gpu_devown(t, dout, (size_t)n * 8)) {
         sg_gpu_fail();
         return NULL;
     }
@@ -1564,52 +2625,134 @@ static SgTensor *sg_gpu_ew_tt_try(int op, const SgTensor *a,
 static SgTensor *sg_gpu_ew_ts_try(int op, const SgTensor *a, double s,
                                   int sleft) {
     if (op < 0 || op > 2) return NULL;
+    if (a->isInt) return NULL; /* f64 kernel 防御 */
     int64_t n = sg_tsize(a);
     SgTensor *t = sg_tensor_alloc(0, a->rank, a->shape);
     if (n == 0) return t;
-    CUdeviceptr da = 0, dout = 0;
+    void *da = sg_gpu_dget((SgTensor *)a, NULL);
+    void *dout = NULL;
     int32_t op32 = (int32_t)op, sl32 = (int32_t)sleft;
     void *args[] = {&dout, &da, &s, &n, &op32, &sl32};
-    int bad = sg_cuMemAlloc(&da, (size_t)n * 8) ||
-              sg_cuMemcpyHtoD(da, a->f64, (size_t)n * 8) ||
-              sg_cuMemAlloc(&dout, (size_t)n * 8) ||
-              sg_gpu_run1d(sg_gpu_f_ts, n, args) ||
-              sg_cuMemcpyDtoH(t->f64, dout, (size_t)n * 8);
-    if (da) sg_cuMemFree(da);
-    if (dout) sg_cuMemFree(dout);
+    int bad = !da || sg_be.alloc(&dout, (size_t)n * 8) ||
+              sg_be.launch1d(SG_K_TS, n, args);
     if (bad) {
+        if (dout) sg_be.mfree(dout);
+        sg_gpu_fail();
+        return NULL;
+    }
+    if (!sg_gpu_devown(t, dout, (size_t)n * 8)) { /* 惰性回拷 */
         sg_gpu_fail();
         return NULL;
     }
     return t;
 }
 
-/* matmul（kernel sg_mm(out,a,b,m,n,k)，m=左行 n=右列 k=内维，grid=m*n；
- * k==0 时输入零长 → 8 字节哑分配占位，kernel 不读、累加器恒 0.0 与
- * CPU 一致；矩形 3×4 @ 4×2 与方形均覆盖） */
+/* int 溢出消息（与 CPU sg_add_i64/sg_sub_i64/sg_mul_i64 逐字一致） */
+static const char *sg_ti_msg(int op) {
+    static const char *msgs[] = {"整数加法溢出", "整数减法溢出",
+                                 "整数乘法溢出"};
+    return msgs[op];
+}
+
+/* int 逐元素 tt（kernel sg_ew_ti(out,a,b,n,op,status)；op 0=+ 1=- 2=*）。
+ * 溢出由 kernel 经状态缓冲 atomic_or 上报：回读非 0 → 与 CPU 同一
+ * sg_panic 终止（panic 可能 longjmp 进 try/except，故先释放设备缓冲）。 */
+static SgTensor *sg_gpu_ew_ti_try(int op, const SgTensor *a,
+                                  const SgTensor *b, const char *fn,
+                                  const char *file, int64_t line) {
+    if (op < 0 || op > 2) return NULL; /* 防御：覆盖集外 → CPU */
+    if (!a->isInt || !b->isInt) return NULL; /* int kernel 防御 */
+    if (a->rank != b->rank) return NULL;
+    for (int64_t k = 0; k < a->rank; ++k)
+        if (a->shape[k] != b->shape[k]) return NULL;
+    int64_t n = sg_tsize(a);
+    SgTensor *t = sg_tensor_alloc(1, a->rank, a->shape);
+    if (n == 0) return t; /* 空张量：与 CPU 同为空结果，免 launch */
+    void *da = sg_gpu_dget((SgTensor *)a, NULL); /* 复用或上传 */
+    void *db = sg_gpu_dget((SgTensor *)b, a);    /* 逐出保护 a */
+    void *dout = NULL, *dst = NULL;
+    int32_t op32 = (int32_t)op, zero = 0, ovf = 0;
+    void *args[] = {&dout, &da, &db, &n, &op32, &dst};
+    int bad = !da || !db || sg_be.alloc(&dout, (size_t)n * 8) ||
+              sg_be.alloc(&dst, 4) || sg_be.h2d(dst, &zero, 4) ||
+              sg_be.launch1d(SG_K_TI, n, args) || sg_be.d2h(&ovf, dst, 4);
+    if (dst) sg_be.mfree(dst);
+    if (bad) {
+        if (dout) sg_be.mfree(dout);
+        sg_gpu_fail();
+        return NULL;
+    }
+    if (ovf) { /* 溢出：panic 可能 longjmp，先释放未归属的输出块 */
+        sg_be.mfree(dout);
+        sg_panic(fn, file, line, sg_ti_msg(op));
+    }
+    if (!sg_gpu_devown(t, dout, (size_t)n * 8)) { /* 惰性回拷 */
+        sg_gpu_fail();
+        return NULL;
+    }
+    return t;
+}
+
+/* int 逐元素 ts/st（kernel sg_ew_tsi(out,a,s,n,op,sleft,status)；标量取
+ * vi 槽位 i64 值——int 覆盖集 s_int=1，标量恒 int；sleft 同 f64 路径） */
+static SgTensor *sg_gpu_ew_tsi_try(int op, const SgTensor *a, int64_t s,
+                                   int sleft, const char *fn,
+                                   const char *file, int64_t line) {
+    if (op < 0 || op > 2) return NULL;
+    if (!a->isInt) return NULL; /* int kernel 防御 */
+    int64_t n = sg_tsize(a);
+    SgTensor *t = sg_tensor_alloc(1, a->rank, a->shape);
+    if (n == 0) return t;
+    void *da = sg_gpu_dget((SgTensor *)a, NULL);
+    void *dout = NULL, *dst = NULL;
+    int32_t op32 = (int32_t)op, sl32 = (int32_t)sleft, zero = 0, ovf = 0;
+    void *args[] = {&dout, &da, &s, &n, &op32, &sl32, &dst};
+    int bad = !da || sg_be.alloc(&dout, (size_t)n * 8) ||
+              sg_be.alloc(&dst, 4) || sg_be.h2d(dst, &zero, 4) ||
+              sg_be.launch1d(SG_K_TSI, n, args) || sg_be.d2h(&ovf, dst, 4);
+    if (dst) sg_be.mfree(dst);
+    if (bad) {
+        if (dout) sg_be.mfree(dout);
+        sg_gpu_fail();
+        return NULL;
+    }
+    if (ovf) { /* 溢出：panic 可能 longjmp，先释放未归属的输出块 */
+        sg_be.mfree(dout);
+        sg_panic(fn, file, line, sg_ti_msg(op));
+    }
+    if (!sg_gpu_devown(t, dout, (size_t)n * 8)) { /* 惰性回拷 */
+        sg_gpu_fail();
+        return NULL;
+    }
+    return t;
+}
+
+/* matmul（kernel sg_mm(out,a,b,m,n,k)，m=左行 n=右列 k=内维；shared-memory
+ * tiling 32×32：grid = ceil(n/32) × ceil(m/32)，block 32×32，kernel 内
+ * p 升序累加与 CPU 逐位一致；k==0 时输入零长 → 8 字节哑分配占位，kernel
+ * 不读、累加器恒 0.0 与 CPU 一致；矩形 3×4 @ 4×2 与方形均覆盖） */
 static SgTensor *sg_gpu_mm_try(const SgTensor *a, const SgTensor *b) {
     if (a->rank != 2 || b->rank != 2) return NULL; /* 防御：覆盖集外 → CPU */
+    if (a->isInt || b->isInt) return NULL;         /* f64 kernel 防御 */
+    if (a->shape[1] != b->shape[0]) return NULL; /* 内维不匹配 → CPU panic */
     int64_t m = a->shape[0], k = a->shape[1], n = b->shape[1];
     const int64_t outShape[2] = {m, n};
     SgTensor *t = sg_tensor_alloc(0, 2, outShape);
     int64_t count = m * n;
     if (count == 0) return t; /* 空结果：与 CPU 同，免 launch */
-    size_t ab = (size_t)(m * k) * 8, bb = (size_t)(k * n) * 8;
-    if (ab == 0) ab = 8;
-    if (bb == 0) bb = 8;
-    CUdeviceptr da = 0, db = 0, dout = 0;
+    /* k==0 时输入零长：sg_dev_bytes 占位 8 字节哑分配（kernel 不读） */
+    void *da = sg_gpu_dget((SgTensor *)a, NULL); /* 复用或上传 */
+    void *db = sg_gpu_dget((SgTensor *)b, a);    /* 逐出保护 a */
+    void *dout = NULL;
     void *args[] = {&dout, &da, &db, &m, &n, &k};
-    int bad = sg_cuMemAlloc(&da, ab) ||
-              sg_cuMemcpyHtoD(da, a->f64, ab) ||
-              sg_cuMemAlloc(&db, bb) ||
-              sg_cuMemcpyHtoD(db, b->f64, bb) ||
-              sg_cuMemAlloc(&dout, (size_t)count * 8) ||
-              sg_gpu_run1d(sg_gpu_f_mm, count, args) ||
-              sg_cuMemcpyDtoH(t->f64, dout, (size_t)count * 8);
-    if (da) sg_cuMemFree(da);
-    if (db) sg_cuMemFree(db);
-    if (dout) sg_cuMemFree(dout);
+    int bad = !da || !db || sg_be.alloc(&dout, (size_t)count * 8) ||
+              sg_be.launch2d(SG_K_MM, (n + 31) / 32, (m + 31) / 32, args);
     if (bad) {
+        if (dout) sg_be.mfree(dout);
+        sg_gpu_fail();
+        return NULL;
+    }
+    if (!sg_gpu_devown(t, dout, (size_t)count * 8)) { /* 惰性回拷 */
         sg_gpu_fail();
         return NULL;
     }
@@ -1620,21 +2763,19 @@ static SgTensor *sg_gpu_mm_try(const SgTensor *a, const SgTensor *b) {
  * 与 CPU 逐位一致；grid 取 1；空张量和为 0.0 免 launch） */
 static double sg_gpu_sum_try(const SgTensor *t, int *ok) {
     *ok = 0;
+    if (t->isInt) return 0.0; /* f64 kernel 防御 */
     int64_t n = sg_tsize(t);
     if (n == 0) {
         *ok = 1;
         return 0.0;
     }
-    CUdeviceptr da = 0, dout = 0;
+    void *da = sg_gpu_dget((SgTensor *)t, NULL); /* 复用或上传 */
+    void *dout = NULL;
     double out = 0.0;
     void *args[] = {&dout, &da, &n};
-    int bad = sg_cuMemAlloc(&da, (size_t)n * 8) ||
-              sg_cuMemcpyHtoD(da, t->f64, (size_t)n * 8) ||
-              sg_cuMemAlloc(&dout, 8) ||
-              sg_gpu_run1d(sg_gpu_f_sum, 1, args) ||
-              sg_cuMemcpyDtoH(&out, dout, 8);
-    if (da) sg_cuMemFree(da);
-    if (dout) sg_cuMemFree(dout);
+    int bad = !da || sg_be.alloc(&dout, 8) || sg_be.launch1d(SG_K_SUM, 1, args) ||
+              sg_be.d2h(&out, dout, 8);
+    if (dout) sg_be.mfree(dout);
     if (bad) {
         sg_gpu_fail();
         return 0.0;
@@ -1643,25 +2784,59 @@ static double sg_gpu_sum_try(const SgTensor *t, int *ok) {
     return out;
 }
 
+/* int 归约（kernel sg_sum_i(out,status,a,n)：单线程 k 升序
+ * sadd.with.overflow 累加，与 sg_tensor_sum_i 逐位一致；溢出经状态缓冲
+ * 上报，回读非 0 → 与 CPU 同一 sg_panic 终止） */
+static int64_t sg_gpu_sum_i_try(const SgTensor *t, int *ok, const char *fn,
+                                const char *file, int64_t line) {
+    *ok = 0;
+    if (!t->isInt) return 0; /* int kernel 防御 */
+    int64_t n = sg_tsize(t);
+    if (n == 0) {
+        *ok = 1;
+        return 0;
+    }
+    void *da = sg_gpu_dget((SgTensor *)t, NULL); /* 复用或上传 */
+    void *dout = NULL, *dst = NULL;
+    int64_t out = 0;
+    int32_t zero = 0, ovf = 0;
+    void *args[] = {&dout, &dst, &da, &n};
+    int bad = !da || sg_be.alloc(&dout, 8) || sg_be.alloc(&dst, 4) ||
+              sg_be.h2d(dst, &zero, 4) ||
+              sg_be.launch1d(SG_K_SUMI, 1, args) || sg_be.d2h(&ovf, dst, 4) ||
+              sg_be.d2h(&out, dout, 8);
+    if (dout) sg_be.mfree(dout);
+    if (dst) sg_be.mfree(dst);
+    if (bad) {
+        sg_gpu_fail();
+        return 0;
+    }
+    if (ovf) sg_panic(fn, file, line, "整数求和溢出");
+    *ok = 1;
+    return out;
+}
+
 /* 2D 转置（kernel sg_tr(out,a,m,n)：m=输入行数，out[i*m+j]=a[j*n+i]，
  * grid=m*n；输出形状 n×m） */
 static SgTensor *sg_gpu_tr_try(const SgTensor *t) {
     if (t->rank != 2) return NULL; /* 防御：覆盖集外 → CPU */
+    if (t->isInt) return NULL;     /* f64 kernel 防御 */
     int64_t m = t->shape[0], n = t->shape[1];
     const int64_t outShape[2] = {n, m};
     SgTensor *r = sg_tensor_alloc(0, 2, outShape);
     int64_t count = m * n;
     if (count == 0) return r;
-    CUdeviceptr da = 0, dout = 0;
+    void *da = sg_gpu_dget((SgTensor *)t, NULL); /* 复用或上传 */
+    void *dout = NULL;
     void *args[] = {&dout, &da, &m, &n};
-    int bad = sg_cuMemAlloc(&da, (size_t)count * 8) ||
-              sg_cuMemcpyHtoD(da, t->f64, (size_t)count * 8) ||
-              sg_cuMemAlloc(&dout, (size_t)count * 8) ||
-              sg_gpu_run1d(sg_gpu_f_tr, count, args) ||
-              sg_cuMemcpyDtoH(r->f64, dout, (size_t)count * 8);
-    if (da) sg_cuMemFree(da);
-    if (dout) sg_cuMemFree(dout);
+    int bad = !da || sg_be.alloc(&dout, (size_t)count * 8) ||
+              sg_be.launch1d(SG_K_TR, count, args);
     if (bad) {
+        if (dout) sg_be.mfree(dout);
+        sg_gpu_fail();
+        return NULL;
+    }
+    if (!sg_gpu_devown(r, dout, (size_t)count * 8)) { /* 惰性回拷 */
         sg_gpu_fail();
         return NULL;
     }
@@ -1701,20 +2876,54 @@ static SgTensor *sg_gpu_tr_try(const SgTensor *t) {
     (void)t;
     return NULL;
 }
+static SgTensor *sg_gpu_ew_ti_try(int op, const SgTensor *a,
+                                  const SgTensor *b, const char *fn,
+                                  const char *file, int64_t line) {
+    (void)op;
+    (void)a;
+    (void)b;
+    (void)fn;
+    (void)file;
+    (void)line;
+    return NULL;
+}
+static SgTensor *sg_gpu_ew_tsi_try(int op, const SgTensor *a, int64_t s,
+                                   int sleft, const char *fn,
+                                   const char *file, int64_t line) {
+    (void)op;
+    (void)a;
+    (void)s;
+    (void)sleft;
+    (void)fn;
+    (void)file;
+    (void)line;
+    return NULL;
+}
+static int64_t sg_gpu_sum_i_try(const SgTensor *t, int *ok, const char *fn,
+                                const char *file, int64_t line) {
+    (void)t;
+    (void)fn;
+    (void)file;
+    (void)line;
+    *ok = 0;
+    return 0;
+}
 #endif
 
 /* ---- 公开分派（ABI 与对应 sg_* 逐一相同；覆盖集 op 由类型检查器保证 ----
- * f64 且形状合法、无 panic 路径，fn/file/line 形参仅为 ABI 对齐；
- * GPU 就绪则尝试 GPU，任何失败当次即回退 CPU，输出逐位一致） ---- */
+ * 形状合法；f64 路径无 panic，int 路径溢出经状态缓冲回读后以与 CPU 同一
+ * sg_panic 终止；GPU 就绪则按 dtype 分流尝试 GPU（混合 dtype 覆盖集外，
+ * 防御性直通 CPU），任何失败当次即回退，输出逐位一致） ---- */
 
 SgTensor *sg_gpu_tensor_binop_tt(int op, SgTensor *a, SgTensor *b,
                                  const char *fn, const char *file,
                                  int64_t line) {
-    (void)fn;
-    (void)file;
-    (void)line;
     if (sg_gpu_ready()) {
-        SgTensor *r = sg_gpu_ew_tt_try(op, a, b);
+        SgTensor *r = NULL;
+        if (a->isInt && b->isInt) /* int 覆盖集：溢出 panic 语义与 CPU 一致 */
+            r = sg_gpu_ew_ti_try(op, a, b, fn, file, line);
+        else if (!a->isInt && !b->isInt) /* f64 覆盖集 */
+            r = sg_gpu_ew_tt_try(op, a, b);
         if (r) return r;
     }
     return sg_tensor_binop_tt(op, a, b, fn, file, line);
@@ -1723,10 +2932,12 @@ SgTensor *sg_gpu_tensor_binop_tt(int op, SgTensor *a, SgTensor *b,
 SgTensor *sg_gpu_tensor_binop_ts(int op, SgTensor *a, int si64, int64_t vi,
                                  double vf, const char *fn, const char *file,
                                  int64_t line) {
-    (void)si64;
-    (void)vi; /* f64 覆盖集：标量恒取 vf 浮点值 */
     if (sg_gpu_ready()) {
-        SgTensor *r = sg_gpu_ew_ts_try(op, a, vf, 0);
+        SgTensor *r = NULL;
+        if (a->isInt && si64) /* int 覆盖集：标量取 vi 槽位 i64 值 */
+            r = sg_gpu_ew_tsi_try(op, a, vi, 0, fn, file, line);
+        else if (!a->isInt && !si64) /* f64 覆盖集：标量恒取 vf 浮点值 */
+            r = sg_gpu_ew_ts_try(op, a, vf, 0);
         if (r) return r;
     }
     return sg_tensor_binop_ts(op, a, si64, vi, vf, fn, file, line);
@@ -1735,10 +2946,12 @@ SgTensor *sg_gpu_tensor_binop_ts(int op, SgTensor *a, int si64, int64_t vi,
 SgTensor *sg_gpu_tensor_binop_st(int op, int si64, int64_t vi, double vf,
                                  SgTensor *b, const char *fn, const char *file,
                                  int64_t line) {
-    (void)si64;
-    (void)vi; /* 标量在左：张量侧为 b，sleft=1 → s op b[i] */
     if (sg_gpu_ready()) {
-        SgTensor *r = sg_gpu_ew_ts_try(op, b, vf, 1);
+        SgTensor *r = NULL;
+        if (b->isInt && si64) /* int 覆盖集：标量在左，张量侧 b，sleft=1 */
+            r = sg_gpu_ew_tsi_try(op, b, vi, 1, fn, file, line);
+        else if (!b->isInt && !si64) /* f64 覆盖集 */
+            r = sg_gpu_ew_ts_try(op, b, vf, 1);
         if (r) return r;
     }
     return sg_tensor_binop_st(op, si64, vi, vf, b, fn, file, line);
@@ -1763,6 +2976,16 @@ double sg_gpu_tensor_sum_f(SgTensor *t) {
         if (ok) return r;
     }
     return sg_tensor_sum_f(t);
+}
+
+int64_t sg_gpu_tensor_sum_i(SgTensor *t, const char *fn, const char *file,
+                            int64_t line) {
+    if (sg_gpu_ready()) {
+        int ok = 0;
+        int64_t r = sg_gpu_sum_i_try(t, &ok, fn, file, line);
+        if (ok) return r;
+    }
+    return sg_tensor_sum_i(t, fn, file, line);
 }
 
 SgTensor *sg_gpu_tensor_transpose(SgTensor *t, const char *fn, const char *file,
@@ -1855,6 +3078,10 @@ uint64_t mainObjKey(const std::string& tag, bool gpuMode,
                     const std::vector<std::string>& order,
                     const Session& session) {
     uint64_t h = fnvKey(kObjCacheVer);
+    // 编译器构建指纹（本 TU 编译时刻）：编译器任何重建（MLIRGen/AOT 代码
+    // 生成行为变化）自动失效全部 obj 缓存——仅哈希源文本会让编译器升级后
+    // 仍命中旧 obj（曾致验证脚本 gpu_syms 假阴性、mlir_same 假阳性）。
+    h = fnvKey(__DATE__ " " __TIME__, h);
     h = fnvKey(tag, h);
     h = fnvKey(gpuMode ? "gpu" : "cpu", h);
     h = fnvKey("-O2", h);
@@ -1868,8 +3095,8 @@ uint64_t mainObjKey(const std::string& tag, bool gpuMode,
 }
 
 /// rt.obj 缓存键（源无关）：格式版本、工具链标签、gpuMode、运行时源文本。
-/// kRuntimeC / kGpuRuntimeC / kGpuPtxC 内嵌于编译器二进制，文本哈希入键——
-/// 开发期改动运行时源自动失效，无需手工递增版本号。
+/// kRuntimeC / kGpuRuntimeC / kGpuPtxC / kGpuOpenCLC 内嵌于编译器二进制，文本
+/// 哈希入键——开发期改动运行时源自动失效，无需手工递增版本号。
 uint64_t rtObjKey(const std::string& tag, bool gpuMode) {
     uint64_t h = fnvKey(kObjCacheVer);
     h = fnvKey(tag, h);
@@ -1878,6 +3105,7 @@ uint64_t rtObjKey(const std::string& tag, bool gpuMode) {
     if (gpuMode) {
         h = fnvKey(kGpuRuntimeC, h);
         h = fnvKey(kGpuPtxC, h);
+        h = fnvKey(kGpuOpenCLC, h);
     }
     return h;
 }
@@ -2008,11 +3236,14 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         std::ofstream f(rtPath, std::ios::binary);
         f << kRuntimeC;
         if (gpuMode) {
-            /* GPU 分派层：内嵌 kernel PTX（Windows 分支内定义，供 JIT 加载）
-             * + 六个 sg_gpu_* 分派函数（覆盖集 op，失败回退 CPU） */
+            /* GPU 分派层：内嵌 kernel 源（Windows 分支内定义，供 JIT 加载）
+             * + 后端抽象分派函数（覆盖集 op，失败回退 CPU） */
             f << "\n#ifdef _WIN32\n/* 内嵌 kernel PTX（llc sm_120 产物，"
                  "cuModuleLoadData JIT） */\nstatic const char sg_gpu_ptx[] =\n\""
-              << cStringLiteral(kGpuPtxC) << "\";\n#endif\n"
+              << cStringLiteral(kGpuPtxC) << "\";\n"
+                 "/* 内嵌 OpenCL C kernel 源（clBuildProgram 运行时 JIT，"
+                 "与 sg_kernels.ll 镜像） */\nstatic const char sg_gpu_oclc[] =\n\""
+              << cStringLiteral(kGpuOpenCLC) << "\";\n#endif\n"
               << kGpuRuntimeC;
         }
     }

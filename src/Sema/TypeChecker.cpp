@@ -729,7 +729,13 @@ TypePtr TypeChecker::builtinType(const std::string& name) const {
         name == "now" || name == "range" || name == "ok" || name == "err" ||
         name == "abs" || name == "sqrt" || name == "exp" || name == "log" ||
         name == "max" || name == "min" || name == "transpose" ||
-        name == "reshape") {
+        name == "reshape" ||
+        // v0.9.3 标量数学/随机/排序（与 Compiler/MLIRGen builtinNames 同表）
+        name == "sin" || name == "cos" || name == "tan" || name == "asin" ||
+        name == "acos" || name == "atan" || name == "sinh" || name == "cosh" ||
+        name == "tanh" || name == "atan2" || name == "floor" ||
+        name == "ceil" || name == "round" || name == "trunc" ||
+        name == "random" || name == "seed" || name == "sorted") {
         auto t = std::make_shared<Type>(Type::Kind::Builtin);
         t->name = name;
         return t;
@@ -1179,6 +1185,80 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
             return keepInt ? t : tyFloat();
         return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
                     bn + "() 仅支持数值或数值张量，实际为 " + typeToString(t));
+    }
+    // ---- v0.9.3 标量数学：三角/双曲（int 提升 f64，恒返回 float；依 IEEE 754）。
+    // 仅标量——张量版本待覆盖集扩展后统一提供（显式拒绝，拒绝即文档）。
+    if (bn == "sin" || bn == "cos" || bn == "tan" || bn == "asin" ||
+        bn == "acos" || bn == "atan" || bn == "sinh" || bn == "cosh" ||
+        bn == "tanh") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind == Type::Kind::Err) return tyErr();
+        if (t->kind != Type::Kind::Int && t->kind != Type::Kind::Float)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        bn + "() 仅支持标量数值（张量版本暂未提供），实际为 " +
+                            typeToString(t));
+        return tyFloat();
+    }
+    if (bn == "atan2") {
+        if (c.args.size() != 2)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "atan2() 恰好需要 2 个参数");
+        for (size_t k = 0; k < 2; ++k) {
+            TypePtr t = checkExpr(*c.args[k]);
+            if (t->kind == Type::Kind::Err) return tyErr();
+            if (t->kind != Type::Kind::Int && t->kind != Type::Kind::Float)
+                return fail(Errc::E2001_TypeMismatch, c.args[k]->range,
+                            "atan2() 仅支持标量数值，实际为 " +
+                                typeToString(t));
+        }
+        return tyFloat();
+    }
+    // 取整族：int 恒等返回；float → int（NaN/±inf/结果超 int64 范围运行时
+    // panic——显式拒绝而非静默回绕）。round = 半到偶（与 Python 3 一致）。
+    if (bn == "floor" || bn == "ceil" || bn == "round" || bn == "trunc") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind == Type::Kind::Err) return tyErr();
+        if (t->kind == Type::Kind::Int || t->kind == Type::Kind::Float)
+            return tyInt();
+        return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                    bn + "() 仅支持标量数值（张量版本暂未提供），实际为 " +
+                        typeToString(t));
+    }
+    // random/seed：确定性伪随机（splitmix64；双模实现逐位一致，默认状态 0）。
+    if (bn == "random") {
+        if (!c.args.empty())
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "random() 不需要参数");
+        return tyFloat();
+    }
+    if (bn == "seed") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "seed() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Int && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "seed() 参数必须是 int，实际为 " + typeToString(t));
+        return tyNone();
+    }
+    // sorted(List[T]) → List[T]：稳定升序，返回新列表（列表无变更操作，
+    // 就地排序不可表达——One Obvious Way）。
+    if (bn == "sorted") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "sorted() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind == Type::Kind::Err) return tyErr();
+        if (t->kind != Type::Kind::List)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "sorted() 仅支持列表，实际为 " + typeToString(t));
+        return t;
     }
     // max/min：张量归约 → 元素类型标量。
     if (bn == "max" || bn == "min") {

@@ -86,6 +86,33 @@ def Lang_LogOp   : Lang_Op<"log"> { let arguments = (ins F64:$val); let results 
 def Lang_NowOp   : Lang_Op<"now"> { let arguments = (ins); let results = (outs F64:$res); }
 
 // ============================================================================
+// 数学内建 II（v0.9.3：标量三角/双曲/取整/随机；依 IEEE 754，不触碰张量路径）
+// 取整族 float→int：NaN/±inf/结果超 int64 范围 panic（上下文由 Location 恢复）；
+//   int 输入在 MLIRGen 直接恒等返回，不产生 op。round = 半到偶（nearbyint）。
+// random/seed：splitmix64 确定性序列（与 VM 逐位一致），默认状态 0。
+// ============================================================================
+def Lang_SinOp   : Lang_Op<"sin">   { let arguments = (ins F64:$val); let results = (outs F64:$res); }
+def Lang_CosOp   : Lang_Op<"cos">   { let arguments = (ins F64:$val); let results = (outs F64:$res); }
+def Lang_TanOp   : Lang_Op<"tan">   { let arguments = (ins F64:$val); let results = (outs F64:$res); }
+def Lang_AsinOp  : Lang_Op<"asin">  { let arguments = (ins F64:$val); let results = (outs F64:$res); }
+def Lang_AcosOp  : Lang_Op<"acos">  { let arguments = (ins F64:$val); let results = (outs F64:$res); }
+def Lang_AtanOp  : Lang_Op<"atan">  { let arguments = (ins F64:$val); let results = (outs F64:$res); }
+def Lang_SinhOp  : Lang_Op<"sinh">  { let arguments = (ins F64:$val); let results = (outs F64:$res); }
+def Lang_CoshOp  : Lang_Op<"cosh">  { let arguments = (ins F64:$val); let results = (outs F64:$res); }
+def Lang_TanhOp  : Lang_Op<"tanh">  { let arguments = (ins F64:$val); let results = (outs F64:$res); }
+def Lang_Atan2Op : Lang_Op<"atan2"> { let arguments = (ins F64:$y, F64:$x); let results = (outs F64:$res); }
+def Lang_FloorOp : Lang_Op<"floor"> { let arguments = (ins F64:$val); let results = (outs I64:$res); }
+def Lang_CeilOp  : Lang_Op<"ceil">  { let arguments = (ins F64:$val); let results = (outs I64:$res); }
+def Lang_RoundOp : Lang_Op<"round"> { let arguments = (ins F64:$val); let results = (outs I64:$res); }
+def Lang_TruncOp : Lang_Op<"trunc"> { let arguments = (ins F64:$val); let results = (outs I64:$res); }
+def Lang_RandomOp : Lang_Op<"random"> { let arguments = (ins); let results = (outs F64:$res); }
+def Lang_SeedOp   : Lang_Op<"seed">   { let arguments = (ins I64:$val); let results = (outs); }
+
+// sorted(List) → 新列表：运行时按 SgList etag 泛型稳定升序（0=i64 1=f64
+// 2=str 3=bool；int/float 混合仅 VM 可能，AOT 列表恒同质）。
+def Lang_SortedOp : Lang_Op<"sorted"> { let arguments = (ins Lang_Ptr:$list); let results = (outs Lang_Ptr:$res); }
+
+// ============================================================================
 // 打印（print 参数逐个分派 + 空格/换行收尾，与 VM print 语义一致）
 // ============================================================================
 def Lang_PrintI64Op    : Lang_Op<"print_i64"> { let arguments = (ins I64:$val); let results = (outs); }

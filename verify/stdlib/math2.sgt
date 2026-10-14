@@ -1,0 +1,36 @@
+# math2.sgt — v0.9.3 新内建显式测试（预期全部通过）
+import math2
+
+def test_trig_values() -> bool:
+    # 依 IEEE 754 的精确锚点值（无续行符；Scourge 不支持 \ 续行）
+    a: bool = sin(0) == 0.0 and cos(0) == 1.0 and tan(0.0) == 0.0
+    b: bool = asin(0) == 0.0 and acos(1) == 0.0 and atan(0.0) == 0.0
+    c: bool = sinh(0) == 0.0 and cosh(0) == 1.0 and tanh(0.0) == 0.0
+    return a and b and c and atan2(0, 1) == 0.0
+
+def test_round_half_even() -> bool:
+    # round 半到偶（nearbyint，与 Python 3 一致）
+    return round(2.5) == 2 and round(3.5) == 4 and round(-2.5) == -2
+
+def test_floor_ceil_trunc_float() -> bool:
+    return floor(2.7) == 2 and ceil(2.1) == 3 and trunc(-2.7) == -2
+
+def test_rng_seed_reproducible() -> bool:
+    # seed 复位后序列可复现；random() ∈ [0, 1)
+    seed(42)
+    a: float = random()
+    b: float = random()
+    seed(42)
+    c: float = random()
+    d: float = random()
+    return a == c and b == d and a >= 0.0 and a < 1.0
+
+def test_sorted_str() -> bool:
+    ws: List[str] = ["pear", "apple", "fig"]
+    s: List[str] = sorted(ws)
+    return s[0] == "apple" and s[1] == "fig" and s[2] == "pear" and len(s) == 3
+
+def test_sorted_bool() -> bool:
+    bs: List[bool] = [True, False, True]
+    t: List[bool] = sorted(bs)
+    return t[0] == False and t[1] == True and t[2] == True

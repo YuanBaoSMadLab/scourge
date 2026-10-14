@@ -1,0 +1,5 @@
+# stdlib_panic.sg — 取整族超范围 panic 双模对拍探针
+# 预期：floor(1e100) 结果超出 int64 → panic（stderr 消息与退出码双模一致）。
+def main() -> int:
+    print(floor(1e100))
+    return 0

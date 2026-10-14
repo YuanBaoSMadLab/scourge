@@ -17,7 +17,11 @@ struct CompileAbort {};
 const char* builtinNames[] = {
     "print",     "str",   "len", "sum",       "now",   "range", "ok", "err",
     "abs",       "sqrt",  "exp", "log",       "max",   "min",
-    "transpose", "reshape"};
+    "transpose", "reshape",
+    // v0.9.3 标量数学/随机/排序（与 MLIRGen builtinNames 同表）
+    "sin",  "cos",  "tan",   "asin", "acos", "atan", "sinh", "cosh",
+    "tanh", "atan2", "floor", "ceil", "round", "trunc",
+    "random", "seed", "sorted"};
 
 bool isBuiltinName(const std::string& n) {
     for (const char* b : builtinNames)

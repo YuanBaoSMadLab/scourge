@@ -6,7 +6,7 @@
 //  LangDialect.cpp.inc 提供构造函数与析构，LangOps.cpp.inc 提供 op 定义
 //  （通用形式解析/打印 + 类型校验）。
 //  v23 惯例：initialize() 由本文件手写（上游 Arith 等方言同此）——在此
-//  登记全部 56 个 op（与 kLowerings 表一一对应）。
+//  登记全部 op（与 kLowerings 表一一对应，v0.9.3 起 73 个）。
 // ============================================================================
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h" // Lang_Ptr 校验器引用 LLVMPointerType（须先于 LangOps.h）
 #include "scourge/AOT/LangOps.h"

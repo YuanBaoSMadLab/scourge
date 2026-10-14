@@ -617,7 +617,144 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
         push(Value::makeTensor(std::move(td)));
         return;
     }
+    // ---- v0.9.3 标量数学/随机/排序（与 AOT kRuntimeC 语义逐字一致） ----
+    // 三角/双曲：int 提升 f64，恒返回 float；依 IEEE 754（asin(2) → nan）。
+    if (n == "sin" || n == "cos" || n == "tan" || n == "asin" ||
+        n == "acos" || n == "atan" || n == "sinh" || n == "cosh" ||
+        n == "tanh") {
+        need(1);
+        double x;
+        if (a[0].kind == Value::Kind::Int)
+            x = static_cast<double>(a[0].i);
+        else if (a[0].kind == Value::Kind::Float)
+            x = a[0].f;
+        else
+            panicHere(n + "() 仅支持标量数值");
+        double r;
+        if (n == "sin")
+            r = std::sin(x);
+        else if (n == "cos")
+            r = std::cos(x);
+        else if (n == "tan")
+            r = std::tan(x);
+        else if (n == "asin")
+            r = std::asin(x);
+        else if (n == "acos")
+            r = std::acos(x);
+        else if (n == "atan")
+            r = std::atan(x);
+        else if (n == "sinh")
+            r = std::sinh(x);
+        else if (n == "cosh")
+            r = std::cosh(x);
+        else
+            r = std::tanh(x);
+        push(Value::makeFloat(r));
+        return;
+    }
+    if (n == "atan2") {
+        need(2);
+        double xy[2];
+        for (int k = 0; k < 2; ++k) {
+            if (a[k].kind == Value::Kind::Int)
+                xy[k] = static_cast<double>(a[k].i);
+            else if (a[k].kind == Value::Kind::Float)
+                xy[k] = a[k].f;
+            else
+                panicHere("atan2() 仅支持标量数值");
+        }
+        push(Value::makeFloat(std::atan2(xy[0], xy[1])));
+        return;
+    }
+    // 取整族：int 恒等；float → int（NaN/±inf/结果超 int64 范围 panic，
+    // 不回绕）。round = 半到偶（nearbyint，默认舍入模式，与 Python 3 一致）。
+    if (n == "floor" || n == "ceil" || n == "round" || n == "trunc") {
+        need(1);
+        if (a[0].kind == Value::Kind::Int) {
+            push(Value::makeInt(a[0].i));
+            return;
+        }
+        if (a[0].kind != Value::Kind::Float)
+            panicHere(n + "() 仅支持标量数值");
+        double x = a[0].f;
+        double r = n == "floor" ? std::floor(x)
+                 : n == "ceil"  ? std::ceil(x)
+                 : n == "round" ? std::nearbyint(x)
+                                : std::trunc(x);
+        if (!(r >= -9223372036854775808.0 && r < 9223372036854775808.0))
+            panicHere(n + "() 结果超出 int64 范围");
+        push(Value::makeInt(static_cast<int64_t>(r)));
+        return;
+    }
+    // random/seed：splitmix64 确定性序列（与 kRuntimeC sg_rng_* 逐位一致，
+    // 双模差分对拍依据）。random ∈ [0,1)，53 位精度。
+    if (n == "random") {
+        if (!a.empty()) panicHere("random() 不需要参数");
+        push(Value::makeFloat(static_cast<double>(rngNext() >> 11) *
+                              (1.0 / 9007199254740992.0)));
+        return;
+    }
+    if (n == "seed") {
+        need(1);
+        if (a[0].kind != Value::Kind::Int) panicHere("seed() 参数必须是 int");
+        rngState_ = static_cast<uint64_t>(a[0].i); // 负数按 64 位补码解释
+        push(Value::makeNone());
+        return;
+    }
+    // sorted(List[T]) → 新列表：稳定升序。int/bool 同类精确比较，float 同类
+    // 位型比较，int/float 混合以 double 比较（检查器已统一元素类型，混合仅限
+    // 未注解路径）。str 按字节序。含 NaN 的列表显式拒绝（见下）。
+    if (n == "sorted") {
+        need(1);
+        if (a[0].kind != Value::Kind::List || !a[0].list)
+            panicHere("sorted() 仅支持列表");
+        // NaN 显式拒绝（与 AOT sg_sorted 同语义同消息）：NaN 不可比破坏全序。
+        for (const Value& v : *a[0].list)
+            if (v.kind == Value::Kind::Float && std::isnan(v.f))
+                panicHere("sorted() 不支持含 NaN 的浮点元素");
+        auto out = std::make_shared<std::vector<Value>>(*a[0].list);
+        std::stable_sort(out->begin(), out->end(),
+                         [this](const Value& l, const Value& r) {
+                             if (l.kind == Value::Kind::Int &&
+                                 r.kind == Value::Kind::Int)
+                                 return l.i < r.i;
+                             if (l.kind == Value::Kind::Float &&
+                                 r.kind == Value::Kind::Float)
+                                 return l.f < r.f;
+                             if (l.kind == Value::Kind::Str &&
+                                 r.kind == Value::Kind::Str)
+                                 return l.s < r.s;
+                             if (l.kind == Value::Kind::Bool &&
+                                 r.kind == Value::Kind::Bool)
+                                 return l.b < r.b;
+                             if ((l.kind == Value::Kind::Int ||
+                                  l.kind == Value::Kind::Float) &&
+                                 (r.kind == Value::Kind::Int ||
+                                  r.kind == Value::Kind::Float)) {
+                                 double lx = l.kind == Value::Kind::Float
+                                                 ? l.f
+                                                 : static_cast<double>(l.i);
+                                 double rx = r.kind == Value::Kind::Float
+                                                 ? r.f
+                                                 : static_cast<double>(r.i);
+                                 return lx < rx;
+                             }
+                             panicHere("sorted() 列表元素类型不可比较");
+                         });
+        push(Value::makeList(std::move(out)));
+        return;
+    }
     panicHere("VM 内部错误：未知内建 '" + n + "'");
+}
+
+uint64_t VM::rngNext() {
+    // splitmix64：与 kRuntimeC 的 sg_rng_next 实现逐位一致（单一算法语义，
+    // 双模各自实现、差分对拍锁定）。
+    rngState_ += 0x9E3779B97F4A7C15ull;
+    uint64_t z = rngState_;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
 }
 
 // ----------------------------------------------------------------------------

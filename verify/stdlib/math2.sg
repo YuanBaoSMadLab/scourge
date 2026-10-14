@@ -1,0 +1,22 @@
+# math2.sg — v0.9.3 新内建（三角/取整/随机/排序）显式测试模块
+# 预期（ scourge test math2.sg ）：
+#   属性 fl / cl  通过（取整族对 int 恒等）
+#   test_*        全部通过（见 math2.sgt 注释）
+
+@pure
+def fl(x: int) -> int:
+    """
+    floor 对 int 输入恒等（属性测试）。
+    requires: x >= -1000000 and x <= 1000000
+    ensures: result == x
+    """
+    return floor(x)
+
+@pure
+def cl(x: int) -> int:
+    """
+    ceil 对 int 输入恒等（属性测试）。
+    requires: x >= -1000000 and x <= 1000000
+    ensures: result == x
+    """
+    return ceil(x)

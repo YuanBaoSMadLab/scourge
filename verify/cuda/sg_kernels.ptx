@@ -7,6 +7,8 @@
 .address_size 64
 
 	// .globl	sg_ew_tt                // -- Begin function sg_ew_tt
+// sg_mm_at has been demoted
+// sg_mm_bt has been demoted
                                         // @sg_ew_tt
 .visible .entry sg_ew_tt(
 	.param .u64 .ptr .align 1 sg_ew_tt_param_0,
@@ -127,6 +129,160 @@ $L__BB1_8:                              // %exit
 	ret;
                                         // -- End function
 }
+	// .globl	sg_ew_ti                // -- Begin function sg_ew_ti
+.visible .entry sg_ew_ti(
+	.param .u64 .ptr .align 1 sg_ew_ti_param_0,
+	.param .u64 .ptr .align 1 sg_ew_ti_param_1,
+	.param .u64 .ptr .align 1 sg_ew_ti_param_2,
+	.param .u64 sg_ew_ti_param_3,
+	.param .u32 sg_ew_ti_param_4,
+	.param .u64 .ptr .align 1 sg_ew_ti_param_5
+)                                       // @sg_ew_ti
+{
+	.reg .pred 	%p<11>;
+	.reg .b32 	%r<6>;
+	.reg .b64 	%rd<22>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd8, [sg_ew_ti_param_0];
+	ld.param.b64 	%rd9, [sg_ew_ti_param_1];
+	cvta.to.global.u64 	%rd1, %rd9;
+	ld.param.b64 	%rd10, [sg_ew_ti_param_2];
+	cvta.to.global.u64 	%rd2, %rd10;
+	ld.param.b64 	%rd11, [sg_ew_ti_param_5];
+	cvta.to.global.u64 	%rd3, %rd11;
+	ld.param.b64 	%rd12, [sg_ew_ti_param_3];
+	cvta.to.global.u64 	%rd4, %rd8;
+	mov.u32 	%r2, %tid.x;
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r4, %ctaid.x;
+	cvt.u64.u32 	%rd13, %r2;
+	mul.wide.u32 	%rd14, %r4, %r3;
+	add.s64 	%rd5, %rd14, %rd13;
+	setp.ge.s64 	%p1, %rd5, %rd12;
+	@%p1 bra 	$L__BB2_10;
+// %bb.1:                               // %do
+	ld.param.b32 	%r1, [sg_ew_ti_param_4];
+	shl.b64 	%rd15, %rd5, 3;
+	add.s64 	%rd16, %rd1, %rd15;
+	add.s64 	%rd17, %rd2, %rd15;
+	ld.global.b64 	%rd6, [%rd16];
+	ld.global.b64 	%rd7, [%rd17];
+	setp.eq.b32 	%p2, %r1, 2;
+	@%p2 bra 	$L__BB2_6;
+// %bb.2:                               // %do
+	setp.eq.b32 	%p3, %r1, 1;
+	@%p3 bra 	$L__BB2_5;
+// %bb.3:                               // %do
+	setp.ne.b32 	%p4, %r1, 0;
+	@%p4 bra 	$L__BB2_10;
+// %bb.4:                               // %add
+	add.s64 	%rd21, %rd6, %rd7;
+	setp.lt.s64 	%p7, %rd21, %rd6;
+	setp.lt.s64 	%p8, %rd7, 0;
+	xor.pred 	%p10, %p8, %p7;
+	bra.uni 	$L__BB2_7;
+$L__BB2_5:                              // %sub
+	setp.lt.s64 	%p5, %rd6, %rd7;
+	sub.s64 	%rd21, %rd6, %rd7;
+	setp.lt.s64 	%p6, %rd21, 0;
+	xor.pred 	%p10, %p5, %p6;
+	bra.uni 	$L__BB2_7;
+$L__BB2_6:                              // %mul
+	mul.hi.s64 	%rd18, %rd6, %rd7;
+	mul.lo.s64 	%rd21, %rd6, %rd7;
+	shr.s64 	%rd19, %rd21, 63;
+	setp.ne.b64 	%p10, %rd18, %rd19;
+$L__BB2_7:                              // %chk
+	not.pred 	%p9, %p10;
+	@%p9 bra 	$L__BB2_9;
+// %bb.8:                               // %ovf
+	atom.relaxed.sys.global.or.b32 	%r5, [%rd3], 1;
+$L__BB2_9:                              // %wr
+	add.s64 	%rd20, %rd4, %rd15;
+	st.global.b64 	[%rd20], %rd21;
+$L__BB2_10:                             // %exit
+	ret;
+                                        // -- End function
+}
+	// .globl	sg_ew_tsi               // -- Begin function sg_ew_tsi
+.visible .entry sg_ew_tsi(
+	.param .u64 .ptr .align 1 sg_ew_tsi_param_0,
+	.param .u64 .ptr .align 1 sg_ew_tsi_param_1,
+	.param .u64 sg_ew_tsi_param_2,
+	.param .u64 sg_ew_tsi_param_3,
+	.param .u32 sg_ew_tsi_param_4,
+	.param .u32 sg_ew_tsi_param_5,
+	.param .u64 .ptr .align 1 sg_ew_tsi_param_6
+)                                       // @sg_ew_tsi
+{
+	.reg .pred 	%p<12>;
+	.reg .b32 	%r<7>;
+	.reg .b64 	%rd<21>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd8, [sg_ew_tsi_param_0];
+	ld.param.b64 	%rd9, [sg_ew_tsi_param_1];
+	cvta.to.global.u64 	%rd1, %rd9;
+	ld.param.b64 	%rd10, [sg_ew_tsi_param_6];
+	cvta.to.global.u64 	%rd2, %rd10;
+	cvta.to.global.u64 	%rd3, %rd8;
+	ld.param.b64 	%rd11, [sg_ew_tsi_param_3];
+	mov.u32 	%r3, %tid.x;
+	mov.u32 	%r4, %ntid.x;
+	mov.u32 	%r5, %ctaid.x;
+	cvt.u64.u32 	%rd12, %r3;
+	mul.wide.u32 	%rd13, %r5, %r4;
+	add.s64 	%rd4, %rd13, %rd12;
+	setp.ge.s64 	%p1, %rd4, %rd11;
+	@%p1 bra 	$L__BB3_10;
+// %bb.1:                               // %do
+	ld.param.b32 	%r2, [sg_ew_tsi_param_5];
+	ld.param.b32 	%r1, [sg_ew_tsi_param_4];
+	ld.param.b64 	%rd7, [sg_ew_tsi_param_2];
+	shl.b64 	%rd14, %rd4, 3;
+	add.s64 	%rd15, %rd1, %rd14;
+	ld.global.b64 	%rd16, [%rd15];
+	setp.ne.b32 	%p2, %r2, 0;
+	selp.b64 	%rd5, %rd7, %rd16, %p2;
+	selp.b64 	%rd6, %rd16, %rd7, %p2;
+	setp.eq.b32 	%p3, %r1, 2;
+	@%p3 bra 	$L__BB3_6;
+// %bb.2:                               // %do
+	setp.eq.b32 	%p4, %r1, 1;
+	@%p4 bra 	$L__BB3_5;
+// %bb.3:                               // %do
+	setp.ne.b32 	%p5, %r1, 0;
+	@%p5 bra 	$L__BB3_10;
+// %bb.4:                               // %add
+	add.s64 	%rd20, %rd5, %rd6;
+	setp.lt.s64 	%p8, %rd20, %rd5;
+	setp.lt.s64 	%p9, %rd6, 0;
+	xor.pred 	%p11, %p9, %p8;
+	bra.uni 	$L__BB3_7;
+$L__BB3_5:                              // %sub
+	setp.lt.s64 	%p6, %rd5, %rd6;
+	sub.s64 	%rd20, %rd5, %rd6;
+	setp.lt.s64 	%p7, %rd20, 0;
+	xor.pred 	%p11, %p6, %p7;
+	bra.uni 	$L__BB3_7;
+$L__BB3_6:                              // %mul
+	mul.hi.s64 	%rd17, %rd5, %rd6;
+	mul.lo.s64 	%rd20, %rd5, %rd6;
+	shr.s64 	%rd18, %rd20, 63;
+	setp.ne.b64 	%p11, %rd17, %rd18;
+$L__BB3_7:                              // %chk
+	not.pred 	%p10, %p11;
+	@%p10 bra 	$L__BB3_9;
+// %bb.8:                               // %ovf
+	atom.relaxed.sys.global.or.b32 	%r6, [%rd2], 1;
+$L__BB3_9:                              // %wr
+	add.s64 	%rd19, %rd3, %rd14;
+	st.global.b64 	[%rd19], %rd20;
+$L__BB3_10:                             // %exit
+	ret;
+                                        // -- End function
+}
 	// .globl	sg_mm                   // -- Begin function sg_mm
 .visible .entry sg_mm(
 	.param .u64 .ptr .align 1 sg_mm_param_0,
@@ -137,75 +293,109 @@ $L__BB1_8:                              // %exit
 	.param .u64 sg_mm_param_5
 )                                       // @sg_mm
 {
-	.reg .pred 	%p<4>;
-	.reg .b32 	%r<9>;
-	.reg .b64 	%rd<32>;
-
+	.reg .pred 	%p<12>;
+	.reg .b32 	%r<5>;
+	.reg .b64 	%rd<54>;
+	// demoted variable
+	.shared .align 8 .b8 sg_mm_at[8192];
+	// demoted variable
+	.shared .align 8 .b8 sg_mm_bt[8192];
 // %bb.0:                               // %entry
-	ld.param.b64 	%rd6, [sg_mm_param_4];
-	ld.param.b64 	%rd8, [sg_mm_param_0];
-	ld.param.b64 	%rd9, [sg_mm_param_1];
-	cvta.to.global.u64 	%rd1, %rd9;
-	ld.param.b64 	%rd10, [sg_mm_param_2];
-	cvta.to.global.u64 	%rd2, %rd10;
-	cvta.to.global.u64 	%rd3, %rd8;
-	ld.param.b64 	%rd11, [sg_mm_param_3];
+	ld.param.b64 	%rd14, [sg_mm_param_5];
+	ld.param.b64 	%rd13, [sg_mm_param_4];
+	ld.param.b64 	%rd12, [sg_mm_param_3];
+	ld.param.b64 	%rd15, [sg_mm_param_0];
+	ld.param.b64 	%rd16, [sg_mm_param_1];
+	cvta.to.global.u64 	%rd1, %rd16;
+	ld.param.b64 	%rd17, [sg_mm_param_2];
+	cvta.to.global.u64 	%rd2, %rd17;
+	cvta.to.global.u64 	%rd3, %rd15;
 	mov.u32 	%r1, %tid.x;
-	mov.u32 	%r2, %ntid.x;
+	mov.u32 	%r2, %tid.y;
 	mov.u32 	%r3, %ctaid.x;
-	cvt.u64.u32 	%rd12, %r1;
-	mul.wide.u32 	%rd13, %r3, %r2;
-	add.s64 	%rd4, %rd13, %rd12;
-	mul.lo.s64 	%rd14, %rd11, %rd6;
-	setp.ge.s64 	%p1, %rd4, %rd14;
-	@%p1 bra 	$L__BB2_8;
-// %bb.1:                               // %do
-	ld.param.b64 	%rd7, [sg_mm_param_5];
-	or.b64 	%rd15, %rd4, %rd6;
-	and.b64 	%rd16, %rd15, -4294967296;
-	setp.ne.b64 	%p2, %rd16, 0;
-	@!%p2 bra 	$L__BB2_2;
-// %bb.3:
-	div.s64 	%rd26, %rd4, %rd6;
-	mul.lo.s64 	%rd17, %rd26, %rd6;
-	sub.s64 	%rd27, %rd4, %rd17;
-	bra.uni 	$L__BB2_4;
-$L__BB2_2:
-	cvt.u32.u64 	%r4, %rd6;
-	cvt.u32.u64 	%r5, %rd4;
-	div.u32 	%r6, %r5, %r4;
-	mul.lo.s32 	%r7, %r6, %r4;
-	sub.s32 	%r8, %r5, %r7;
-	cvt.u64.u32 	%rd26, %r6;
-	cvt.u64.u32 	%rd27, %r8;
-$L__BB2_4:                              // %do.split
-	shl.b64 	%rd18, %rd27, 3;
-	add.s64 	%rd29, %rd2, %rd18;
-	shl.b64 	%rd5, %rd6, 3;
-	mul.lo.s64 	%rd19, %rd26, %rd7;
-	shl.b64 	%rd20, %rd19, 3;
-	add.s64 	%rd28, %rd1, %rd20;
-	mov.b64 	%rd31, 0d0000000000000000;
-	mov.b64 	%rd30, 0;
-$L__BB2_5:                              // %lp
-                                        // =>This Inner Loop Header: Depth=1
-	setp.ge.s64 	%p3, %rd30, %rd7;
-	@%p3 bra 	$L__BB2_7;
-// %bb.6:                               // %body
-                                        //   in Loop: Header=BB2_5 Depth=1
-	ld.global.b64 	%rd23, [%rd28];
-	ld.global.b64 	%rd24, [%rd29];
-	mul.rn.f64 	%rd25, %rd23, %rd24;
-	add.rn.f64 	%rd31, %rd31, %rd25;
-	add.s64 	%rd30, %rd30, 1;
-	add.s64 	%rd29, %rd29, %rd5;
-	add.s64 	%rd28, %rd28, 8;
-	bra.uni 	$L__BB2_5;
-$L__BB2_7:                              // %done
-	shl.b64 	%rd21, %rd4, 3;
-	add.s64 	%rd22, %rd3, %rd21;
-	st.global.b64 	[%rd22], %rd31;
-$L__BB2_8:                              // %exit
+	mov.u32 	%r4, %ctaid.y;
+	cvt.u64.u32 	%rd4, %r1;
+	cvt.u64.u32 	%rd5, %r2;
+	mul.wide.u32 	%rd18, %r3, 32;
+	mul.wide.u32 	%rd19, %r4, 32;
+	add.s64 	%rd6, %rd19, %rd5;
+	add.s64 	%rd7, %rd18, %rd4;
+	setp.lt.s64 	%p2, %rd6, %rd12;
+	setp.lt.s64 	%p3, %rd7, %rd13;
+	and.pred 	%p1, %p2, %p3;
+	mul.wide.u32 	%rd20, %r2, 32;
+	add.s64 	%rd8, %rd20, %rd4;
+	mul.wide.u32 	%rd21, %r1, 8;
+	mov.b64 	%rd22, sg_mm_bt;
+	add.s64 	%rd9, %rd22, %rd21;
+	mul.wide.u32 	%rd23, %r2, 256;
+	mov.b64 	%rd24, sg_mm_at;
+	add.s64 	%rd10, %rd24, %rd23;
+	mov.b64 	%rd50, 0d0000000000000000;
+	mov.b64 	%rd49, 0;
+	shl.b64 	%rd41, %rd8, 3;
+$L__BB4_1:                              // %blk
+                                        // =>This Loop Header: Depth=1
+                                        //     Child Loop BB4_3 Depth 2
+	setp.ge.s64 	%p4, %rd49, %rd14;
+	@%p4 bra 	$L__BB4_5;
+// %bb.2:                               // %load
+                                        //   in Loop: Header=BB4_1 Depth=1
+	add.s64 	%rd27, %rd49, %rd4;
+	setp.lt.s64 	%p6, %rd27, %rd14;
+	and.pred 	%p7, %p2, %p6;
+	mad.lo.s64 	%rd28, %rd6, %rd14, %rd27;
+	selp.b64 	%rd29, %rd28, 0, %p7;
+	shl.b64 	%rd30, %rd29, 3;
+	add.s64 	%rd31, %rd1, %rd30;
+	ld.global.b64 	%rd32, [%rd31];
+	selp.f64 	%rd33, %rd32, 0d0000000000000000, %p7;
+	add.s64 	%rd34, %rd49, %rd5;
+	setp.lt.s64 	%p8, %rd34, %rd14;
+	and.pred 	%p9, %p8, %p3;
+	mad.lo.s64 	%rd35, %rd34, %rd13, %rd7;
+	selp.b64 	%rd36, %rd35, 0, %p9;
+	shl.b64 	%rd37, %rd36, 3;
+	add.s64 	%rd38, %rd2, %rd37;
+	ld.global.b64 	%rd39, [%rd38];
+	selp.f64 	%rd40, %rd39, 0d0000000000000000, %p9;
+	add.s64 	%rd42, %rd24, %rd41;
+	st.shared.b64 	[%rd42], %rd33;
+	add.s64 	%rd43, %rd22, %rd41;
+	st.shared.b64 	[%rd43], %rd40;
+	bar.sync 	0;
+	mov.b64 	%rd53, 0;
+	mov.b64 	%rd51, %rd10;
+	mov.b64 	%rd52, %rd9;
+$L__BB4_3:                              // %inner
+                                        //   Parent Loop BB4_1 Depth=1
+                                        // =>  This Inner Loop Header: Depth=2
+	add.s64 	%rd44, %rd49, %rd53;
+	ld.shared.b64 	%rd45, [%rd51];
+	ld.shared.b64 	%rd46, [%rd52];
+	mul.rn.f64 	%rd47, %rd45, %rd46;
+	add.rn.f64 	%rd48, %rd50, %rd47;
+	setp.lt.s64 	%p10, %rd44, %rd14;
+	selp.f64 	%rd50, %rd48, %rd50, %p10;
+	add.s64 	%rd53, %rd53, 1;
+	add.s64 	%rd52, %rd52, 256;
+	add.s64 	%rd51, %rd51, 8;
+	setp.ne.b64 	%p11, %rd53, 32;
+	@%p11 bra 	$L__BB4_3;
+// %bb.4:                               // %bar2
+                                        //   in Loop: Header=BB4_1 Depth=1
+	bar.sync 	0;
+	add.s64 	%rd49, %rd49, 32;
+	bra.uni 	$L__BB4_1;
+$L__BB4_5:                              // %done
+	not.pred 	%p5, %p1;
+	@%p5 bra 	$L__BB4_7;
+// %bb.6:                               // %wr
+	mad.lo.s64 	%rd25, %rd6, %rd13, %rd7;
+	shl.b64 	%rd26, %rd25, 3;
+	add.s64 	%rd11, %rd3, %rd26;
+	st.global.b64 	[%rd11], %rd50;
+$L__BB4_7:                              // %exit
 	ret;
                                         // -- End function
 }
@@ -229,25 +419,82 @@ $L__BB2_8:                              // %exit
 	mov.u32 	%r2, %ctaid.x;
 	or.b32 	%r3, %r1, %r2;
 	setp.ne.b32 	%p1, %r3, 0;
-	@%p1 bra 	$L__BB3_5;
+	@%p1 bra 	$L__BB5_5;
 // %bb.1:                               // %lp.preheader
 	ld.param.b64 	%rd2, [sg_sum_param_2];
 	mov.b64 	%rd8, 0d0000000000000000;
 	mov.b64 	%rd7, 0;
-$L__BB3_2:                              // %lp
+$L__BB5_2:                              // %lp
                                         // =>This Inner Loop Header: Depth=1
 	setp.ge.s64 	%p2, %rd7, %rd2;
-	@%p2 bra 	$L__BB3_4;
+	@%p2 bra 	$L__BB5_4;
 // %bb.3:                               // %body
-                                        //   in Loop: Header=BB3_2 Depth=1
+                                        //   in Loop: Header=BB5_2 Depth=1
 	ld.global.b64 	%rd5, [%rd6];
 	add.rn.f64 	%rd8, %rd8, %rd5;
 	add.s64 	%rd7, %rd7, 1;
 	add.s64 	%rd6, %rd6, 8;
-	bra.uni 	$L__BB3_2;
-$L__BB3_4:                              // %done
+	bra.uni 	$L__BB5_2;
+$L__BB5_4:                              // %done
 	st.global.b64 	[%rd1], %rd8;
-$L__BB3_5:                              // %exit
+$L__BB5_5:                              // %exit
+	ret;
+                                        // -- End function
+}
+	// .globl	sg_sum_i                // -- Begin function sg_sum_i
+.visible .entry sg_sum_i(
+	.param .u64 .ptr .align 1 sg_sum_i_param_0,
+	.param .u64 .ptr .align 1 sg_sum_i_param_1,
+	.param .u64 .ptr .align 1 sg_sum_i_param_2,
+	.param .u64 sg_sum_i_param_3
+)                                       // @sg_sum_i
+{
+	.reg .pred 	%p<7>;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<12>;
+
+// %bb.0:                               // %entry
+	ld.param.b64 	%rd5, [sg_sum_i_param_0];
+	ld.param.b64 	%rd6, [sg_sum_i_param_2];
+	cvta.to.global.u64 	%rd9, %rd6;
+	ld.param.b64 	%rd7, [sg_sum_i_param_1];
+	cvta.to.global.u64 	%rd1, %rd7;
+	cvta.to.global.u64 	%rd2, %rd5;
+	mov.u32 	%r1, %tid.x;
+	mov.u32 	%r2, %ctaid.x;
+	or.b32 	%r3, %r1, %r2;
+	setp.ne.b32 	%p1, %r3, 0;
+	@%p1 bra 	$L__BB6_7;
+// %bb.1:                               // %lp.preheader
+	ld.param.b64 	%rd4, [sg_sum_i_param_3];
+	mov.b64 	%rd11, 0;
+	mov.b64 	%rd10, %rd11;
+	bra.uni 	$L__BB6_2;
+$L__BB6_5:                              // %cont
+                                        //   in Loop: Header=BB6_2 Depth=1
+	add.s64 	%rd10, %rd10, 1;
+	add.s64 	%rd9, %rd9, 8;
+	mov.b64 	%rd11, %rd3;
+$L__BB6_2:                              // %lp
+                                        // =>This Inner Loop Header: Depth=1
+	setp.ge.s64 	%p2, %rd10, %rd4;
+	@%p2 bra 	$L__BB6_6;
+// %bb.3:                               // %body
+                                        //   in Loop: Header=BB6_2 Depth=1
+	ld.global.b64 	%rd8, [%rd9];
+	add.s64 	%rd3, %rd11, %rd8;
+	setp.lt.s64 	%p3, %rd3, %rd11;
+	setp.lt.s64 	%p4, %rd8, 0;
+	xor.pred 	%p5, %p4, %p3;
+	not.pred 	%p6, %p5;
+	@%p6 bra 	$L__BB6_5;
+// %bb.4:                               // %ovf
+                                        //   in Loop: Header=BB6_2 Depth=1
+	st.global.b32 	[%rd1], 1;
+	bra.uni 	$L__BB6_5;
+$L__BB6_6:                              // %done
+	st.global.b64 	[%rd2], %rd11;
+$L__BB6_7:                              // %exit
 	ret;
                                         // -- End function
 }
@@ -278,18 +525,18 @@ $L__BB3_5:                              // %exit
 	add.s64 	%rd3, %rd9, %rd8;
 	mul.lo.s64 	%rd10, %rd4, %rd5;
 	setp.ge.s64 	%p1, %rd3, %rd10;
-	@%p1 bra 	$L__BB4_5;
+	@%p1 bra 	$L__BB7_5;
 // %bb.1:                               // %do
 	or.b64 	%rd11, %rd3, %rd4;
 	and.b64 	%rd12, %rd11, -4294967296;
 	setp.ne.b64 	%p2, %rd12, 0;
-	@!%p2 bra 	$L__BB4_2;
+	@!%p2 bra 	$L__BB7_2;
 // %bb.3:
 	div.s64 	%rd20, %rd3, %rd4;
 	mul.lo.s64 	%rd13, %rd20, %rd4;
 	sub.s64 	%rd21, %rd3, %rd13;
-	bra.uni 	$L__BB4_4;
-$L__BB4_2:
+	bra.uni 	$L__BB7_4;
+$L__BB7_2:
 	cvt.u32.u64 	%r4, %rd4;
 	cvt.u32.u64 	%r5, %rd3;
 	div.u32 	%r6, %r5, %r4;
@@ -297,7 +544,7 @@ $L__BB4_2:
 	sub.s32 	%r8, %r5, %r7;
 	cvt.u64.u32 	%rd20, %r6;
 	cvt.u64.u32 	%rd21, %r8;
-$L__BB4_4:                              // %do.split
+$L__BB7_4:                              // %do.split
 	mad.lo.s64 	%rd14, %rd21, %rd5, %rd20;
 	shl.b64 	%rd15, %rd14, 3;
 	add.s64 	%rd16, %rd1, %rd15;
@@ -305,7 +552,7 @@ $L__BB4_4:                              // %do.split
 	shl.b64 	%rd18, %rd3, 3;
 	add.s64 	%rd19, %rd2, %rd18;
 	st.global.b64 	[%rd19], %rd17;
-$L__BB4_5:                              // %exit
+$L__BB7_5:                              // %exit
 	ret;
                                         // -- End function
 }

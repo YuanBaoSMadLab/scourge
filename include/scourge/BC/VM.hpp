@@ -13,6 +13,7 @@
 #include "scourge/BC/Bytecode.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
@@ -114,6 +115,11 @@ private:
     Panic lastPanic_;
     int exitCode_ = 0;
     bool panicked_ = false;
+    /// random()/seed() 的 splitmix64 状态（构造即默认 0——每次运行序列确定，
+    /// 与 AOT 运行时 sg_rng_state 逐位一致，双模差分对拍可复现）。
+    uint64_t rngState_ = 0;
+    /// splitmix64 下一步（与 kRuntimeC 的 sg_rng_next 逐位一致的唯一实现语义）。
+    uint64_t rngNext();
 };
 
 } // namespace bc

@@ -1,0 +1,47 @@
+# gpu_dyn.sg — 动态形状 GPU 覆盖探针：kind/dtype 属性恒写后动态形状进 GPU，
+# 运行时守卫校验（形状不一致/内维不匹配 → NULL）回退 CPU panic（语义逐字一致）
+def chain(t: Tensor[float, (?)]) -> Tensor[float, (?)]:
+    u = t * 2.0 + 1.0
+    v = u - 0.5
+    return v
+
+def tt1d(t: Tensor[float, (?)], u: Tensor[float, (?)]) -> Tensor[float, (?)]:
+    return t + u
+
+def tt2d(t: Tensor[float, (?, ?)], u: Tensor[float, (?, ?)]) -> Tensor[float, (?, ?)]:
+    return t * u
+
+def dtr(t: Tensor[float, (?, ?)]) -> Tensor[float, (?, ?)]:
+    return transpose(t)
+
+def dmm(a: Tensor[float, (?, ?)], b: Tensor[float, (?, ?)]) -> Tensor[float, (?, ?)]:
+    return a @ b
+
+def bad_add(t: Tensor[float, (?)], u: Tensor[float, (?)]) -> float:
+    return sum(t + u)
+
+def main() -> int:
+    x3 = [1.5, -2.0, 3.25]
+    x5 = [1.0, 2.0, 3.0, 4.0, 5.0]
+    m23 = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    m32 = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+
+    # 动态形状 ts 链（同一函数两种运行时形状，GPU kernel 形状参数化）
+    print("chain3=" + str(chain(x3)))
+    print("chain5=" + str(chain(x5)))
+    # 动态 tt（1D/2D）
+    print("tt1d=" + str(tt1d(x3, x3)))
+    print("tt2d=" + str(tt2d(m23, m23)))
+    # 动态 sum（对动态表达式归约）/ transpose / matmul
+    print("sum3=" + str(sum(chain(x3))))
+    print("sum5=" + str(sum(chain(x5))))
+    print("tr=" + str(dtr(m23)))
+    print("mm=" + str(dmm(m23, m32)))
+    print("mmsum=" + str(sum(dmm(m23, m32))))
+    # 运行时形状不匹配 → 守卫 NULL → CPU panic → try 捕获
+    try:
+        bad_add(x3, x5)
+        print("no_panic")
+    except:
+        print("caught")
+    return 0

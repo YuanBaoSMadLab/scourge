@@ -1,0 +1,52 @@
+# stdlib_math.sg — v0.9.3 标准库数学/随机/排序 双模差分对拍探针
+# 纪律：同一文件经 scourge run（VM）与 scourge build（AOT）执行，
+# stdout 必须逐字节一致（verify_stdlib.ps1 断言）。
+def main() -> int:
+    # 三角/双曲（int 提升 f64 + float 直入；依 IEEE 754）
+    print(sin(0))
+    print(cos(0))
+    print(sin(1))
+    print(sin(1.5707963267948966))
+    print(cos(3.141592653589793))
+    print(tan(0.7853981633974483))
+    print(asin(1.0))
+    print(acos(-1.0))
+    print(atan(1.0))
+    print(sinh(1.0))
+    print(cosh(1.0))
+    print(tanh(1.0))
+    print(atan2(1.0, 2.0))
+    print(atan2(3, 4))
+    # 取整族（float → int；int 恒等；round 半到偶）
+    print(floor(2.7))
+    print(ceil(2.1))
+    print(round(2.5))
+    print(round(3.5))
+    print(round(-2.5))
+    print(trunc(-2.7))
+    print(floor(-3))
+    print(ceil(7))
+    # 随机（splitmix64 确定性序列；seed 复位可复现）
+    print(random())
+    print(random())
+    seed(42)
+    print(random())
+    print(random())
+    seed(42)
+    print(random())
+    # sorted（str 按字节序 / bool false<true / 空列表；元素逐个打印——
+    # AOT 不支持句柄值整体打印，见 docs/04 §AOT 限制）
+    ws: List[str] = ["pear", "apple", "fig"]
+    s: List[str] = sorted(ws)
+    print(s[0])
+    print(s[1])
+    print(s[2])
+    print(len(s))
+    bs: List[bool] = [True, False, True]
+    t: List[bool] = sorted(bs)
+    print(t[0])
+    print(t[1])
+    print(t[2])
+    es: List[str] = []
+    print(len(sorted(es)))
+    return 0
