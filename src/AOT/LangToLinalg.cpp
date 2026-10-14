@@ -320,8 +320,17 @@ public:
                 return f64Only(op); // int 形态 → legal
             };
         };
-        target.addDynamicallyLegalOp<lang::TensorMatmulOp>(
-            missingAttrs({"lhs_shape", "rhs_shape"}));
+        // N1 根治：CPU 模式 matmul 不再降级 linalg.matmul——linalg-to-loops
+        // 展开的 i-j-p 外积循环里 a/b/c 均为不透明 SgTensor 指针，clang -O2
+        // 因指针别名放弃向量化（store-to-load 依赖链），大尺寸 AOT 实测慢于
+        // VM（256² 1.60× / 512² 1.35× / 1024² 1.38×）。保持 legal → 由
+        // LangToLLVM 兜底 @sg_tensor_matmul（rt 侧 i-k-j 行流式 + restrict，
+        // 对每个 c[i][j] 的累加序仍按 p 递增，与 VM 逐位一致）。GPU 模式
+        // 判定不变（covers → legal，兜底 @sg_gpu_tensor_matmul）。
+        // lowerMatmul 分支保留作防御性回退（当前管线不可达）。
+        if (gpuMode)
+            target.addDynamicallyLegalOp<lang::TensorMatmulOp>(
+                missingAttrs({"lhs_shape", "rhs_shape"}));
         target.addDynamicallyLegalOp<lang::TensorBinopTTOp>(
             linalgMissing({"kind", "shape"}));
         target.addDynamicallyLegalOp<lang::TensorBinopTSOp>(

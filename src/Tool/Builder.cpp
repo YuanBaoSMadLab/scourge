@@ -774,29 +774,61 @@ SgTensor* sg_tensor_matmul(SgTensor* a, SgTensor* b, const char* fn,
     if (t->isInt) {
         t->i64 = (int64_t*)sg_xmalloc(sizeof(int64_t) * (size_t)count);
         t->f64 = 0;
-        for (int64_t i = 0; i < m; ++i)
-            for (int64_t j = 0; j < n; ++j) {
-                int64_t acc = 0;
-                for (int64_t p = 0; p < k; ++p) {
+        /* N1 根治：i-k-j 行流式。原 i-j-p 对 B 按列跨行步进且三缓冲为
+         * 不透明指针，clang -O2 因别名无法向量化（store-to-load 依赖链），
+         * 大尺寸 AOT 慢于 VM。restrict 标注三缓冲互不别名；溢出逐轮检测，
+         * 检测的乘/加组合集合与 VM (i,j,p) 顺序一致。 */
+        const int64_t* __restrict aq = a->i64;
+        const int64_t* __restrict bq = b->i64;
+        int64_t* __restrict cq = t->i64;
+        for (int64_t i = 0; i < m; ++i) {
+            int64_t* crow = cq + i * n;
+            for (int64_t j = 0; j < n; ++j) crow[j] = 0;
+            for (int64_t p = 0; p < k; ++p) {
+                const int64_t av = aq[i * k + p];
+                const int64_t* brow = bq + p * n;
+                for (int64_t j = 0; j < n; ++j) {
                     int64_t prod = 0;
-                    if (__builtin_mul_overflow(
-                            a->i64[i * k + p], b->i64[p * n + j], &prod) ||
-                        __builtin_add_overflow(acc, prod, &acc))
+                    if (__builtin_mul_overflow(av, brow[j], &prod) ||
+                        __builtin_add_overflow(crow[j], prod, &crow[j]))
                         sg_panic(fn, file, line, "整数乘法溢出");
                 }
-                t->i64[i * n + j] = acc;
             }
+        }
     } else {
         t->f64 = (double*)sg_xmalloc(sizeof(double) * (size_t)count);
         t->i64 = 0;
-        for (int64_t i = 0; i < m; ++i)
-            for (int64_t j = 0; j < n; ++j) {
-                double acc = 0.0;
-                for (int64_t p = 0; p < k; ++p)
-                    acc += sg_tget_f64(a, i * k + p) *
-                           sg_tget_f64(b, p * n + j);
-                t->f64[i * n + j] = acc;
+        /* i-k-j 行流式（同 int 路径）：对每个 c[i][j] 的累加序仍按 p 递增
+         * （0 + Σ a[i][p]*b[p][j]），与 VM i-j-k 逐位一致。mul 与 add 分离
+         * 为两条语句禁 FP 收缩（FMA 单舍入会破坏双模逐位一致红线）。混合
+         * dtype 时 int 侧经 (double) 转换（同 VM tensorAsF64 / sg_tget_f64）；
+         * b 侧分支提出内层循环，保证热点循环体无分支可向量化。 */
+        const int aInt = a->isInt, bInt = b->isInt;
+        const double* __restrict ap = a->f64;
+        const double* __restrict bp = b->f64;
+        const int64_t* __restrict aq = a->i64;
+        const int64_t* __restrict bq = b->i64;
+        for (int64_t i = 0; i < m; ++i) {
+            double* crow = t->f64 + i * n;
+            for (int64_t j = 0; j < n; ++j) crow[j] = 0.0;
+            for (int64_t p = 0; p < k; ++p) {
+                const double av =
+                    aInt ? (double)aq[i * k + p] : ap[i * k + p];
+                if (bInt) {
+                    const int64_t* brow = bq + p * n;
+                    for (int64_t j = 0; j < n; ++j) {
+                        const double prod = av * (double)brow[j];
+                        crow[j] += prod;
+                    }
+                } else {
+                    const double* brow = bp + p * n;
+                    for (int64_t j = 0; j < n; ++j) {
+                        const double prod = av * brow[j];
+                        crow[j] += prod;
+                    }
+                }
             }
+        }
     }
     return t;
 }
@@ -1226,6 +1258,180 @@ int sg_list_get_b(SgList* l, int64_t idx, const char* fn, const char* file,
 const char* sg_list_get_s(SgList* l, int64_t idx, const char* fn,
                           const char* file, int64_t line) {
     return ((char**)l->data)[sg_list_norm(l, idx, fn, file, line)];
+}
+
+/* ---- 成员判定（in）：按 etag 线性扫描；键类型与元素类型经检查器保证一致
+ * （int 键对浮点列表已在 MLIRGen 提升为 f64），故不做跨类型比较。 ---- */
+int sg_list_in_i(SgList* l, int64_t key) {
+    for (int64_t k = 0; k < l->len; ++k)
+        if (((int64_t*)l->data)[k] == key) return 1;
+    return 0;
+}
+int sg_list_in_f(SgList* l, double key) {
+    for (int64_t k = 0; k < l->len; ++k)
+        if (((double*)l->data)[k] == key) return 1;
+    return 0;
+}
+int sg_list_in_b(SgList* l, int key) {
+    for (int64_t k = 0; k < l->len; ++k)
+        if ((((int64_t*)l->data)[k] ? 1 : 0) == (key ? 1 : 0)) return 1;
+    return 0;
+}
+int sg_list_in_s(SgList* l, const char* key) {
+    for (int64_t k = 0; k < l->len; ++k)
+        if (strcmp(((char**)l->data)[k], key) == 0) return 1;
+    return 0;
+}
+
+/* ---- 字典（0.9.3）：插入序哈希表（链地址 + 插入序数组，迭代序恒为
+ * 插入序，与 VM DictData 语义一致）。ktag/vtag：0=i64 1=f64 2=str 3=bool；
+ * 键/值统一 64 位槽 ABI（int 直通、float 位模式、bool 零扩展、str 指针）。
+ * 哈希与 VM dictHashKey 同构：数值键按 double 位模式（-0.0 归一）、str
+ * FNV-1a、splitmix64 终混；哈希仅决定桶分布，观察行为只取决于插入序。
+ * 键类型由检查器统一（int 键对 float 字典已在 MLIRGen 提升为 f64 位），
+ * 故相等判断按槽位语义精确比较，无跨类型分支。 ---- */
+typedef struct { uint64_t k, v, h; int32_t next; } SgDictEnt;
+typedef struct {
+    int64_t len, bcap;     /* bcap 恒为 2 的幂 */
+    int32_t ktag, vtag;
+    int64_t ec_cap;
+    SgDictEnt* ents;       /* 插入序 */
+    int32_t* buckets;      /* 桶头 = ents 下标 + 1（0 = 空桶） */
+} SgDict;
+
+static uint64_t sg_dict_mix64(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
+static uint64_t sg_dict_hash(const SgDict* d, uint64_t k) {
+    if (d->ktag == 1) { /* f64：按 double 位模式（-0.0 与 0.0 同键） */
+        double dv;
+        uint64_t bits;
+        memcpy(&dv, &k, sizeof dv);
+        if (dv == 0.0) dv = 0.0;
+        memcpy(&bits, &dv, sizeof bits);
+        return sg_dict_mix64(bits);
+    }
+    if (d->ktag == 2) { /* str：FNV-1a */
+        uint64_t h = 14695981039346656037ull;
+        for (const unsigned char* c = (const unsigned char*)(size_t)k; *c; ++c) {
+            h ^= *c;
+            h *= 1099511628211ull;
+        }
+        return sg_dict_mix64(h);
+    }
+    return sg_dict_mix64(k); /* i64/bool：按槽位混，等值判断精确 */
+}
+
+static int sg_dict_eq(const SgDict* d, uint64_t a, uint64_t b) {
+    if (d->ktag == 2)
+        return strcmp((const char*)(size_t)a, (const char*)(size_t)b) == 0;
+    if (d->ktag == 1) {
+        double da, db;
+        memcpy(&da, &a, sizeof da);
+        memcpy(&db, &b, sizeof db);
+        return da == db;
+    }
+    return a == b;
+}
+
+static void sg_dict_check_key(const SgDict* d, uint64_t k, const char* fn,
+                              const char* file, int64_t line) {
+    if (d->ktag == 1) {
+        double dv;
+        memcpy(&dv, &k, sizeof dv);
+        if (dv != dv) sg_panic(fn, file, line, "字典键不能为 NaN");
+    }
+}
+
+static int64_t sg_dict_find(const SgDict* d, uint64_t k) {
+    uint64_t h = sg_dict_hash(d, k);
+    for (int32_t e = d->buckets[h % (uint64_t)d->bcap]; e != 0;
+         e = d->ents[e - 1].next)
+        if (d->ents[e - 1].h == h && sg_dict_eq(d, d->ents[e - 1].k, k))
+            return e - 1;
+    return -1;
+}
+
+/* 装载因子 > 3/4 扩容（×2 重链；arena 纪律：旧块经 realloc 交还系统） */
+static void sg_dict_grow(SgDict* d) {
+    int64_t ncap = d->bcap * 2;
+    d->buckets = (int32_t*)realloc(d->buckets, sizeof(int32_t) * (size_t)ncap);
+    if (!d->buckets) exit(1);
+    for (int64_t i = 0; i < ncap; ++i) d->buckets[i] = 0;
+    for (int64_t i = 0; i < d->len; ++i) {
+        uint64_t b = d->ents[i].h % (uint64_t)ncap;
+        d->ents[i].next = d->buckets[b];
+        d->buckets[b] = (int32_t)(i + 1);
+    }
+    d->bcap = ncap;
+}
+
+void sg_dict_set(SgDict* d, uint64_t k, uint64_t v, const char* fn,
+                 const char* file, int64_t line);
+
+SgDict* sg_dict_new(int32_t ktag, int32_t vtag, int64_t n,
+                    const int64_t* keys, const int64_t* vals,
+                    const char* fn, const char* file, int64_t line) {
+    SgDict* d = (SgDict*)sg_xmalloc(sizeof(SgDict));
+    d->len = 0;
+    d->bcap = 8;
+    d->ktag = ktag;
+    d->vtag = vtag;
+    d->ec_cap = n > 4 ? n : 4;
+    d->ents = (SgDictEnt*)sg_xmalloc(sizeof(SgDictEnt) * (size_t)d->ec_cap);
+    d->buckets = (int32_t*)sg_xmalloc(sizeof(int32_t) * (size_t)d->bcap);
+    for (int64_t i = 0; i < d->bcap; ++i) d->buckets[i] = 0;
+    for (int64_t i = 0; i < n; ++i)
+        sg_dict_set(d, (uint64_t)keys[i], (uint64_t)vals[i], fn, file, line);
+    return d;
+}
+
+int64_t sg_dict_len(SgDict* d) { return d->len; }
+
+uint64_t sg_dict_get(SgDict* d, uint64_t k, const char* fn, const char* file,
+                     int64_t line) {
+    int64_t e = sg_dict_find(d, k);
+    if (e < 0) sg_panic(fn, file, line, "字典键不存在");
+    return d->ents[e].v;
+}
+
+void sg_dict_set(SgDict* d, uint64_t k, uint64_t v, const char* fn,
+                 const char* file, int64_t line) {
+    sg_dict_check_key(d, k, fn, file, line);
+    int64_t e = sg_dict_find(d, k);
+    if (e >= 0) {
+        d->ents[e].v = v;
+        return;
+    }
+    if ((d->len + 1) * 4 > d->bcap * 3) sg_dict_grow(d);
+    if (d->len == d->ec_cap) {
+        d->ec_cap *= 2;
+        d->ents = (SgDictEnt*)realloc(d->ents,
+                                      sizeof(SgDictEnt) * (size_t)d->ec_cap);
+        if (!d->ents) exit(1);
+    }
+    uint64_t h = sg_dict_hash(d, k);
+    uint64_t b = h % (uint64_t)d->bcap;
+    SgDictEnt* ent = &d->ents[d->len];
+    ent->k = k;
+    ent->v = v;
+    ent->h = h;
+    ent->next = d->buckets[b];
+    d->buckets[b] = (int32_t)(d->len + 1);
+    d->len++;
+}
+
+int sg_dict_in(SgDict* d, uint64_t k) { return sg_dict_find(d, k) >= 0; }
+
+uint64_t sg_dict_key_at(SgDict* d, int64_t idx, const char* fn,
+                        const char* file, int64_t line) {
+    if (idx < 0 || idx >= d->len)
+        sg_panic(fn, file, line, "字典迭代下标越界");
+    return d->ents[idx].k;
 }
 
 /* ---- sorted（v0.9.3）：按 etag 稳定升序，返回新列表。
