@@ -279,17 +279,20 @@ int cmdBuild(const std::vector<std::string>& args) {
     std::string outFile;
     std::string inFile;
     bool gpuMode = false;
+    bool useCache = true;
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "-o" && i + 1 < args.size()) {
             outFile = args[++i];
         } else if (args[i] == "--gpu") {
             gpuMode = true; /* GPU 覆盖集 op 走 CUDA 动态加载（自动回退 CPU） */
+        } else if (args[i] == "--no-cache") {
+            useCache = false; /* 跳过 .sgbuild/obj 缓存，单步直编直链 */
         } else {
             inFile = args[i];
         }
     }
-    if (inFile.empty() || args.size() > 4) {
-        std::cerr << "用法: scourge build [--gpu] <file.sg> [-o out.exe]\n";
+    if (inFile.empty() || args.size() > 5) {
+        std::cerr << "用法: scourge build [--gpu] [--no-cache] <file.sg> [-o out.exe]\n";
         return 2;
     }
 
@@ -298,10 +301,12 @@ int cmdBuild(const std::vector<std::string>& args) {
         outFile.empty()
             ? inPath.parent_path() / (inPath.stem().string() + ".exe")
             : fs::path(outFile);
-    BuildOutcome r = buildOnce(inPath, outPath, gpuMode);
+    BuildOutcome r = buildOnce(inPath, outPath, gpuMode, useCache);
     // 失败文本走 stderr——stdout 只承载构建结果报告。
     if (!r.log.empty()) std::cerr << r.log;
-    if (r.exitCode == 0) std::cout << "已生成 " << r.exe.string() << "\n";
+    if (r.exitCode == 0)
+        std::cout << "已生成 " << r.exe.string()
+                  << (r.fromCache ? "（AOT 缓存命中，仅链接）\n" : "\n");
     return r.exitCode;
 }
 
@@ -330,7 +335,8 @@ int main(int argc, char** argv) {
             << "  check [--json] [-j N] <file.sg>...  全量验证（JSON 诊断可选，N 为并行度）\n"
             << "  interface [--out <f>] <file>        生成 .sgi 接口文件\n"
             << "  run [--no-cache] [--watch] <file>   编译执行（.sgbc 缓存；--watch 保存即重跑）\n"
-            << "  build [-o out.exe] <file>           AOT 构建：MLIR → LLVM IR → 原生可执行\n"
+            << "  build [--gpu] [--no-cache] <file>  AOT 构建：MLIR → LLVM IR → 原生可执行\n"
+            << "                                      （<stem>.sgbuild/obj 增量缓存）\n"
             << "  repl                                会话式求值（REPL；会话内 :help 查看命令）\n"
             << "  mcp                                 MCP 服务器模式（stdio JSON-RPC 2.0，供 AI 代理接入）\n"
             << "  version                             版本信息\n"

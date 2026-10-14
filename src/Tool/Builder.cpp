@@ -31,6 +31,7 @@
 
 #include "scourge/AOT/InProcess.hpp"
 #include "scourge/AOT/MLIRGen.hpp"
+#include "scourge/BC/Serialize.hpp"
 #include "scourge/Tool/Session.hpp"
 
 namespace fs = std::filesystem;
@@ -1817,6 +1818,85 @@ std::string cStringLiteral(const char* raw) {
     return out;
 }
 
+// ----------------------------------------------------------------------------
+// AOT obj 增量缓存（设计文档 5.2：MLIR→LLVM→object 按（模块, 目标, 优化档）
+// 缓存，链接必付）。缓存是加速项而非正确性依赖——读写失败一律静默降级，
+// 对齐 .sgbc 缓存纪律（src/Tool/Runner.cpp）。
+// ----------------------------------------------------------------------------
+
+/// 缓存键格式版本：键成分或 obj 语义变化时递增，旧缓存整体失效。
+constexpr const char* kObjCacheVer = "scourge-aot-obj-v1";
+
+/// fnv1a64 包装（重载歧义防护）：bc::fnv1a64 有 (string_view, seed) 与
+/// (const void*, len, seed=默认) 两个重载——const char* 实参会精确匹配后者，
+/// seed 被当作 len 造成野读崩溃。字符串键一律经此包装显式走 string_view。
+inline uint64_t fnvKey(std::string_view s,
+                       uint64_t seed = 0xcbf29ce484222325ull) {
+    return bc::fnv1a64(s, seed);
+}
+
+/// 工具链标签：clang 路径 + 大小 + 修改时间——工具链升级即缓存失效。
+std::string clangTag(const fs::path& clang) {
+    std::error_code ec;
+    uintmax_t size = fs::file_size(clang, ec);
+    uint64_t sizeV = ec ? 0 : static_cast<uint64_t>(size);
+    ec.clear();
+    auto t = fs::last_write_time(clang, ec);
+    uint64_t mtime = ec ? 0 : static_cast<uint64_t>(t.time_since_epoch().count());
+    return clang.string() + "|" + std::to_string(sizeV) + "|" +
+           std::to_string(mtime);
+}
+
+/// main.obj 缓存键（五重一致性，对齐 .sgbc 五重校验）：格式版本、
+/// 工具链标签、源指纹（依赖层序逐模块：名/路径/归一化源文本）、
+/// 优化档+gpuMode、入口。任一不符 → 未命中，全量重编。
+uint64_t mainObjKey(const std::string& tag, bool gpuMode,
+                    const std::string& entry,
+                    const std::vector<std::string>& order,
+                    const Session& session) {
+    uint64_t h = fnvKey(kObjCacheVer);
+    h = fnvKey(tag, h);
+    h = fnvKey(gpuMode ? "gpu" : "cpu", h);
+    h = fnvKey("-O2", h);
+    h = fnvKey(entry, h);
+    for (const auto& name : order) {
+        h = fnvKey(name, h);
+        h = fnvKey(session.loadedModulePath(name), h);
+        h = fnvKey(session.loadedSource(name), h);
+    }
+    return h;
+}
+
+/// rt.obj 缓存键（源无关）：格式版本、工具链标签、gpuMode、运行时源文本。
+/// kRuntimeC / kGpuRuntimeC / kGpuPtxC 内嵌于编译器二进制，文本哈希入键——
+/// 开发期改动运行时源自动失效，无需手工递增版本号。
+uint64_t rtObjKey(const std::string& tag, bool gpuMode) {
+    uint64_t h = fnvKey(kObjCacheVer);
+    h = fnvKey(tag, h);
+    h = fnvKey(gpuMode ? "gpu" : "cpu", h);
+    h = fnvKey(kRuntimeC, h);
+    if (gpuMode) {
+        h = fnvKey(kGpuRuntimeC, h);
+        h = fnvKey(kGpuPtxC, h);
+    }
+    return h;
+}
+
+/// 缓存键文件（十进制单行文本）。读取不符/失败即未命中。
+bool readObjKey(const fs::path& p, uint64_t expect) {
+    std::ifstream in(p);
+    if (!in) return false;
+    std::string line;
+    if (!std::getline(in, line)) return false;
+    return line == std::to_string(expect);
+}
+
+/// 写键（失败静默：下次按未命中全量重编，不影响正确性）。
+void writeObjKey(const fs::path& p, uint64_t v) {
+    std::ofstream of(p, std::ios::binary);
+    if (of) of << v << "\n";
+}
+
 } // namespace
 
 // ----------------------------------------------------------------------------
@@ -1824,32 +1904,36 @@ std::string cStringLiteral(const char* raw) {
 // ----------------------------------------------------------------------------
 
 BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
-                       bool gpuMode) {
+                       bool gpuMode, bool useCache) {
     BuildOutcome b;
     b.exe = outPath;
+    const std::string entry = inPath.stem().string();
 
-    // ---- 阶段 0：加载 + 全量检查（与 check/run 同一门禁） ----
+    // ---- 工具链定位（SCOURGE_LLVM_BIN 可覆盖；缓存键成分，最先确定） ----
+    const char* envBin = std::getenv("SCOURGE_LLVM_BIN");
+    fs::path llvmBin =
+        (envBin && *envBin) ? fs::path(envBin) : fs::path("D:/LLVM/bin");
+    fs::path clang = llvmBin / "clang.exe";
+    {
+        std::error_code ec;
+        if (!fs::exists(clang, ec)) {
+            b.log = "构建中止：未找到 " + clang.string() +
+                    "（可用环境变量 SCOURGE_LLVM_BIN 指定 LLVM bin 目录）\n";
+            b.exitCode = 1;
+            return b;
+        }
+    }
+
+    // ---- 阶段 0：加载（解析）。全量检查延后至缓存未命中——与 run 缓存同
+    //      纪律：命中即跳过检查/MLIR/转换/编译（源未变则上次构建已过门禁），
+    //      仅付链接开销。 ----
     Session session;
     if (!session.load(inPath)) {
         session.diag().emitText(b.log);
         b.exitCode = 1;
         return b;
     }
-    session.check();
-    if (session.diag().hasErrors()) {
-        session.diag().emitText(b.log);
-        b.exitCode = 1;
-        return b;
-    }
-
-    // ---- 阶段 1：AST → 文本 MLIR（不支持构造显式 E1007） ----
-    std::string mlir;
-    const std::string entry = inPath.stem().string();
-    if (!aot::generateMLIR(session, entry, mlir)) {
-        session.diag().emitText(b.log);
-        b.exitCode = 1;
-        return b;
-    }
+    auto order = session.modulesInDependencyOrder(entry);
 
     // ---- 中间产物路径（与可执行同目录，便于检视） ----
     fs::path dir = outPath.parent_path();
@@ -1859,6 +1943,62 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
     fs::path llPath = dir / (stem + ".ll");
     fs::path rtPath = dir / (stem + "_rt.c");
     fs::path capPath = dir / (stem + ".buildcap");
+
+    // ---- AOT obj 缓存目录（<stem>.sgbuild/obj，设计第零/五章命名）。
+    //      目录不可建（权限/占用）→ 静默降级为无缓存单步直编。 ----
+    fs::path cacheDir = dir / (stem + ".sgbuild") / "obj";
+    bool cacheOk = false;
+    if (useCache) {
+        std::error_code ec;
+        fs::create_directories(cacheDir, ec);
+        cacheOk = !ec;
+    }
+    const uint64_t keyMain =
+        mainObjKey(clangTag(clang), gpuMode, entry, order, session);
+    const uint64_t keyRt = rtObjKey(clangTag(clang), gpuMode);
+
+    std::string toolOut;
+
+    // ---- 缓存命中判定：双 obj 在盘且双键全等才链接（显式拒绝，无静默回退） ----
+    if (cacheOk) {
+        fs::path objMain = cacheDir / "main.obj";
+        fs::path objRt = cacheDir / "rt.obj";
+        std::error_code ec;
+        if (fs::exists(objMain, ec) && fs::exists(objRt, ec) &&
+            readObjKey(cacheDir / "main.key", keyMain) &&
+            readObjKey(cacheDir / "rt.key", keyRt)) {
+            int rc = runCapture(clang.string(),
+                                "\"" + objMain.string() + "\" \"" +
+                                    objRt.string() + "\" -o \"" +
+                                    outPath.string() + "\"",
+                                capPath, toolOut);
+            if (rc == 0) {
+                b.fromCache = true;
+                return b;
+            }
+            // 缓存对象损坏（链接失败）→ 失效整目录，就地回退全量重建。
+            b.log = "AOT 缓存命中但链接失败，已失效缓存并全量重建\n" + toolOut;
+            fs::remove_all(cacheDir, ec);
+            fs::create_directories(cacheDir, ec);
+            cacheOk = !ec;
+        }
+    }
+
+    // ---- 阶段 1：全量检查（与 check/run 同一门禁；命中路径不付此开销） ----
+    session.check();
+    if (session.diag().hasErrors()) {
+        session.diag().emitText(b.log);
+        b.exitCode = 1;
+        return b;
+    }
+
+    // ---- 阶段 2：AST → 文本 MLIR（不支持构造显式 E1007） ----
+    std::string mlir;
+    if (!aot::generateMLIR(session, entry, mlir)) {
+        session.diag().emitText(b.log);
+        b.exitCode = 1;
+        return b;
+    }
 
     {
         std::ofstream f(mlirPath, std::ios::binary);
@@ -1877,25 +2017,9 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         }
     }
 
-    // ---- 工具链定位（SCOURGE_LLVM_BIN 可覆盖；MLIR→LLVM IR 已进程内化） ----
-    const char* envBin = std::getenv("SCOURGE_LLVM_BIN");
-    fs::path llvmBin =
-        (envBin && *envBin) ? fs::path(envBin) : fs::path("D:/LLVM/bin");
-    fs::path clang = llvmBin / "clang.exe";
-    {
-        std::error_code ec;
-        if (!fs::exists(clang, ec)) {
-            b.log = "构建中止：未找到 " + clang.string() +
-                    "（可用环境变量 SCOURGE_LLVM_BIN 指定 LLVM bin 目录）\n";
-            b.exitCode = 1;
-            return b;
-        }
-    }
-
-    // ---- 阶段 2+3（合并）：进程内 MLIR → LLVM dialect → LLVM IR ----
+    // ---- 阶段 3（合并）：进程内 MLIR → LLVM dialect → LLVM IR ----
     // gpuMode：GPU 覆盖集 op 保持 lang 层直达 LangToLLVM（调用换 sg_gpu_*，
     // 内联降级跳过）；.mlir 落盘产物与 CPU 模式逐字节相同。
-    std::string toolOut;
     if (!aot::convertToLLVMInProcess(mlir, llPath.string(), toolOut, gpuMode)) {
         std::ofstream cap(capPath, std::ios::binary);
         cap << toolOut;
@@ -1904,7 +2028,52 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         return b;
     }
 
-    // ---- 阶段 4：clang 编译链接（probe4 验证过的命令形） ----
+    // ---- 阶段 4+5：clang 分段编译 → 增量链接（缓存可用路径） ----
+    // main.obj ← .ll（依赖源+工具链+优化档）；rt.obj ← _rt.c（源无关）。
+    // obj 编译即写缓存（产物落缓存目录），链接自缓存目录取用。
+    if (cacheOk) {
+        fs::path objMain = cacheDir / "main.obj";
+        fs::path objRt = cacheDir / "rt.obj";
+        int rc = runCapture(
+            clang.string(),
+            "-c -O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS \"" +
+                llPath.string() + "\" -o \"" + objMain.string() + "\"",
+            capPath, toolOut);
+        if (rc != 0) {
+            b.log = "构建中止：clang 编译 " + llPath.string() +
+                    " 失败（exit " + std::to_string(rc) + "）\n" + toolOut;
+            b.exitCode = 1;
+            return b;
+        }
+        rc = runCapture(clang.string(),
+                        "-c -O2 -D_CRT_SECURE_NO_WARNINGS \"" +
+                            rtPath.string() + "\" -o \"" + objRt.string() +
+                            "\"",
+                        capPath, toolOut);
+        if (rc != 0) {
+            b.log = "构建中止：clang 编译运行时失败（exit " +
+                    std::to_string(rc) + "）\n" + toolOut;
+            b.exitCode = 1;
+            return b;
+        }
+        // obj 落盘成功后写键（写失败静默——下次按未命中处理）。
+        writeObjKey(cacheDir / "main.key", keyMain);
+        writeObjKey(cacheDir / "rt.key", keyRt);
+
+        rc = runCapture(clang.string(),
+                        "\"" + objMain.string() + "\" \"" + objRt.string() +
+                            "\" -o \"" + outPath.string() + "\"",
+                        capPath, toolOut);
+        if (rc != 0) {
+            b.log = "构建中止：clang 链接失败（exit " + std::to_string(rc) +
+                    "）\n" + toolOut;
+            b.exitCode = 1;
+            return b;
+        }
+        return b; // exitCode 0
+    }
+
+    // ---- 静默降级路径：单步编译链接（原命令形，probe4 验证过） ----
     int rc = runCapture(
         clang.string(),
         "-O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS \"" +
