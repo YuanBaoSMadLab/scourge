@@ -2,9 +2,10 @@
 //  Copyright (c) 2026 Scourge Project. All rights reserved.
 //  Scourge 编译器 — AOT Lang 方言 → Affine 降级 pass（lang.* → affine.*）
 // ----------------------------------------------------------------------------
-//  AOT 步骤 3b：覆盖集子集（f64 全静态形状的逐元素 tt/ts/st kind 0-2、
-//  标量双向广播、sum_f、2D transpose）降级为 affine 结构化循环：
-//  affine.for（常量上下界，buildAffineLoopNest）+ affine.load/affine.store。
+//  AOT 步骤 3b：覆盖集子集（全静态形状的逐元素 tt/ts/st kind 0-6 全
+//  dtype 组合、标量双向广播、sum_f、2D int/float transpose）降级为
+//  affine 结构化循环：affine.for（常量上下界，buildAffineLoopNest）+
+//  affine.load/affine.store。
 //  affine op 由管线后段的 createLowerAffinePass 统一降为 scf/memref/arith，
 //  再经既有 scf-to-cf 与 one-shot ConvertToLLVM 收尾——本 pass 不触碰
 //  LLVM dialect（descriptor 桥除外，见 TensorBridge.hpp）。
@@ -46,11 +47,43 @@ namespace {
 using namespace mlir;
 using namespace bridge;
 
-/// f64 双目算术：kind 0/1/2 → addf/subf/mulf（与 LangToLinalg 一致）。
+/// f64 双目算术 kind 0/1/2 → addf/subf/mulf（与 LangToLinalg 一致）。
 inline Value fbin(int64_t kind, OpBuilder& b, Location l, Value x, Value y) {
     if (kind == 0) return b.create<arith::AddFOp>(l, x, y);
     if (kind == 1) return b.create<arith::SubFOp>(l, x, y);
     return b.create<arith::MulFOp>(l, x, y);
+}
+
+/// 通用创建 lang 标量 op（OperationState 按 ODS 名构造，操作数/结果类型
+/// 由 ODS 约束校验；LangToLLVM 后段按 kLowerings 名字降级为 sg_* 调用，
+/// panic 上下文由 op 的 FileLineColLoc 恢复——传入 loc 须为原 op 位置）。
+inline Value callLang(OpBuilder& b, Location l, llvm::StringRef name,
+                      ArrayRef<Value> args, Type ret) {
+    OperationState st(l, name);
+    st.addOperands(args);
+    st.addTypes(TypeRange{ret});
+    return b.create(st)->getResult(0);
+}
+
+/// 逐元素双目。
+/// * int 路径：逐元素 lang 标量 op（lang.addi→sg_add_i64 等 == 张量路径
+///   sg_tiop 同一实现，溢出/除零 panic 消息零分叉）。
+/// * f64 路径：kind 0/1/2 内联 arith（无 panic，与 sg_* 逐位一致）；
+///   kind 3-6 逐元素 lang 标量 op（lang.divf→sg_fdiv_f64 等 ==
+///   sg_tfop 同一实现，除零/负次幂 panic 零分叉）。
+inline Value elemBin(int64_t kind, OpBuilder& b, Location l, Value x, Value y,
+                     bool intPath) {
+    if (intPath) {
+        static constexpr const char* kIntOps[] = {
+            "lang.addi", "lang.subi", "lang.muli", nullptr,
+            "lang.floordivi", "lang.modi", "lang.powi"};
+        return callLang(b, l, kIntOps[kind], {x, y}, b.getI64Type());
+    }
+    if (kind <= 2) return fbin(kind, b, l, x, y);
+    static constexpr const char* kFOps[] = {nullptr, nullptr, nullptr,
+                                            "lang.divf", "lang.floordivf",
+                                            "lang.modf", "lang.powf"};
+    return callLang(b, l, kFOps[kind], {x, y}, b.getF64Type());
 }
 
 // ============================================================================
@@ -97,12 +130,16 @@ public:
 private:
     /// 逐元素 binop（tt/ts/st 共用）：常量界仿射循环嵌套，行主序遍历。
     /// 累加顺序与 sg_* 运行时一致（同为行主单遍），浮点逐位等价。
+    /// dtype 分派（MLIRGen 写出 lhs_int/rhs_int 或 t_int/s_int，缺省全
+    /// f64）：int×int 走 lang 标量 int op（溢出 panic 零分叉）；混合
+    /// dtype 的 int 侧 sitofp 提升（sg_tbinop 同一规则）；int '/' 恒为
+    /// f64 输出（outInt = 非 '/' 且双侧 int）。
     LogicalResult
     lowerBinop(Operation* op, ArrayRef<Value> operands,
                ConversionPatternRewriter& rewriter, Location loc, ModuleOp mod,
                MLIRContext* ctx, Type f64, ArrayRef<int64_t> shape,
                int64_t kind, llvm::StringRef name) const {
-        if (kind < 0 || kind > 2 || shape.empty()) {
+        if (kind < 0 || kind > 6 || shape.empty()) {
             op->emitError("LangToAffine：binop 缺少 kind/shape 属性或 kind "
                           "超出覆盖集");
             return failure();
@@ -110,17 +147,41 @@ private:
         // 操作数（LangOps.td）：
         //   tt: (kind, lhs, rhs)      ts: (kind, lhs, isInt, si, sf)
         //   st: (kind, isInt, si, sf, rhs)
-        // 覆盖形态由 MLIRGen 保证标量为 float（isInt=0）→ 标量取 sf 槽位
-        //（si 槽位在 float 标量下恒为 0 哑元，不可用）。
+        // 标量槽位按 s_int 分派：int 标量取 si（ts=operands[3]、
+        // st=operands[2]），float 标量取 sf（ts=operands[4]、
+        // st=operands[3]）。
         const bool isTT = name == "lang.tensor_binop_tt";
         const bool isST = name == "lang.tensor_binop_st";
-        Value tensorA = isTT ? operands[1] : (isST ? operands[4] : operands[1]);
-        Value scalar = isTT ? Value() : operands[isST ? 3 : 4];
+        auto intFlag = [&](llvm::StringRef n) {
+            auto a = op->getAttrOfType<IntegerAttr>(n);
+            return a && a.getInt() != 0;
+        };
+        // 张量侧/标量侧 dtype（tt：双侧均张量）
+        const bool lhsInt = isTT ? intFlag("lhs_int") : intFlag("t_int");
+        const bool rhsInt = isTT ? intFlag("rhs_int") : intFlag("s_int");
+        const bool outInt = kind != 3 && lhsInt && rhsInt;
 
-        Value a = viewInput(rewriter, loc, tensorA, shape, f64);
-        Value b = isTT ? viewInput(rewriter, loc, operands[2], shape, f64)
-                       : Value();
-        OutputBuf out = allocOutput(rewriter, loc, mod, shape, f64);
+        Value tensorA = isTT ? operands[1] : (isST ? operands[4] : operands[1]);
+        Value scalarRaw = isTT ? Value()
+                               : operands[isST ? (rhsInt ? 2 : 3)
+                                               : (rhsInt ? 3 : 4)];
+        // float 路径的标量：int 标量在循环外一次性 sitofp（MLIRGen 的 vf
+        // 同一转换；bool 标量 vi 已 extui 为 0/1 → 结果 0.0/1.0 逐位一致）
+        Value scalarF = Value();
+        if (!isTT && !outInt)
+            scalarF = rhsInt ? rewriter.create<arith::SIToFPOp>(loc, f64,
+                                                                scalarRaw)
+                             : scalarRaw;
+
+        Type aElem = lhsInt ? Type(rewriter.getI64Type()) : f64;
+        Value a = viewInput(rewriter, loc, tensorA, shape, aElem);
+        Value b = Value();
+        if (isTT) {
+            Type bElem = rhsInt ? Type(rewriter.getI64Type()) : f64;
+            b = viewInput(rewriter, loc, operands[2], shape, bElem);
+        }
+        OutputBuf out =
+            allocOutput(rewriter, loc, mod, shape, outInt ? Type(rewriter.getI64Type()) : f64);
 
         SmallVector<int64_t> lbs(shape.size(), 0), steps(shape.size(), 1);
         affine::buildAffineLoopNest(
@@ -130,14 +191,24 @@ private:
                 if (isTT) {
                     x = nb.create<affine::AffineLoadOp>(l, a, ivs);
                     y = nb.create<affine::AffineLoadOp>(l, b, ivs);
+                    if (!outInt) { // float 路径：int 侧元素 sitofp 提升
+                        if (lhsInt)
+                            x = nb.create<arith::SIToFPOp>(l, f64, x);
+                        if (rhsInt)
+                            y = nb.create<arith::SIToFPOp>(l, f64, y);
+                    }
                 } else if (isST) { // 标量在左：s op t
-                    x = scalar;
+                    x = outInt ? scalarRaw : scalarF;
                     y = nb.create<affine::AffineLoadOp>(l, a, ivs);
+                    if (!outInt && lhsInt)
+                        y = nb.create<arith::SIToFPOp>(l, f64, y);
                 } else { // ts：t op 标量
                     x = nb.create<affine::AffineLoadOp>(l, a, ivs);
-                    y = scalar;
+                    if (!outInt && lhsInt)
+                        x = nb.create<arith::SIToFPOp>(l, f64, x);
+                    y = outInt ? scalarRaw : scalarF;
                 }
-                Value r = fbin(kind, nb, l, x, y);
+                Value r = elemBin(kind, nb, l, x, y, outInt);
                 nb.create<affine::AffineStoreOp>(l, r, out.view, ivs);
             });
 
@@ -184,9 +255,14 @@ private:
             op->emitError("LangToAffine：transpose 形状属性必须二维");
             return failure();
         }
-        Value in = viewInput(rewriter, loc, operands[0], shape, f64);
+        // dtype 分派（t_int：MLIRGen 覆盖集恒写出，缺省 f64——旧形态 op；
+        // 纯数据搬移与 dtype 无关，int 走 i64 视图 + int 句柄）
+        auto ta = op->getAttrOfType<IntegerAttr>("t_int");
+        Type elem = (ta && ta.getInt() != 0) ? Type(rewriter.getI64Type())
+                                             : f64;
+        Value in = viewInput(rewriter, loc, operands[0], shape, elem);
         SmallVector<int64_t> outShape = {shape[1], shape[0]};
-        OutputBuf out = allocOutput(rewriter, loc, mod, outShape, f64);
+        OutputBuf out = allocOutput(rewriter, loc, mod, outShape, elem);
         // 迭代空间 = 输出形状 {m,n}：out[i,j] = in[j,i]，i 走 out 行
         //（0..shape[1]），j 走 out 列（0..shape[0]）。界误用输入形状会让
         // 末行漏写 + 末列越界写（曾致 p_tr 第 3 行读出未初始化内存）。

@@ -207,23 +207,27 @@ struct OutputBuf {
 };
 
 /// 输出侧准备：新句柄（sg_tensor_alloc）+ 结果 memref（1D alloc + expand）。
+/// 句柄 isInt 由元素类型分派（i64 → int 句柄，f64 → float 句柄；调用点
+/// 仅传这两种元素类型）。
 inline OutputBuf allocOutput(ConversionPatternRewriter& rewriter, Location loc,
-                             ModuleOp mod, ArrayRef<int64_t> shape, Type f64) {
+                             ModuleOp mod, ArrayRef<int64_t> shape,
+                             Type elem) {
     MLIRContext* ctx = rewriter.getContext();
     Type p = ptrTy(ctx);
     Type i32 = rewriter.getI32Type();
     Type i64 = rewriter.getI64Type();
-    Value isF64 = rewriter.create<arith::ConstantOp>(
-        loc, i32, rewriter.getI32IntegerAttr(0));
+    const bool isInt = isa<IntegerType>(elem);
+    Value isIntC = rewriter.create<arith::ConstantOp>(
+        loc, i32, rewriter.getI32IntegerAttr(isInt ? 1 : 0));
     Value rank = rewriter.create<arith::ConstantOp>(
         loc, i64, rewriter.getI64IntegerAttr(
                       static_cast<int64_t>(shape.size())));
     Value shp = shapeAddr(rewriter, loc, mod, shape);
     Value h = rewriter.create<func::CallOp>(loc, RtSyms::kAlloc,
                                             TypeRange{p},
-                                            ValueRange{isF64, rank, shp})
+                                            ValueRange{isIntC, rank, shp})
                   .getResult(0);
-    Value flat = rewriter.create<memref::AllocOp>(loc, flat1D(ctx, shape, f64));
+    Value flat = rewriter.create<memref::AllocOp>(loc, flat1D(ctx, shape, elem));
     return OutputBuf{h, flat, viewOf(rewriter, loc, flat, shape)};
 }
 

@@ -282,17 +282,19 @@ static int64_t sg_tsize(const SgTensor* t) {
     return n;
 }
 
-/* 形状的人类可读形式 "(2, 3)"（panic 消息用，与 VM shapeToString 一致） */
-static const char* sg_shape_str(const SgTensor* t) {
-    static char buf[256];
+/* 形状的人类可读形式 "(2, 3)"（panic 消息用，与 VM shapeToString 一致）。
+ * 缓冲区由调用方提供：同一 snprintf 传两次 sg_shape_str 时共享 static
+ * 缓冲会相互覆盖（求值序未指定 → 两形状打成同一个），必须各自独立。 */
+static const char* sg_shape_str(char* buf, size_t cap, const SgTensor* t) {
     char* p = buf;
+    char* end = buf + cap;
     *p++ = '(';
-    for (int64_t k = 0; k < t->rank; ++k) {
+    for (int64_t k = 0; k < t->rank && p < end - 24; ++k) {
         if (k) {
             *p++ = ',';
             *p++ = ' ';
         }
-        p += sprintf(p, "%lld", (long long)t->shape[k]);
+        p += snprintf(p, (size_t)(end - p), "%lld", (long long)t->shape[k]);
     }
     *p++ = ')';
     *p = 0;
@@ -414,9 +416,10 @@ SgTensor* sg_tensor_concat(int64_t nrows, const SgTensor** rows,
         for (int64_t d = 0; !mismatch && d < r0->rank; ++d)
             if (r->shape[d] != r0->shape[d]) mismatch = 1;
         if (mismatch) {
-            char msg[512];
+            char msg[512], sa[256], sb[256];
             snprintf(msg, sizeof msg, "NewTensor 行形状不一致：%s 与 %s",
-                     sg_shape_str(r0), sg_shape_str(r));
+                     sg_shape_str(sa, sizeof sa, r0),
+                     sg_shape_str(sb, sizeof sb, r));
             sg_panic(fn, file, line, msg);
         }
     }
@@ -539,9 +542,9 @@ static SgTensor* sg_tbinop(int op, const SgTensor* a, const SgTensor* tb,
                 }
     }
     if (mismatch) {
-        char msg[512];
-        snprintf(msg, sizeof msg, "张量形状不兼容：%s 与 %s", sg_shape_str(a),
-                 sg_shape_str(tb));
+        char msg[512], sa[256], sb[256];
+        snprintf(msg, sizeof msg, "张量形状不兼容：%s 与 %s",
+                 sg_shape_str(sa, sizeof sa, a), sg_shape_str(sb, sizeof sb, tb));
         sg_panic(fn, file, line, msg);
     }
     const int lInt = scalarLeft ? si64 : a->isInt;
@@ -613,17 +616,17 @@ SgTensor* sg_tensor_binop_st(int op, int si64, int64_t vi, double vf,
 SgTensor* sg_tensor_matmul(SgTensor* a, SgTensor* b, const char* fn,
                            const char* file, int64_t line) {
     if (a->rank != 2 || b->rank != 2) {
-        char msg[512];
+        char msg[512], sa[256], sb[256];
         snprintf(msg, sizeof msg,
-                 "matmul（@）要求两个二维张量，实际 %s 与 %s", sg_shape_str(a),
-                 sg_shape_str(b));
+                 "matmul（@）要求两个二维张量，实际 %s 与 %s",
+                 sg_shape_str(sa, sizeof sa, a), sg_shape_str(sb, sizeof sb, b));
         sg_panic(fn, file, line, msg);
     }
     if (a->shape[1] != b->shape[0]) {
-        char msg[512];
+        char msg[512], sa[256], sb[256];
         snprintf(msg, sizeof msg,
                  "matmul 维度不匹配：%s 与 %s（左列数 != 右行数）",
-                 sg_shape_str(a), sg_shape_str(b));
+                 sg_shape_str(sa, sizeof sa, a), sg_shape_str(sb, sizeof sb, b));
         sg_panic(fn, file, line, msg);
     }
     const int64_t m = a->shape[0], k = a->shape[1], n = b->shape[1];
@@ -811,9 +814,9 @@ double sg_tensor_reduce_f(int isMax, SgTensor* t, const char* name,
 SgTensor* sg_tensor_transpose(SgTensor* t, const char* fn, const char* file,
                               int64_t line) {
     if (t->rank != 2) {
-        char msg[256];
+        char msg[320], sa[256];
         snprintf(msg, sizeof msg, "transpose() 要求二维张量，实际 %s",
-                 sg_shape_str(t));
+                 sg_shape_str(sa, sizeof sa, t));
         sg_panic(fn, file, line, msg);
     }
     const int64_t m = t->shape[0], c = t->shape[1];
@@ -845,11 +848,12 @@ SgTensor* sg_tensor_reshape(SgTensor* t, int64_t rank, const int64_t* dims,
     int64_t prod = 1;
     for (int64_t k = 0; k < rank; ++k) prod *= dims[k];
     if (prod != sg_tsize(t)) {
-        char msg[512];
+        char sb[256], msg[512];
         snprintf(msg, sizeof msg,
                  "reshape() 元素总数不一致：%s（共 %lld 个）与目标形状（共 %lld "
                  "个）",
-                 sg_shape_str(t), (long long)sg_tsize(t), (long long)prod);
+                 sg_shape_str(sb, sizeof sb, t), (long long)sg_tsize(t),
+                 (long long)prod);
         sg_panic(fn, file, line, msg);
     }
     SgTensor* r = (SgTensor*)sg_xmalloc(sizeof(SgTensor));
@@ -906,8 +910,9 @@ static void sg_tfmt_rec(const SgTensor* t, int64_t dim, int64_t off,
 
 static const char* sg_tfmt(const SgTensor* t) {
     static char buf[1 << 20]; /* 1MB 静态缓冲；print 立即消费 */
+    char sb[256];
     char* p = buf;
-    p += sprintf(p, "Tensor%s ", sg_shape_str(t));
+    p += sprintf(p, "Tensor%s ", sg_shape_str(sb, sizeof sb, t));
     sg_tfmt_rec(t, 0, 0, &p);
     *p = 0;
     return buf;

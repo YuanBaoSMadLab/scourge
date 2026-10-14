@@ -295,18 +295,37 @@ public:
                 return false; // 属性齐全 → 非法 → 降级
             };
         };
+        // 3b 覆盖面扩展（int/混合 dtype、kind 3-6 除法族）由 LangToAffine
+        // 先行消费；本 pass 只保留 f64 kind 0-2/sum_f/f64 transpose 形态
+        // 作为回退——带 int dtype 属性（lhs_int/rhs_int/t_int/s_int 非零）
+        // 的 op 视为 legal 跳过（固定管线顺序下不可达，纯防御）。
+        auto f64Only = [](Operation* op) {
+            for (const char* n : {"lhs_int", "rhs_int", "t_int", "s_int"}) {
+                auto a = op->getAttrOfType<IntegerAttr>(n);
+                if (a && a.getInt() != 0) return true; // 非 f64 形态 → legal
+            }
+            return false;
+        };
+        auto linalgMissing = [&](std::initializer_list<llvm::StringRef> names) {
+            llvm::SmallVector<llvm::StringRef, 4> ns(names);
+            return [ns = std::move(ns), f64Only](Operation* op) {
+                for (llvm::StringRef n : ns)
+                    if (!op->hasAttr(n)) return true; // 未覆盖形态 → legal
+                return f64Only(op); // int 形态 → legal
+            };
+        };
         target.addDynamicallyLegalOp<lang::TensorMatmulOp>(
             missingAttrs({"lhs_shape", "rhs_shape"}));
         target.addDynamicallyLegalOp<lang::TensorBinopTTOp>(
-            missingAttrs({"kind", "shape"}));
+            linalgMissing({"kind", "shape"}));
         target.addDynamicallyLegalOp<lang::TensorBinopTSOp>(
-            missingAttrs({"kind", "shape"}));
+            linalgMissing({"kind", "shape"}));
         target.addDynamicallyLegalOp<lang::TensorBinopSTOp>(
-            missingAttrs({"kind", "shape"}));
+            linalgMissing({"kind", "shape"}));
         target.addDynamicallyLegalOp<lang::TensorSumFOp>(
             missingAttrs({"shape"}));
         target.addDynamicallyLegalOp<lang::TensorTransposeOp>(
-            missingAttrs({"shape"}));
+            linalgMissing({"shape"}));
 
         RewritePatternSet patterns(ctx);
         patterns.add<LangLinalgRewrite>(ctx);

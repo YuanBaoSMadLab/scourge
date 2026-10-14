@@ -426,8 +426,11 @@ private:
     Value genBinary(const std::string& op, Value l, Value r,
                     const SourceRange& range, const Expr* rExpr,
                     const Expr* lExpr = nullptr);
-    /// 表达式张量类型的全静态形状（无 kDyn）且元素为 f64 → 返回形状，
-    /// 否则空（linalg 降级覆盖集判定：形状属性只对可安全降级的形态写出）。
+    /// 表达式张量类型的全静态形状（无 kDyn）且元素为 int/float → 返回形状，
+    /// 否则空（张量降级覆盖集判定：形状属性只对可安全降级的形态写出；
+    /// str 张量与 0-d 空形状一律兜底 sg_*）。
+    std::optional<std::vector<int64_t>> staticShapeOf(const Expr* e) const;
+    /// staticShapeOf 且元素为 f64（linalg/affine f64 覆盖集判定）。
     std::optional<std::vector<int64_t>> staticF64Shape(const Expr* e) const;
     /// 形状属性文本 "array<i64: 24, 2>"（DenseI64ArrayAttr 通用形式）。
     static std::string shapeArrAttr(const std::vector<int64_t>& s);
@@ -1149,19 +1152,31 @@ Value Gen::promoteF64(Value v) {
 }
 
 std::optional<std::vector<int64_t>>
-Gen::staticF64Shape(const Expr* e) const {
+Gen::staticShapeOf(const Expr* e) const {
     if (!e) return std::nullopt;
     auto it = types_.find(e);
     if (it == types_.end() || it->second->kind != Type::Kind::Tensor)
         return std::nullopt;
     const Type& t = *it->second;
-    if (t.params.empty() || t.params[0]->kind != Type::Kind::Float)
+    // 仅 int/float 元素进入覆盖集（str 等其他元素张量兜底 sg_*）
+    if (t.params.empty() || (t.params[0]->kind != Type::Kind::Float &&
+                             t.params[0]->kind != Type::Kind::Int))
         return std::nullopt;
     for (int64_t d : t.shape)
         if (d == kDyn) return std::nullopt;
-    // 0-d 张量不在 linalg 覆盖集（shapeArrAttr 空形状文本非法；兜底 sg_*）
+    // 0-d 张量不在覆盖集（shapeArrAttr 空形状文本非法；当前语言亦不可达，
+    // 全量索引得标量、部分索引秩 ≥ 1——守卫保留为防御）
     if (t.shape.empty()) return std::nullopt;
     return t.shape;
+}
+
+std::optional<std::vector<int64_t>>
+Gen::staticF64Shape(const Expr* e) const {
+    auto sh = staticShapeOf(e);
+    if (!sh) return std::nullopt;
+    if (types_.find(e)->second->params[0]->kind != Type::Kind::Float)
+        return std::nullopt;
+    return sh;
 }
 
 std::string Gen::shapeArrAttr(const std::vector<int64_t>& s) {
@@ -1290,13 +1305,21 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
             return Value{VK::Tensor, ssa, l.tInt && r.tInt, 2};
         }
         if (l.vk == VK::Tensor && r.vk == VK::Tensor) {
-            // linalg 覆盖集：+ - *（0/1/2）且双 f64 且形状静态（'/' 有
-            // 除零 panic，恒走 sg_*）
+            // 张量降级覆盖集：+ - * / // % **（0-6）全 dtype 组合、形状全
+            // 静态。双侧都必须静态——检查器 unifyShape 允许「静态⊕动态」
+            // 统一成静态结果，只查单侧会把动态张量误当静态降级（输入桥
+            // 读错内存）；int 溢出/除零 panic 由逐元素 lang 标量 op 调用
+            // 保持零分叉（sg_add_i64 等 == sg_tiop 同一实现）。
             std::string attrs;
-            if (tOp >= 0 && tOp <= 2 && !l.tInt && !r.tInt) {
-                if (auto sh = staticF64Shape(lExpr))
-                    attrs = " {kind = " + std::to_string(tOp) +
-                            " : i32, shape = " + shapeArrAttr(*sh) + "}";
+            if (tOp >= 0) {
+                auto lShape = staticShapeOf(lExpr);
+                auto rShape = staticShapeOf(rExpr);
+                if (lShape && rShape && *lShape == *rShape)
+                    attrs = " {kind = " + std::to_string(tOp) + " : i32" +
+                            ", shape = " + shapeArrAttr(*lShape) +
+                            ", lhs_int = " + std::to_string(l.tInt ? 1 : 0) +
+                            " : i32, rhs_int = " +
+                            std::to_string(r.tInt ? 1 : 0) + " : i32}";
             }
             std::string ssa = fresh();
             emit(ssa + " = \"lang.tensor_binop_tt\"(" + i32Const(tOp) + ", " +
@@ -1329,13 +1352,19 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         }
         std::string si = i32Const(sc.vk != VK::Float ? 1 : 0);
         Value t = l.vk == VK::Tensor ? l : r;
-        // linalg 覆盖集：+ - *（0/1/2）且张量 f64 且标量 float 且形状静态
+        // 张量降级覆盖集：+ - * / // % **（0-6）全 dtype 组合、张量侧形状
+        // 全静态（标量广播任意形状合法）。t_int/s_int 告知降级 pass 张量
+        // 元素与标量槽位（vi/sf）的 dtype；float 张量 × int 标量走 vf（
+        // MLIRGen 已 sitofp），int 张量 × float 标量降级处 sitofp 元素。
         //（ts 查左表达式、st 查右表达式——张量所在侧）
         std::string attrs;
-        if (tOp >= 0 && tOp <= 2 && !t.tInt && sc.vk == VK::Float) {
-            if (auto sh = staticF64Shape(l.vk == VK::Tensor ? lExpr : rExpr))
-                attrs = " {kind = " + std::to_string(tOp) +
-                        " : i32, shape = " + shapeArrAttr(*sh) + "}";
+        if (tOp >= 0) {
+            if (auto sh = staticShapeOf(l.vk == VK::Tensor ? lExpr : rExpr))
+                attrs = " {kind = " + std::to_string(tOp) + " : i32" +
+                        ", shape = " + shapeArrAttr(*sh) +
+                        ", t_int = " + std::to_string(t.tInt ? 1 : 0) +
+                        " : i32, s_int = " +
+                        std::to_string(sc.vk != VK::Float ? 1 : 0) + " : i32}";
         }
         std::string ssa = fresh();
         if (l.vk == VK::Tensor) { // 张量 op 标量 → ts
@@ -1627,11 +1656,14 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         if (v.vk != VK::Tensor)
             unsupported(c.args[0]->range, "transpose() 仅支持张量");
         std::string ssa = fresh();
-        // linalg 覆盖集：f64 2D + 形状静态 → 写形状属性（perm {1,0}）
+        // 张量降级覆盖集：2D int/float + 形状静态 → 写形状属性（纯数据
+        // 搬移与 dtype 无关；int 经 t_int 属性分派 i64 视图与句柄）
         std::string attrs;
-        if (!v.tInt && v.tRank == 2) {
-            if (auto sh = staticF64Shape(c.args[0].get()))
-                attrs = " {shape = " + shapeArrAttr(*sh) + "}";
+        if (v.tRank == 2) {
+            if (auto sh = staticShapeOf(c.args[0].get()))
+                attrs = " {shape = " + shapeArrAttr(*sh) +
+                        ", t_int = " + std::to_string(v.tInt ? 1 : 0) +
+                        " : i32}";
         }
         emit(ssa + " = \"lang.tensor_transpose\"(" + v.ssa + ")" + attrs +
              " : (!llvm.ptr) -> !llvm.ptr " + opLoc());
