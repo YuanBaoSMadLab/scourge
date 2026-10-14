@@ -129,6 +129,29 @@ const OpLower kLowerings[] = {
     {"lang.tensor_reduce_f", "sg_tensor_reduce_f", "Ipp", "Ippppi", 'f', true},
     {"lang.tensor_transpose", "sg_tensor_transpose", "p", "pppi", 'p', true},
     {"lang.tensor_reshape", "sg_tensor_reshape", "pip", "pipppi", 'p', true},
+    // ---- Result（错误即值；载荷按位编码，unwrap 携带缺省值） ----
+    {"lang.result_ok_i", "sg_result_ok_i", "i", "i", 'p', false},
+    {"lang.result_ok_f", "sg_result_ok_f", "f", "f", 'p', false},
+    {"lang.result_ok_b", "sg_result_ok_b", "b", "b", 'p', false},
+    {"lang.result_ok_s", "sg_result_ok_s", "p", "p", 'p', false},
+    {"lang.result_ok_n", "sg_result_ok_n", "", "", 'p', false},
+    {"lang.result_err", "sg_result_err", "p", "p", 'p', false},
+    {"lang.result_is_ok", "sg_result_is_ok", "p", "p", 'b', false},
+    {"lang.result_unwrap_i", "sg_result_unwrap_i", "pi", "pi", 'i', false},
+    {"lang.result_unwrap_f", "sg_result_unwrap_f", "pf", "pf", 'f', false},
+    {"lang.result_unwrap_b", "sg_result_unwrap_b", "pb", "pb", 'b', false},
+    {"lang.result_unwrap_s", "sg_result_unwrap_s", "pp", "pp", 'p', false},
+    // ---- List（etag 0=i64 1=f64 2=str 3=bool；get 越界 panic 挂上下文） ----
+    {"lang.list_new_i", "sg_list_new_i", "ip", "ip", 'p', false},
+    {"lang.list_new_f", "sg_list_new_f", "ip", "ip", 'p', false},
+    {"lang.list_new_s", "sg_list_new_s", "ip", "ip", 'p', false},
+    {"lang.list_new_b", "sg_list_new_b", "ip", "ip", 'p', false},
+    {"lang.list_empty", "sg_list_empty", "", "", 'p', false},
+    {"lang.list_len", "sg_list_len", "p", "p", 'i', false},
+    {"lang.list_get_i", "sg_list_get_i", "pi", "pippi", 'i', true},
+    {"lang.list_get_f", "sg_list_get_f", "pi", "pippi", 'f', true},
+    {"lang.list_get_b", "sg_list_get_b", "pi", "pippi", 'b', true},
+    {"lang.list_get_s", "sg_list_get_s", "pi", "pippi", 'p', true},
 };
 
 const OpLower* findLowering(mlir::StringRef name) {

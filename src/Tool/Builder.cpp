@@ -7,11 +7,16 @@
 //    原 mlir-opt --convert-to-llvm + mlir-translate 两步）→ clang 链接
 //    内嵌 C 运行时。
 //
-//  C 运行时（kRuntimeC）与 MLIRGen 的 34 个 extern 声明逐一对应，语义纪律
+//  C 运行时（kRuntimeC）与 MLIRGen 的 extern 声明逐一对应（34 张量/标量 +
+//  21 Result/List + 3 try 蹦床），语义纪律
 //  与 SG-BC VM（src/BC/VM.cpp）逐字对齐：
 //    * 整数 add/sub/mul/幂/取负溢出、除零 → panic（消息与 VM 相同）；
 //    * '/' 真除法恒 float；'//' Python 向下取整；'%' 与除数同号；
 //    * 浮点 print/str 用最短往返表示（15→16→17 位逐级尝试），补 ".0"；
+//    * Result 载荷按位编码 / List etag 0-3，方法语义与 VM CallMethod 一致；
+//  * try/except 蹦床（sg_try_push/sg_try_pop + 生成代码直调 CRT _setjmp）
+//      处理器栈与 VM catches_ 同构，sg_panic 单一钩子：栈顶有 handler 则
+//      longjmp（与 VM recover 一致），否则打印 + exit(1)；
 //    * panic 输出 "panic: <msg> at <fn> (<file>:<line>)" 到 stderr + exit 1，
 //      与 Runner 的 VM panic 文本逐字节一致（构建产物与 scourge run 双模一致）。
 // ============================================================================
@@ -51,8 +56,39 @@ const char kRuntimeC[] = R"RT(/* Scourge AOT 运行时（scourge build 内嵌生
 #include <windows.h>
 #endif
 
+/* ---- try/except 蹦床 ----
+ * setjmp 由生成代码直调 CRT _setjmp：SgTry.jb 为首成员，句柄即 jmp_buf*，
+ * 返回点落在生成函数自身活跃帧（包装函数方案失效——longjmp 恢复的包装帧
+ * 会被 try body 内同调用深度的兄弟调用覆盖，恢复到死帧）。returns_twice
+ * 调用点属性由 InProcess 在 translate 后程序化补齐。处理器栈 sg_try_top
+ * 与 VM catches_ 同构：EnterTry=push、ExitTry=pop、panic=recover（弹到
+ * 最近 handler）。 */
+#include <setjmp.h>
+
+typedef struct SgTry {
+    jmp_buf jb;
+    struct SgTry* prev;
+} SgTry;
+
+static SgTry* sg_try_top = NULL;
+
+SgTry* sg_try_push(void) {
+    SgTry* h = (SgTry*)malloc(sizeof(SgTry));
+    if (!h) exit(1);
+    h->prev = sg_try_top;
+    sg_try_top = h;
+    return h;
+}
+
+void sg_try_pop(SgTry* h) {
+    sg_try_top = h->prev;
+    free(h);
+}
+
 _Noreturn void sg_panic(const char* fn, const char* file, int64_t line,
                         const char* msg) {
+    if (sg_try_top) /* try/except 激活：跳到最近 handler（与 VM recover 一致） */
+        longjmp(sg_try_top->jb, 1);
     fprintf(stderr, "panic: %s at %s (%s:%lld)\n", msg, fn, file,
             (long long)line);
     exit(1);
@@ -920,6 +956,158 @@ static const char* sg_tfmt(const SgTensor* t) {
 
 void sg_print_tensor(SgTensor* t) { fputs(sg_tfmt(t), stdout); }
 const char* sg_str_from_tensor(SgTensor* t) { return sg_tfmt(t); }
+
+/* ===========================================================================
+ * ---- Result 运行时（错误即值；SgResult 堆句柄，程序生命周期持有） ----
+ * 载荷按位编码：i64 原值 / f64 位型 memcpy / bool 0-1 / str 指针。
+ * unwrap 携带缺省值：ok 取载荷、失败态取缺省（VM CallMethod 语义一致）。
+ * ======================================================================== */
+typedef struct {
+    int64_t isOk;
+    int64_t bits; /* OK 载荷按位存储 */
+    const char* err;
+} SgResult;
+
+static SgResult* sg_result_new(int isOk) {
+    SgResult* r = (SgResult*)malloc(sizeof(SgResult));
+    if (!r) exit(1);
+    r->isOk = isOk;
+    r->bits = 0;
+    r->err = "";
+    return r;
+}
+
+SgResult* sg_result_ok_i(int64_t v) {
+    SgResult* r = sg_result_new(1);
+    r->bits = v;
+    return r;
+}
+SgResult* sg_result_ok_f(double v) {
+    SgResult* r = sg_result_new(1);
+    memcpy(&r->bits, &v, 8);
+    return r;
+}
+SgResult* sg_result_ok_b(int v) {
+    SgResult* r = sg_result_new(1);
+    r->bits = v ? 1 : 0;
+    return r;
+}
+SgResult* sg_result_ok_s(const char* s) {
+    SgResult* r = sg_result_new(1);
+    r->bits = (int64_t)(intptr_t)s;
+    return r;
+}
+SgResult* sg_result_ok_n(void) { return sg_result_new(1); }
+SgResult* sg_result_err(const char* msg) {
+    SgResult* r = sg_result_new(0);
+    r->err = msg;
+    return r;
+}
+
+int sg_result_is_ok(SgResult* r) { return r->isOk ? 1 : 0; }
+int64_t sg_result_unwrap_i(SgResult* r, int64_t def) {
+    return r->isOk ? r->bits : def;
+}
+double sg_result_unwrap_f(SgResult* r, double def) {
+    if (!r->isOk) return def;
+    double v;
+    memcpy(&v, &r->bits, 8);
+    return v;
+}
+int sg_result_unwrap_b(SgResult* r, int def) {
+    return r->isOk ? (int)r->bits : def;
+}
+const char* sg_result_unwrap_s(SgResult* r, const char* def) {
+    return r->isOk ? (const char*)(intptr_t)r->bits : def;
+}
+
+/* ===========================================================================
+ * ---- List 运行时（SgList 堆句柄；etag 0=i64 1=f64 2=str 3=bool） ----
+ * 下标读取复刻 VM normIndex：负下标从尾计，越界 panic 消息逐字一致。
+ * ======================================================================== */
+typedef struct {
+    int64_t len;
+    int etag;
+    void* data; /* etag 0/3: int64_t*  1: double*  2: char** */
+} SgList;
+
+SgList* sg_list_empty(void) {
+    SgList* l = (SgList*)malloc(sizeof(SgList));
+    if (!l) exit(1);
+    l->len = 0;
+    l->etag = 0;
+    l->data = NULL;
+    return l;
+}
+
+SgList* sg_list_new_i(int64_t n, const int64_t* es) {
+    SgList* l = sg_list_empty();
+    l->len = n;
+    l->etag = 0;
+    l->data = malloc(sizeof(int64_t) * (size_t)(n > 0 ? n : 1));
+    if (!l->data) exit(1);
+    for (int64_t k = 0; k < n; ++k) ((int64_t*)l->data)[k] = es[k];
+    return l;
+}
+
+SgList* sg_list_new_b(int64_t n, const int64_t* es) {
+    SgList* l = sg_list_new_i(n, es);
+    l->etag = 3;
+    return l;
+}
+
+SgList* sg_list_new_f(int64_t n, const double* es) {
+    SgList* l = sg_list_empty();
+    l->len = n;
+    l->etag = 1;
+    l->data = malloc(sizeof(double) * (size_t)(n > 0 ? n : 1));
+    if (!l->data) exit(1);
+    for (int64_t k = 0; k < n; ++k) ((double*)l->data)[k] = es[k];
+    return l;
+}
+
+SgList* sg_list_new_s(int64_t n, const char* const* es) {
+    SgList* l = sg_list_empty();
+    l->len = n;
+    l->etag = 2;
+    l->data = malloc(sizeof(char*) * (size_t)(n > 0 ? n : 1));
+    if (!l->data) exit(1);
+    for (int64_t k = 0; k < n; ++k) ((char**)l->data)[k] = (char*)es[k];
+    return l;
+}
+
+int64_t sg_list_len(SgList* l) { return l->len; }
+
+/* 负下标归一 + 越界 panic（与 VM normIndex(what="列表") 消息逐字一致）。 */
+static int64_t sg_list_norm(SgList* l, int64_t idx, const char* fn,
+                            const char* file, int64_t line) {
+    int64_t orig = idx;
+    if (idx < 0) idx += l->len;
+    if (idx < 0 || idx >= l->len) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "列表索引越界：%lld（长度 %lld）",
+                 (long long)orig, (long long)l->len);
+        sg_panic(fn, file, line, buf);
+    }
+    return idx;
+}
+
+int64_t sg_list_get_i(SgList* l, int64_t idx, const char* fn, const char* file,
+                      int64_t line) {
+    return ((int64_t*)l->data)[sg_list_norm(l, idx, fn, file, line)];
+}
+double sg_list_get_f(SgList* l, int64_t idx, const char* fn, const char* file,
+                     int64_t line) {
+    return ((double*)l->data)[sg_list_norm(l, idx, fn, file, line)];
+}
+int sg_list_get_b(SgList* l, int64_t idx, const char* fn, const char* file,
+                  int64_t line) {
+    return ((int64_t*)l->data)[sg_list_norm(l, idx, fn, file, line)] ? 1 : 0;
+}
+const char* sg_list_get_s(SgList* l, int64_t idx, const char* fn,
+                          const char* file, int64_t line) {
+    return ((char**)l->data)[sg_list_norm(l, idx, fn, file, line)];
+}
 )RT";
 
 // ----------------------------------------------------------------------------

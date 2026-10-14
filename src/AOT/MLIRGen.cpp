@@ -10,8 +10,16 @@
 //    全局，语义与字节码后端零分叉。
 //  * panic 语义（溢出/除零/断言失败等）全部下沉到内嵌 C 运行时 sg_* 函数，
 //    消息文本与 VM::doBinOp / doBuiltin 逐字一致。
-//  * 不进入 AOT 的构造（List/Tensor/Result/Index/Try 等）显式 E1007，
-//    无静默回退。
+//  * Result / List 与 Tensor 同构的堆句柄模型：lang.result_* / lang.list_*
+//    op（LangToLLVM 的 kLowerings 降级）+ Value::lElem 记录元素/载荷 VK。
+//  * try/except 是唯一的 func.call 直连运行时例外（控制流设施，与
+//    llvm.alloca 同类）：sg_try_push/sg_try_pop 蹦床 + 生成代码直调 CRT
+//    @_setjmp（SgTry.jb 首成员 → 句柄即 jmp_buf*；setjmp 必须在生成函数
+//    自身活跃帧调用，包装帧方案会被同深度兄弟调用覆盖致死帧），处理器栈
+//    簿记与 VM catches_ 逐一对应（EnterTry/ExitTry/recover
+//    /doReturn 清理/break-continue 显式 ExitTry 穿越）。
+//  * 不进入 AOT 的构造（Dict/Option、print/str 的句柄值、List 下标赋值、
+//    Result/List 全局变量等）显式 E1007，无静默回退。
 // ============================================================================
 #include "scourge/AOT/MLIRGen.hpp"
 
@@ -41,14 +49,18 @@ namespace {
 // ============================================================================
 
 /// AOT 静态值类别。Range 以 i64 存上限 n（与 VM Value::makeRange 一致）；
-/// Tensor 以 !llvm.ptr 存 C 运行时 SgTensor 句柄（tInt 记录元素 dtype）。
-enum class VK { Void, Int, Float, Bool, Str, None, Range, Tensor, Bad };
+/// Tensor 以 !llvm.ptr 存 C 运行时 SgTensor 句柄（tInt 记录元素 dtype）；
+/// Result/List 以 !llvm.ptr 存 C 运行时堆句柄（lElem 记录元素/载荷 VK）。
+enum class VK {
+    Void, Int, Float, Bool, Str, None, Range, Tensor, Result, List, Bad
+};
 
 struct Value {
     VK vk = VK::Void;
     std::string ssa;     ///< MLIR SSA 名；None/Void 为空串
     bool tInt = false;   ///< VK::Tensor 时有效：true = i64 元素，false = f64
     uint8_t tRank = 0;   ///< VK::Tensor 时有效：秩（get 标量 / slice 判定用）
+    uint8_t lElem = 0;   ///< VK::List 时有效：元素 VK（载荷 VK 语义）
 };
 
 const char* mlirTy(VK vk) {
@@ -59,6 +71,8 @@ const char* mlirTy(VK vk) {
     case VK::Str: return "!llvm.ptr";
     case VK::Range: return "i64"; // 存上限 n
     case VK::Tensor: return "!llvm.ptr";
+    case VK::Result: return "!llvm.ptr";
+    case VK::List: return "!llvm.ptr";
     default: return "";           // None/Void 无 SSA 表示
     }
 }
@@ -76,6 +90,8 @@ VK vkOfType(const TypePtr& t) {
     case Type::Kind::None: return VK::None;
     case Type::Kind::Range: return VK::Range;
     case Type::Kind::Tensor: return VK::Tensor;
+    case Type::Kind::Result: return VK::Result;
+    case Type::Kind::List: return VK::List;
     default: return VK::Bad;
     }
 }
@@ -87,6 +103,8 @@ VK vkOfAnnName(const std::string& n) {
     if (n == "bool") return VK::Bool;
     if (n == "str") return VK::Str;
     if (n == "None") return VK::None;
+    if (n == "List") return VK::List; // 句柄 VK，元素 VK 由注解参数/首次 store 回填
+    if (n == "Result") return VK::Result; // 句柄 VK，载荷 VK 由类型表查取
     return VK::Bad;
 }
 
@@ -264,6 +282,7 @@ struct Slot {
     std::string ptr;   ///< 指向槽的 !llvm.ptr SSA 名（None 槽为空）
     bool tInt = false; ///< VK::Tensor 槽：元素 dtype（storeTo 时更新）
     uint8_t tRank = 0; ///< VK::Tensor 槽：秩（get/slice 静态分派用）
+    uint8_t lElem = 0; ///< VK::List 槽：元素 VK（storeTo 时更新）
 };
 
 struct GlobalSlot {
@@ -448,6 +467,19 @@ private:
     /// 张量字面量：全标量 → 一维；全张量 → 行拼接（与 VM tensorNew 一致）。
     Value genTensorLit(const ListLit& ls);
 
+    // ---- 列表 / try -------------------------------------------------------------
+    /// 指针句柄数组落盘（str 列表字面量）：入口块 alloca N×ptr + 逐个 store。
+    std::string buildPtrArray(const std::vector<Value>& items);
+    /// f64 值数组落盘（float 列表字面量）：入口块 alloca N×f64 + 逐个 store。
+    std::string buildF64Array(const std::vector<Value>& items);
+    /// 列表字面量：元素统一后经 lang.list_new_* 构造句柄（与 VM NewList 一致）。
+    Value genListLit(const ListLit& ls);
+    /// 弹出 tryStack_ 中 depth 之上的全部 handler（Break/Continue/Return 穿越
+    /// try 边界时对齐 VM Compiler 的显式 ExitTry）。
+    void popTriesAbove(size_t depth);
+    /// try / except：sg_try_push → sg_setjmp 双分支 → body / handler → join。
+    void genTry(const Try& t);
+
     // ---- 语句 -----------------------------------------------------------------
     void genStmtList(const StmtList& list);
     void genStmt(const Stmt& s);
@@ -507,7 +539,27 @@ private:
     std::map<int64_t, std::string> intConsts_;
     std::map<int32_t, std::string> i32Consts_;
     std::map<std::string, Slot> locals_;
-    std::vector<std::pair<std::string, std::string>> loopStack_; // break / continue
+    /// 循环上下文：break / continue 目标块 + 进入循环时的 tryStack_ 深度
+    /// （break/continue 穿越循环内 try 边界时需弹到该深度，对齐 VM Compiler
+    /// 的 loopEntryTries_ / 显式 ExitTry）。
+    struct LoopCtx {
+        std::string brk, cont;
+        size_t tryDepth = 0;
+    };
+    std::vector<LoopCtx> loopStack_;
+    /// 激活中的 try handler 句柄栈（与 VM catches_ / C 运行时 sg_try_top
+    /// 同构；CFG 语义以块入口快照恢复）。
+    std::vector<std::string> tryStack_;
+    bool tryDeclsEmitted_ = false; ///< assemble 时 try 蹦床声明只输出一次
+    /// 当前函数是否发射过 setjmp（genTry 置位）。置位后本函数槽位读写
+    /// 全部走 volatile——含 setjmp 的函数中，非 volatile 槽跨 longjmp 的
+    /// 值是 C11 7.13.2.1 意义上的 indeterminate，clang -O2 会据此折叠
+    /// catch 块的 load / 删除 handler 的 store（p_try_nested 实证）。
+    /// volatile 读写保住 VM「槽值跨 panic 保持」语义。
+    bool frameHasSetjmp_ = false;
+    /// volatile 后缀：frameHasSetjmp_ 时返回 " volatile"（MLIR LLVM
+    /// load/store 的单元属性），否则空串。
+    const char* vol() const { return frameHasSetjmp_ ? " volatile" : ""; }
 };
 
 // ============================================================================
@@ -535,6 +587,8 @@ void Gen::startFunction(const std::string& symLine, const std::string& dispName,
     i32Consts_.clear();
     locals_.clear();
     loopStack_.clear();
+    tryStack_.clear();
+    frameHasSetjmp_ = false;
 
     // 参数槽 + store（None 参数无 SSA，跳过 store）
     for (size_t k = 0; k < params.size(); ++k) {
@@ -543,7 +597,9 @@ void Gen::startFunction(const std::string& symLine, const std::string& dispName,
         if (params[k].second != VK::None) {
             std::string arg = "%a" + std::to_string(k);
             const char* ty = mlirTy(params[k].second);
-            emit("llvm.store " + arg + ", " + slot.ptr + " : " + ty +
+            // 一律 volatile：try 可能出现在函数体任何位置（allocSlot 先于
+            // genTry 发生），入口块一次性 store 的 volatile 开销可忽略。
+            emit("llvm.store volatile " + arg + ", " + slot.ptr + " : " + ty +
                  ", !llvm.ptr");
         }
     }
@@ -583,6 +639,21 @@ void Gen::finishFunction() {
         case VK::Tensor: {
             std::string p = fresh();
             emit(p + " = \"lang.tensor_empty\"() : () -> !llvm.ptr");
+            emit("func.return " + p + " : !llvm.ptr");
+            break;
+        }
+        case VK::Result: {
+            // 零值返回 = Err("")（与 VM 槽位零值语义一致）
+            std::string p = fresh();
+            emit(p + " = llvm.mlir.addressof " + internStr("") + " : !llvm.ptr");
+            std::string h = fresh();
+            emit(h + " = \"lang.result_err\"(" + p + ") : (!llvm.ptr) -> !llvm.ptr");
+            emit("func.return " + h + " : !llvm.ptr");
+            break;
+        }
+        case VK::List: {
+            std::string p = fresh();
+            emit(p + " = \"lang.list_empty\"() : () -> !llvm.ptr");
             emit("func.return " + p + " : !llvm.ptr");
             break;
         }
@@ -651,29 +722,54 @@ Slot Gen::allocSlot(VK vk) {
     emitEntry(slot.ptr + " = llvm.alloca " + oneReg() + " x " + ty +
               " : (i64) -> !llvm.ptr");
     // 零值初始化（语义上先写后读；与 VM 槽位零值对齐，防野值）。
+    // 一律 volatile：try 可能在槽分配之后才出现，而含 setjmp 的函数中
+    // 非 volatile 槽跨 longjmp 的值 indeterminate（clang -O2 会据此折叠
+    // catch 块 load / 删 handler store）；入口块一次性开销可忽略。
     switch (vk) {
     case VK::Int:
     case VK::Range:
-        emitEntry("llvm.store " + zeroI64() + ", " + slot.ptr + " : i64, !llvm.ptr");
+        emitEntry("llvm.store volatile " + zeroI64() + ", " + slot.ptr +
+                  " : i64, !llvm.ptr");
         break;
     case VK::Float:
-        emitEntry("llvm.store " + zeroF64() + ", " + slot.ptr + " : f64, !llvm.ptr");
+        emitEntry("llvm.store volatile " + zeroF64() + ", " + slot.ptr +
+                  " : f64, !llvm.ptr");
         break;
     case VK::Bool:
-        emitEntry("llvm.store " + boolReg(false) + ", " + slot.ptr +
+        emitEntry("llvm.store volatile " + boolReg(false) + ", " + slot.ptr +
                   " : i1, !llvm.ptr");
         break;
     case VK::Str: {
         std::string p = fresh();
         emitEntry(p + " = llvm.mlir.addressof " + internStr("") + " : !llvm.ptr");
-        emitEntry("llvm.store " + p + ", " + slot.ptr + " : !llvm.ptr, !llvm.ptr");
+        emitEntry("llvm.store volatile " + p + ", " + slot.ptr +
+                  " : !llvm.ptr, !llvm.ptr");
         break;
     }
     case VK::Tensor: {
         // 零值槽存空张量句柄（防野值；与 VM 槽位零值纪律一致）。
         std::string p = fresh();
         emitEntry(p + " = \"lang.tensor_empty\"() : () -> !llvm.ptr");
-        emitEntry("llvm.store " + p + ", " + slot.ptr + " : !llvm.ptr, !llvm.ptr");
+        emitEntry("llvm.store volatile " + p + ", " + slot.ptr +
+                  " : !llvm.ptr, !llvm.ptr");
+        break;
+    }
+    case VK::Result: {
+        // 零值槽存 Err("") 句柄（与 VM 槽位零值纪律一致）
+        std::string p = fresh();
+        emitEntry(p + " = llvm.mlir.addressof " + internStr("") + " : !llvm.ptr");
+        std::string h = fresh();
+        emitEntry(h + " = \"lang.result_err\"(" + p +
+                  ") : (!llvm.ptr) -> !llvm.ptr");
+        emitEntry("llvm.store volatile " + h + ", " + slot.ptr +
+                  " : !llvm.ptr, !llvm.ptr");
+        break;
+    }
+    case VK::List: {
+        std::string p = fresh();
+        emitEntry(p + " = \"lang.list_empty\"() : () -> !llvm.ptr");
+        emitEntry("llvm.store volatile " + p + ", " + slot.ptr +
+                  " : !llvm.ptr, !llvm.ptr");
         break;
     }
     default:
@@ -685,25 +781,29 @@ Slot Gen::allocSlot(VK vk) {
 Value Gen::loadSlot(const Slot& slot) {
     if (slot.vk == VK::None) return Value{VK::None, ""};
     std::string ssa = fresh();
-    emit(ssa + " = llvm.load " + slot.ptr + " : !llvm.ptr -> " + mlirTy(slot.vk));
-    return Value{slot.vk, ssa, slot.tInt, slot.tRank};
+    emit(ssa + " = llvm.load" + vol() + " " + slot.ptr + " : !llvm.ptr -> " +
+         mlirTy(slot.vk));
+    Value v{slot.vk, ssa, slot.tInt, slot.tRank};
+    v.lElem = slot.lElem;
+    return v;
 }
 
 /// 存储槽位：唯一隐式转换 int → float（与 isConvertible 一致）；
-/// Tensor 槽同步更新元素 dtype / 秩记录。
+/// Tensor 槽同步更新元素 dtype / 秩记录；List 槽同步更新元素 VK 记录。
 void Gen::storeTo(Slot& slot, Value v) {
     if (slot.vk == VK::None) return;
     if (slot.vk == VK::Tensor) {
         slot.tInt = v.tInt;
         slot.tRank = v.tRank;
     }
+    if (slot.vk == VK::List) slot.lElem = v.lElem;
     if (slot.vk == VK::Float && v.vk == VK::Int) {
         std::string ssa = fresh();
         emit(ssa + " = arith.sitofp " + v.ssa + " : i64 to f64");
         v = Value{VK::Float, ssa};
     }
-    emit("llvm.store " + v.ssa + ", " + slot.ptr + " : " + mlirTy(slot.vk) +
-         ", !llvm.ptr");
+    emit(std::string("llvm.store") + vol() + " " + v.ssa + ", " + slot.ptr +
+         " : " + mlirTy(slot.vk) + ", !llvm.ptr");
 }
 
 Value Gen::loadGlobal(const std::string& module, const std::string& name) {
@@ -771,6 +871,11 @@ Value Gen::emitCallRet(const std::string& sym, const std::vector<Value>& args,
                     retType->params[0]->kind != Type::Kind::Float;
         return Value{retVK, ssa, tInt,
                      static_cast<uint8_t>(retType->shape.size())};
+    }
+    if (retVK == VK::List && retType && retType->kind == Type::Kind::List &&
+        !retType->params.empty()) {
+        VK ev = vkOfType(retType->params[0]);
+        return Value{retVK, ssa, false, 0, static_cast<uint8_t>(ev)};
     }
     return Value{retVK, ssa};
 }
@@ -850,7 +955,8 @@ VK Gen::inferVK(const Expr& e) const {
                 }
                 if (n.name == "sqrt" || n.name == "exp" || n.name == "log")
                     return VK::Float;
-                return VK::Bad; // sum/max/min/transpose/reshape/ok/err
+                if (n.name == "ok" || n.name == "err") return VK::Result;
+                return VK::Bad; // sum/max/min/transpose/reshape
             }
             auto ft = s_.registry().find(curModule_);
             if (ft != s_.registry().end()) {
@@ -1001,6 +1107,105 @@ Value Gen::genTensorLit(const ListLit& ls) {
     return Value{VK::Tensor, ssa, !isF, 1};
 }
 
+/// 指针句柄数组落盘（str 列表字面量）：入口块 alloca N×ptr，逐元素 store。
+std::string Gen::buildPtrArray(const std::vector<Value>& items) {
+    std::string arr = fresh();
+    emitEntry(arr + " = llvm.alloca " +
+              intConst(items.empty() ? 1 : (int64_t)items.size()) +
+              " x !llvm.ptr : (i64) -> !llvm.ptr");
+    for (size_t k = 0; k < items.size(); ++k) {
+        std::string addr = elemAddr8(arr, intConst((int64_t)k));
+        emit("llvm.store " + items[k].ssa + ", " + addr +
+             " : !llvm.ptr, !llvm.ptr");
+    }
+    return arr;
+}
+
+/// f64 值数组落盘（float 列表字面量）：入口块 alloca N×f64，逐元素 store。
+std::string Gen::buildF64Array(const std::vector<Value>& items) {
+    std::string arr = fresh();
+    emitEntry(arr + " = llvm.alloca " +
+              intConst(items.empty() ? 1 : (int64_t)items.size()) +
+              " x f64 : (i64) -> !llvm.ptr");
+    for (size_t k = 0; k < items.size(); ++k) {
+        std::string addr = elemAddr8(arr, intConst((int64_t)k));
+        emit("llvm.store " + items[k].ssa + ", " + addr + " : f64, !llvm.ptr");
+    }
+    return arr;
+}
+
+/// 列表字面量：元素 VK 统一（同 VK 原样；int/float 混排 → f64，与检查器
+/// unifyNumeric 一致）后经 lang.list_new_* 构造堆句柄（与 VM NewList 一致）。
+Value Gen::genListLit(const ListLit& ls) {
+    std::vector<Value> es;
+    es.reserve(ls.elems.size());
+    for (const auto& el : ls.elems) es.push_back(genExpr(*el));
+
+    if (es.empty()) {
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang.list_empty\"() : () -> !llvm.ptr");
+        return Value{VK::List, ssa};
+    }
+
+    // 元素统一：与检查器 checkListLit 一致——任一 Float → 全 f64；
+    // 同为 Int 则保持 i64（bool 只能与 bool 混排，检查器 E2001 已拒异型）。
+    bool anyFloat = false, allInt = true, allBool = true, allStr = true;
+    for (const Value& v : es) {
+        if (v.vk == VK::Float) anyFloat = true;
+        if (v.vk != VK::Int) allInt = false;
+        if (v.vk != VK::Bool) allBool = false;
+        if (v.vk != VK::Str) allStr = false;
+    }
+    if (!allInt && !allBool && !allStr && !anyFloat)
+        unsupported(ls.range, "列表字面量含该元素类型");
+
+    // 逐元素统一转换（anyFloat 时 int/bool → f64；bool 元素在整型表中 zext i64）
+    const bool isF = anyFloat;
+    if (isF) {
+        for (Value& v : es) {
+            if (v.vk == VK::Int) v = promoteF64(v);
+            else if (v.vk == VK::Bool) {
+                std::string f = fresh();
+                emit(f + " = arith.uitofp " + v.ssa + " : i1 to f64");
+                v = Value{VK::Float, f};
+            }
+        }
+        std::string arr = buildF64Array(es);
+        std::string h = fresh();
+        emit(h + " = \"lang.list_new_f\"(" + intConst((int64_t)es.size()) +
+             ", " + arr + ") : (i64, !llvm.ptr) -> !llvm.ptr");
+        return Value{VK::List, h, false, 0, static_cast<uint8_t>(VK::Float)};
+    }
+    if (allStr) {
+        std::string arr = buildPtrArray(es);
+        std::string h = fresh();
+        emit(h + " = \"lang.list_new_s\"(" + intConst((int64_t)es.size()) +
+             ", " + arr + ") : (i64, !llvm.ptr) -> !llvm.ptr");
+        return Value{VK::List, h, false, 0, static_cast<uint8_t>(VK::Str)};
+    }
+    if (allBool) {
+        // bool 列表：运行时按 i64 存储（etag 3），元素经 zext 提升
+        std::vector<Value> wide;
+        wide.reserve(es.size());
+        for (const Value& v : es) {
+            std::string z = fresh();
+            emit(z + " = arith.extui " + v.ssa + " : i1 to i64");
+            wide.push_back(Value{VK::Int, z});
+        }
+        std::string arr = buildI64Array(wide);
+        std::string h = fresh();
+        emit(h + " = \"lang.list_new_b\"(" + intConst((int64_t)es.size()) +
+             ", " + arr + ") : (i64, !llvm.ptr) -> !llvm.ptr");
+        return Value{VK::List, h, false, 0, static_cast<uint8_t>(VK::Bool)};
+    }
+    // 全 int
+    std::string arr = buildI64Array(es);
+    std::string h = fresh();
+    emit(h + " = \"lang.list_new_i\"(" + intConst((int64_t)es.size()) + ", " +
+         arr + ") : (i64, !llvm.ptr) -> !llvm.ptr");
+    return Value{VK::List, h, false, 0, static_cast<uint8_t>(VK::Int)};
+}
+
 Value Gen::genExpr(const Expr& e) {
     line_ = lineOf(e.range); // panic 行号锚点（markLine 等价）
     switch (e.kind) {
@@ -1053,8 +1258,38 @@ Value Gen::genExpr(const Expr& e) {
     case Expr::Kind::Index: {
         auto& ix = static_cast<const Index&>(e);
         Value base = genExpr(*ix.base);
+        if (base.vk == VK::List) {
+            // List 单下标（检查器 E2004 已拒多下标）：list_get_* 内做
+            // normIndex（负下标归一 + 越界 panic，消息与 VM 逐字一致）
+            if (ix.indices.size() != 1)
+                unsupported(ix.range, "List 只支持单下标");
+            Value iv = genExpr(*ix.indices[0]);
+            if (iv.vk != VK::Int)
+                unsupported(ix.indices[0]->range, "列表下标必须是 int");
+            std::string ssa = fresh();
+            switch (static_cast<VK>(base.lElem)) {
+            case VK::Int:
+                emit(ssa + " = \"lang.list_get_i\"(" + base.ssa + ", " + iv.ssa +
+                     ") : (!llvm.ptr, i64) -> i64 " + opLoc());
+                return Value{VK::Int, ssa};
+            case VK::Float:
+                emit(ssa + " = \"lang.list_get_f\"(" + base.ssa + ", " + iv.ssa +
+                     ") : (!llvm.ptr, i64) -> f64 " + opLoc());
+                return Value{VK::Float, ssa};
+            case VK::Bool:
+                emit(ssa + " = \"lang.list_get_b\"(" + base.ssa + ", " + iv.ssa +
+                     ") : (!llvm.ptr, i64) -> i1 " + opLoc());
+                return Value{VK::Bool, ssa};
+            case VK::Str:
+                emit(ssa + " = \"lang.list_get_s\"(" + base.ssa + ", " + iv.ssa +
+                     ") : (!llvm.ptr, i64) -> !llvm.ptr " + opLoc());
+                return Value{VK::Str, ssa};
+            default:
+                unsupported(ix.base->range, "该元素类型的列表下标读取");
+            }
+        }
         if (base.vk != VK::Tensor)
-            unsupported(ix.base->range, "下标读取仅支持张量");
+            unsupported(ix.base->range, "下标读取仅支持张量与列表");
         // 下标逐个求值（与 Compiler 的 base → idxs 求值序一致）
         std::vector<Value> idxs;
         for (const auto& ie : ix.indices) {
@@ -1087,8 +1322,7 @@ Value Gen::genExpr(const Expr& e) {
     }
     case Expr::Kind::ListLit: {
         auto& ls = static_cast<const ListLit&>(e);
-        if (!ls.checkedAsTensor)
-            unsupported(e.range, "列表字面量（AOT 仅支持张量字面量）");
+        if (!ls.checkedAsTensor) return genListLit(ls);
         return genTensorLit(ls);
     }
     case Expr::Kind::TupleLit:
@@ -1422,16 +1656,29 @@ Value Gen::genTernary(const Ternary& t) {
         unsupported(t.range, "三元表达式分支类型");
     Value cond = genExpr(*t.cond);
     Slot slot = allocSlot(vk);
+    uint8_t thenElem = 0, elseElem = 0;
     int thenB = newBlock(), elseB = newBlock(), joinB = newBlock();
     terminate("cf.cond_br " + cond.ssa + ", " + blk(thenB).label + ", " +
               blk(elseB).label);
     cur_ = thenB;
-    storeTo(slot, genExpr(*t.thenE));
+    {
+        Value v = genExpr(*t.thenE);
+        thenElem = v.lElem;
+        storeTo(slot, v);
+    }
     terminate("cf.br " + blk(joinB).label);
     cur_ = elseB;
-    storeTo(slot, genExpr(*t.elseE));
+    {
+        Value v = genExpr(*t.elseE);
+        elseElem = v.lElem;
+        storeTo(slot, v);
+    }
     terminate("cf.br " + blk(joinB).label);
     cur_ = joinB;
+    // 静态模型一致性：两分支列表元素 VK 不一致时槽位单值记录会失真
+    //（运行时 etag 与静态分派不符 → 内存误读），显式拒绝。
+    if (vk == VK::List && thenElem != elseElem)
+        unsupported(t.range, "三元表达式分支列表元素类型不一致");
     return loadSlot(slot);
 }
 
@@ -1465,6 +1712,55 @@ Value Gen::genCall(const Call& c) {
     }
     if (c.callee->kind == Expr::Kind::Attr) {
         auto& at = static_cast<const Attr&>(*c.callee);
+        // Result 消费方法（is_ok / unwrap / unwrap_or）：载荷 VK 由检查器
+        // 类型表（ExprTypeMap）反查，self 先 args 后（与 VM CallMethod 一致）。
+        if (auto bt = types_.find(at.base.get());
+            bt != types_.end() && bt->second &&
+            bt->second->kind == Type::Kind::Result) {
+            const TypePtr& rt = bt->second;
+            VK pv = rt->params.empty() ? VK::Bad : vkOfType(rt->params[0]);
+            if (at.name == "is_ok") {
+                if (!c.args.empty())
+                    unsupported(c.range, "is_ok() 不需要参数");
+                Value self = genExpr(*at.base);
+                std::string ssa = fresh();
+                emit(ssa + " = \"lang.result_is_ok\"(" + self.ssa +
+                     ") : (!llvm.ptr) -> i1");
+                return Value{VK::Bool, ssa};
+            }
+            if (at.name == "unwrap" || at.name == "unwrap_or") {
+                if (c.args.size() != 1)
+                    unsupported(c.range,
+                                at.name + "() 需要 1 个缺省值参数");
+                Value self = genExpr(*at.base);
+                if (pv == VK::None)
+                    return Value{VK::None, ""}; // None 载荷无 SSA；ok/err 均取 None
+                if (pv != VK::Int && pv != VK::Float && pv != VK::Bool &&
+                    pv != VK::Str)
+                    unsupported(c.range, "该载荷类型的 " + at.name + "()");
+                Value def = genExpr(*c.args[0]);
+                // 缺省值 int → float 载荷（与 emitCallRet 隐式转换一致）
+                if (pv == VK::Float && def.vk == VK::Int) {
+                    std::string f = fresh();
+                    emit(f + " = arith.sitofp " + def.ssa + " : i64 to f64");
+                    def = Value{VK::Float, f};
+                }
+                const char* sym = pv == VK::Int   ? "lang.result_unwrap_i"
+                                  : pv == VK::Float ? "lang.result_unwrap_f"
+                                  : pv == VK::Bool  ? "lang.result_unwrap_b"
+                                                    : "lang.result_unwrap_s";
+                const char* retTy =
+                    pv == VK::Int ? "i64"
+                    : pv == VK::Float ? "f64"
+                    : pv == VK::Bool  ? "i1"
+                                      : "!llvm.ptr";
+                std::string ssa = fresh();
+                emit(ssa + " = \"" + sym + "\"(" + self.ssa + ", " + def.ssa +
+                     ") : (!llvm.ptr, " + std::string(mlirTy(pv)) + ") -> " +
+                     retTy);
+                return Value{pv, ssa};
+            }
+        }
         if (at.base->kind == Expr::Kind::Name) {
             auto& mn = static_cast<const Name&>(*at.base);
             if (std::find(curImports_.begin(), curImports_.end(), mn.name) !=
@@ -1567,10 +1863,17 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
     if (name == "len") {
         need(1);
         Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Str) unsupported(c.args[0]->range, "len() 仅支持 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.str_len\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
-        return Value{VK::Int, ssa};
+        if (v.vk == VK::Str) {
+            std::string ssa = fresh();
+            emit(ssa + " = \"lang.str_len\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
+            return Value{VK::Int, ssa};
+        }
+        if (v.vk == VK::List) {
+            std::string ssa = fresh();
+            emit(ssa + " = \"lang.list_len\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
+            return Value{VK::Int, ssa};
+        }
+        unsupported(c.args[0]->range, "len() 仅支持 str 与列表");
     }
     if (name == "now") {
         std::string ssa = fresh();
@@ -1691,8 +1994,47 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         return Value{VK::Tensor, ssa, v.tInt,
                      static_cast<uint8_t>(dims.size())};
     }
-    // ok / err（Result 构造）
-    unsupported(c.range, "内建 " + name + "()（Result 构造）");
+    // ok / err（Result 构造；检查器已强制恰好 1 参）
+    if (name == "ok") {
+        need(1);
+        Value v = genExpr(*c.args[0]);
+        std::string ssa = fresh();
+        switch (v.vk) {
+        case VK::Int:
+            emit(ssa + " = \"lang.result_ok_i\"(" + v.ssa +
+                 ") : (i64) -> !llvm.ptr");
+            break;
+        case VK::Float:
+            emit(ssa + " = \"lang.result_ok_f\"(" + v.ssa +
+                 ") : (f64) -> !llvm.ptr");
+            break;
+        case VK::Bool:
+            emit(ssa + " = \"lang.result_ok_b\"(" + v.ssa +
+                 ") : (i1) -> !llvm.ptr");
+            break;
+        case VK::Str:
+            emit(ssa + " = \"lang.result_ok_s\"(" + v.ssa +
+                 ") : (!llvm.ptr) -> !llvm.ptr");
+            break;
+        case VK::None:
+            emit(ssa + " = \"lang.result_ok_n\"() : () -> !llvm.ptr");
+            break;
+        default:
+            unsupported(c.args[0]->range, "ok() 该载荷类型");
+        }
+        return Value{VK::Result, ssa, false, 0, static_cast<uint8_t>(v.vk)};
+    }
+    if (name == "err") {
+        need(1);
+        Value v = genExpr(*c.args[0]);
+        if (v.vk != VK::Str)
+            unsupported(c.args[0]->range, "err() 参数必须是 str");
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang.result_err\"(" + v.ssa +
+             ") : (!llvm.ptr) -> !llvm.ptr");
+        return Value{VK::Result, ssa, false, 0, static_cast<uint8_t>(VK::Str)};
+    }
+    unsupported(c.range, "内建 " + name + "()（该内建）");
 }
 
 // ============================================================================
@@ -1732,11 +2074,13 @@ void Gen::genStmt(const Stmt& s) {
         auto& st = static_cast<const Return&>(s);
         if (curIsTop_) unsupported(s.range, "顶层 return");
         if (!st.value) {
+            popTriesAbove(0); // return 穿越全部激活 try（对齐 VM doReturn 清理）
             terminate("func.return");
             break;
         }
         Value v = genExpr(*st.value);
         if (curRetVK_ == VK::None || curRetVK_ == VK::Void) {
+            popTriesAbove(0); // return 穿越全部激活 try（对齐 VM doReturn 清理）
             terminate("func.return");
             break;
         }
@@ -1745,24 +2089,30 @@ void Gen::genStmt(const Stmt& s) {
             emit(ssa + " = arith.sitofp " + v.ssa + " : i64 to f64");
             v = Value{VK::Float, ssa};
         }
+        popTriesAbove(0); // return 穿越全部激活 try（对齐 VM doReturn 清理）
         terminate("func.return " + v.ssa + " : " + mlirTy(curRetVK_));
         break;
     }
-    case Stmt::Kind::Break:
+    case Stmt::Kind::Break: {
         if (loopStack_.empty()) unsupported(s.range, "break 不在循环内");
-        terminate("cf.br " + loopStack_.back().first);
+        popTriesAbove(loopStack_.back().tryDepth); // 显式 ExitTry 穿越（VM 同构）
+        terminate("cf.br " + loopStack_.back().brk);
         break;
-    case Stmt::Kind::Continue:
+    }
+    case Stmt::Kind::Continue: {
         if (loopStack_.empty()) unsupported(s.range, "continue 不在循环内");
-        terminate("cf.br " + loopStack_.back().second);
+        popTriesAbove(loopStack_.back().tryDepth);
+        terminate("cf.br " + loopStack_.back().cont);
         break;
+    }
     case Stmt::Kind::Pass:
         break;
     case Stmt::Kind::Assert:
         genAssert(static_cast<const Assert&>(s));
         break;
     case Stmt::Kind::Try:
-        unsupported(s.range, "try / except（panic 恢复）");
+        genTry(static_cast<const Try&>(s));
+        break;
     case Stmt::Kind::Import:
     case Stmt::Kind::FuncDef:
         break; // 顶层处理；嵌套定义与字节码后端一致地忽略
@@ -1852,6 +2202,12 @@ void Gen::genAssign(const Assign& a) {
         if (vk == VK::Bad || vk == VK::Void)
             unsupported(a.value->range, "变量 '" + n.name + "' 的类型");
         Slot slot = allocSlot(vk);
+        if (vk == VK::List && a.ann && a.ann->params.size() == 1 &&
+            a.ann->params[0]->kind == TypeExpr::Kind::Named) {
+            // List[T] 注解：元素 VK 从注解参数回填（storeTo 亦会修正）
+            VK ev = vkOfAnnName(a.ann->params[0]->name);
+            if (ev != VK::Bad) slot.lElem = static_cast<uint8_t>(ev);
+        }
         lt = locals_.emplace(n.name, slot).first;
     }
     storeTo(lt->second, v);
@@ -1965,7 +2321,7 @@ void Gen::genWhile(const While& w) {
     terminate("cf.cond_br " + c.ssa + ", " + blk(bodyB).label + ", " +
               blk(endB).label);
     cur_ = bodyB;
-    loopStack_.emplace_back(blk(endB).label, blk(condB).label);
+    loopStack_.push_back(LoopCtx{blk(endB).label, blk(condB).label, tryStack_.size()});
     genStmtList(w.body);
     loopStack_.pop_back();
     terminate("cf.br " + blk(condB).label); // 回边重新求值条件
@@ -1973,32 +2329,94 @@ void Gen::genWhile(const While& w) {
 }
 
 void Gen::genFor(const For& f) {
-    // 仅 range 迭代（List 值在 AOT 中无法构造，其来源必先触发 E1007）。
-    Value n = genExpr(*f.iter);
-    if (n.vk != VK::Range) unsupported(f.iter->range, "for 迭代源仅支持 range");
+    // range 迭代 + List 迭代（List 值：字面量 / 函数返回，均已有静态元素 VK）
+    Value src = genExpr(*f.iter);
     Slot counter = allocSlot(VK::Int);
-    Slot varSlot = allocSlot(VK::Int);
+    Slot varSlot;
+    if (src.vk == VK::Range) {
+        varSlot = allocSlot(VK::Int);
+        locals_[f.var] = varSlot;
+        storeTo(counter, Value{VK::Int, zeroI64()});
+
+        int condB = newBlock(), incrB = newBlock();
+        terminate("cf.br " + blk(condB).label);
+        cur_ = condB;
+        std::string c = fresh();
+        emit(c + " = llvm.load" + vol() + " " + counter.ptr +
+             " : !llvm.ptr -> i64");
+        std::string cont = fresh();
+        emit(cont + " = arith.cmpi slt, " + c + ", " + src.ssa + " : i64");
+        int bodyB = newBlock(), endB = newBlock();
+        terminate("cf.cond_br " + cont + ", " + blk(bodyB).label + ", " +
+                  blk(endB).label);
+        cur_ = bodyB;
+        storeTo(varSlot, Value{VK::Int, c});
+        // continue 目标 = 独立增量块（增量绝不能放 body 尾单一路径——
+        // continue 跳过 body 尾直落条件块会让计数器永不递增，死循环）。
+        loopStack_.push_back(
+            LoopCtx{blk(endB).label, blk(incrB).label, tryStack_.size()});
+        genStmtList(f.body);
+        loopStack_.pop_back();
+        terminate("cf.br " + blk(incrB).label);
+        cur_ = incrB;
+        // 计数器 +1（body 以 return 终止时，后续 emit 自动落入死代码丢弃）。
+        std::string c2 = fresh();
+        emit(c2 + " = llvm.load" + vol() + " " + counter.ptr +
+             " : !llvm.ptr -> i64");
+        std::string c3 = fresh();
+        emit(c3 + " = arith.addi " + c2 + ", " + oneReg() + " : i64");
+        storeTo(counter, Value{VK::Int, c3});
+        terminate("cf.br " + blk(condB).label);
+        cur_ = endB;
+        return;
+    }
+    if (src.vk != VK::List)
+        unsupported(f.iter->range, "for 迭代源仅支持 range 与列表");
+    // List 迭代：0..len-1 计数 + 逐轮 list_get（越界不可达；与 VM ForNext
+    // 的「元素 + true / 仅 false」两值语义等价——循环变量即元素）
+    VK ev = static_cast<VK>(src.lElem);
+    if (ev != VK::Int && ev != VK::Float && ev != VK::Bool && ev != VK::Str)
+        unsupported(f.iter->range, "该元素类型的列表 for 迭代");
+    varSlot = allocSlot(ev);
     locals_[f.var] = varSlot;
     storeTo(counter, Value{VK::Int, zeroI64()});
 
-    int condB = newBlock();
+    int condB = newBlock(), incrB = newBlock();
     terminate("cf.br " + blk(condB).label);
     cur_ = condB;
     std::string c = fresh();
-    emit(c + " = llvm.load " + counter.ptr + " : !llvm.ptr -> i64");
+    emit(c + " = llvm.load" + vol() + " " + counter.ptr +
+         " : !llvm.ptr -> i64");
+    std::string len = fresh();
+    emit(len + " = \"lang.list_len\"(" + src.ssa + ") : (!llvm.ptr) -> i64");
     std::string cont = fresh();
-    emit(cont + " = arith.cmpi slt, " + c + ", " + n.ssa + " : i64");
+    emit(cont + " = arith.cmpi slt, " + c + ", " + len + " : i64");
     int bodyB = newBlock(), endB = newBlock();
     terminate("cf.cond_br " + cont + ", " + blk(bodyB).label + ", " +
               blk(endB).label);
     cur_ = bodyB;
-    storeTo(varSlot, Value{VK::Int, c});
-    loopStack_.emplace_back(blk(endB).label, blk(condB).label);
+    const char* getSym = ev == VK::Int   ? "lang.list_get_i"
+                         : ev == VK::Float ? "lang.list_get_f"
+                         : ev == VK::Bool  ? "lang.list_get_b"
+                                           : "lang.list_get_s";
+    const char* elemTy = ev == VK::Int   ? "i64"
+                         : ev == VK::Float ? "f64"
+                         : ev == VK::Bool  ? "i1"
+                                           : "!llvm.ptr";
+    std::string el = fresh();
+    emit(el + " = \"" + getSym + "\"(" + src.ssa + ", " + c + ") : (!llvm.ptr, i64) -> " +
+         elemTy);
+    storeTo(varSlot, Value{ev, el});
+    // continue 目标 = 独立增量块（同 range 分支——continue 必须经增量再回条件）。
+    loopStack_.push_back(
+        LoopCtx{blk(endB).label, blk(incrB).label, tryStack_.size()});
     genStmtList(f.body);
     loopStack_.pop_back();
-    // 计数器 +1（body 以 return 终止时，后续 emit 自动落入死代码丢弃）。
+    terminate("cf.br " + blk(incrB).label);
+    cur_ = incrB;
     std::string c2 = fresh();
-    emit(c2 + " = llvm.load " + counter.ptr + " : !llvm.ptr -> i64");
+    emit(c2 + " = llvm.load" + vol() + " " + counter.ptr +
+         " : !llvm.ptr -> i64");
     std::string c3 = fresh();
     emit(c3 + " = arith.addi " + c2 + ", " + oneReg() + " : i64");
     storeTo(counter, Value{VK::Int, c3});
@@ -2036,6 +2454,62 @@ void Gen::genAssert(const Assert& a) {
 }
 
 // ============================================================================
+// try / except（panic 恢复）
+// ============================================================================
+
+void Gen::popTriesAbove(size_t depth) {
+    for (size_t k = tryStack_.size(); k-- > depth;)
+        emit("func.call @sg_try_pop(" + tryStack_[k] + ") : (!llvm.ptr) -> ()");
+    tryStack_.resize(depth);
+}
+
+void Gen::genTry(const Try& t) {
+    // 蹦床：sg_try_push 取 handler 句柄 → 直调 CRT @_setjmp 双返回（0=直落
+    // body，非 0=panic longjmp 到 handler）。setjmp 必须在生成函数自身活跃
+    // 帧调用——包装函数方案下 longjmp 恢复的包装帧会被 try body 内同调用
+    // 深度的兄弟调用覆盖，恢复到死帧。SgTry.jb 为首成员，句柄即 jmp_buf*。
+    // x64 上 clang 前端对 setjmp 有 intrinsic 特判：@_setjmp 实为双参
+    // (jmp_buf, frameaddress(0))，这里复刻该 ABI（@llvm.frameaddress.p0 经
+    // 声明调用，LLVM 后端按 intrinsic 展开）。处理器栈簿记与 VM catches_
+    // 同构：正常路径 body 尾 sg_try_pop；panic 路径由 longjmp 落 handler
+    // 块，tryStack_ 以入口快照恢复（body 内 break/return 可能已弹走部分层）。
+    line_ = lineOf(t.range);
+    tryDeclsEmitted_ = true; // assemble 时补插蹦床声明（幂等，仅一次）
+    frameHasSetjmp_ = true;  // 本函数槽位读写自此全部 volatile（跨 longjmp 存活）
+    std::string h = fresh();
+    emit(h + " = func.call @sg_try_push() : () -> !llvm.ptr");
+    std::vector<std::string> entryStack = tryStack_;
+    tryStack_.push_back(h);
+    std::string r = fresh();
+    std::string fa = fresh();
+    emit(fa + " = func.call @llvm.frameaddress.p0(" + i32Const(0) +
+         ") : (i32) -> !llvm.ptr");
+    emit(r + " = func.call @_setjmp(" + h + ", " + fa +
+         ") : (!llvm.ptr, !llvm.ptr) -> i32");
+    std::string nz = fresh();
+    emit(nz + " = arith.cmpi ne, " + r + ", " + i32Const(0) + " : i32");
+    int bodyB = newBlock(), catchB = newBlock(), joinB = newBlock();
+    terminate("cf.cond_br " + nz + ", " + blk(catchB).label + ", " +
+              blk(bodyB).label);
+    cur_ = bodyB;
+    genStmtList(t.body);
+    if (!tryStack_.empty() && tryStack_.back() == h) {
+        // 正常路径 ExitTry（body 以 return/break 终止时 emit 已死、簿记已弹）
+        emit("func.call @sg_try_pop(" + h + ") : (!llvm.ptr) -> ()");
+        tryStack_.pop_back();
+    }
+    terminate("cf.br " + blk(joinB).label);
+    cur_ = catchB;
+    // longjmp 消费了 h（sg_panic 不弹栈，故 handler 首行补 sg_try_pop）；
+    // 簿记恢复 = try 入口状态（本身即不含 h，无需再 pop）。
+    tryStack_ = entryStack;
+    emit("func.call @sg_try_pop(" + h + ") : (!llvm.ptr) -> ()");
+    genStmtList(t.handlerBody);
+    terminate("cf.br " + blk(joinB).label);
+    cur_ = joinB;
+}
+
+// ============================================================================
 // 模块级
 // ============================================================================
 
@@ -2056,7 +2530,8 @@ void Gen::precollectGlobals() {
                 auto gt = syms->second->globals.find(n.name);
                 if (gt == syms->second->globals.end()) continue;
                 VK vk = vkOfType(gt->second);
-                if (vk == VK::Bad || vk == VK::Tensor)
+                if (vk == VK::Bad || vk == VK::Tensor || vk == VK::Result ||
+                    vk == VK::List)
                     unsupported(a.target->range,
                                 "全局变量 '" + name + "." + n.name + "' 的类型");
                 gm.emplace(n.name, GlobalSlot{vk, globalSym(name, n.name)});
@@ -2239,6 +2714,20 @@ void Gen::assemble(std::string& out) {
     if (!emptyStrDef_.empty()) out += "  " + emptyStrDef_ + "\n";
     for (const auto& d : strDefs_) out += "  " + d + "\n";
     for (const auto& d : globalDefs_) out += "  " + d + "\n";
+    // try 蹦床：func.call 直连运行时（控制流设施例外——setjmp 双返回无法
+    // 表达为无副作用 lang op；与 llvm.alloca 同类）。
+    if (tryDeclsEmitted_) {
+        out += "  func.func private @sg_try_push() -> !llvm.ptr\n";
+        out += "  func.func private @sg_try_pop(!llvm.ptr) -> ()\n";
+        // @_setjmp 双参 ABI（jmp_buf, frameaddress(0)）由 clang 前端
+        // intrinsic 特判引入；@llvm.frameaddress.p0 经声明调用，LLVM 后端
+        // 按 intrinsic 展开（无需库符号）。returns_twice 调用点属性由
+        // InProcess 在 translate 后程序化补齐（LangRef 要求 call-site
+        // 属性，声明 passthrough 仅作冗余标注）。
+        out += "  func.func private @_setjmp(!llvm.ptr, !llvm.ptr) -> i32 "
+               "attributes {passthrough = [\"returns_twice\"]}\n";
+        out += "  func.func private @llvm.frameaddress.p0(i32) -> !llvm.ptr\n";
+    }
     // 内嵌 C 运行时 @sg_* 外部声明已由 LangToLLVM pass 模块级补插
     // （lang 层不出现运行时符号——AOT 步骤 2 分层纪律）。
     for (const auto& f : funcDefs_) out += f;

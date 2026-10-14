@@ -46,6 +46,7 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/InstrTypes.h" // CallBase（returns_twice 调用点 fixup 用）
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/FileSystem.h"
@@ -143,6 +144,19 @@ bool convertToLLVMInProcess(const std::string& mlirText,
                                : diagBuf;
         return false;
     }
+
+    // 阶段 3b：returns_twice 调用点 fixup。try/except 生成代码直调 CRT
+    // _setjmp（SgTry.jb 为首成员，句柄即 jmp_buf*）；LangRef 要求
+    // returns_twice 出现在调用点属性（clang 编译 C setjmp 时由前端发出，
+    // MLIR 的 passthrough 声明属性不回落到 call-site，须程序化补齐，
+    // 否则优化器可能跨 setjmp 重排/复用栈槽，破坏 longjmp 语义）。
+    for (llvm::Function& fn : *llvmModule)
+        for (llvm::BasicBlock& bb : fn)
+            for (llvm::Instruction& ins : bb)
+                if (auto* call = llvm::dyn_cast<llvm::CallBase>(&ins);
+                    call && call->getCalledFunction() &&
+                    call->getCalledFunction()->getName() == "_setjmp")
+                    call->addFnAttr(llvm::Attribute::ReturnsTwice);
 
     if (llvm::verifyModule(*llvmModule, &llvm::errs())) {
         diag = "LLVM IR 校验失败";

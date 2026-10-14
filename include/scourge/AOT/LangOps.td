@@ -9,9 +9,11 @@
 //  * 后续 LangToLinalg 等后端 pass 直接消费本层语义。
 //
 //  设计约定：
-//  * op 全集与 56 个 @sg_* 运行时符号一一对应（纯算术可降级 op——浮点
+//  * op 全集与 77 个 @sg_* 运行时符号一一对应（56 张量/标量/字符串/打印 +
+//    21 Result/List；纯算术可降级 op——浮点
 //    addf/subf/mulf/negf、全部比较、布尔 andi/ori/xori——保持上游 arith
-//    方言，不重复收编；控制流保持 cf 方言）。
+//    方言，不重复收编；控制流保持 cf 方言；try/except 蹦床为唯一 func.call
+//    直连运行时的控制流设施例外，声明由 MLIRGen assemble 补插）。
 //  * panic 上下文（fn/file/line）不作为操作数出现：降级时由 op 的
 //    Location（FileLineColLoc）与父 func 符号恢复。
 //  * 汇编形式：不声明 assemblyFormat，统一使用 MLIR 通用形式
@@ -123,3 +125,35 @@ def Lang_TensorReduceIOp  : Lang_Op<"tensor_reduce_i"> { let arguments = (ins I3
 def Lang_TensorReduceFOp  : Lang_Op<"tensor_reduce_f"> { let arguments = (ins I32:$kind, Lang_Ptr:$tensor, Lang_Ptr:$name); let results = (outs F64:$res); }
 def Lang_TensorTransposeOp : Lang_Op<"tensor_transpose"> { let arguments = (ins Lang_Ptr:$tensor); let results = (outs Lang_Ptr:$res); }
 def Lang_TensorReshapeOp  : Lang_Op<"tensor_reshape"> { let arguments = (ins Lang_Ptr:$tensor, I64:$ndim, Lang_Ptr:$dims); let results = (outs Lang_Ptr:$res); }
+
+// ============================================================================
+// Result（错误即值；SgResult 堆句柄为 !llvm.ptr）
+// 载荷按位编码：i64 原值 / f64 位型 memcpy / bool 0-1 / str 指针。
+// unwrap(缺省)：ok 取载荷、失败态取缺省（与 VM CallMethod 语义逐字一致）。
+// ============================================================================
+def Lang_ResultOkIOp     : Lang_Op<"result_ok_i"> { let arguments = (ins I64:$val); let results = (outs Lang_Ptr:$res); }
+def Lang_ResultOkFOp     : Lang_Op<"result_ok_f"> { let arguments = (ins F64:$val); let results = (outs Lang_Ptr:$res); }
+def Lang_ResultOkBOp     : Lang_Op<"result_ok_b"> { let arguments = (ins I1:$val); let results = (outs Lang_Ptr:$res); }
+def Lang_ResultOkSOp     : Lang_Op<"result_ok_s"> { let arguments = (ins Lang_Ptr:$val); let results = (outs Lang_Ptr:$res); }
+def Lang_ResultOkNOp     : Lang_Op<"result_ok_n"> { let arguments = (ins); let results = (outs Lang_Ptr:$res); }
+def Lang_ResultErrOp     : Lang_Op<"result_err"> { let arguments = (ins Lang_Ptr:$msg); let results = (outs Lang_Ptr:$res); }
+def Lang_ResultIsOkOp    : Lang_Op<"result_is_ok"> { let arguments = (ins Lang_Ptr:$self); let results = (outs I1:$res); }
+def Lang_ResultUnwrapIOp : Lang_Op<"result_unwrap_i"> { let arguments = (ins Lang_Ptr:$self, I64:$def); let results = (outs I64:$res); }
+def Lang_ResultUnwrapFOp : Lang_Op<"result_unwrap_f"> { let arguments = (ins Lang_Ptr:$self, F64:$def); let results = (outs F64:$res); }
+def Lang_ResultUnwrapBOp : Lang_Op<"result_unwrap_b"> { let arguments = (ins Lang_Ptr:$self, I1:$def); let results = (outs I1:$res); }
+def Lang_ResultUnwrapSOp : Lang_Op<"result_unwrap_s"> { let arguments = (ins Lang_Ptr:$self, Lang_Ptr:$def); let results = (outs Lang_Ptr:$res); }
+
+// ============================================================================
+// List（SgList 堆句柄；etag 0=i64 1=f64 2=str 3=bool）
+// 下标读取走 VM normIndex 语义（负下标归一 + 越界 panic），挂 panic 上下文。
+// ============================================================================
+def Lang_ListNewIOp  : Lang_Op<"list_new_i"> { let arguments = (ins I64:$count, Lang_Ptr:$elems); let results = (outs Lang_Ptr:$res); }
+def Lang_ListNewFOp  : Lang_Op<"list_new_f"> { let arguments = (ins I64:$count, Lang_Ptr:$elems); let results = (outs Lang_Ptr:$res); }
+def Lang_ListNewSOp  : Lang_Op<"list_new_s"> { let arguments = (ins I64:$count, Lang_Ptr:$elems); let results = (outs Lang_Ptr:$res); }
+def Lang_ListNewBOp  : Lang_Op<"list_new_b"> { let arguments = (ins I64:$count, Lang_Ptr:$elems); let results = (outs Lang_Ptr:$res); }
+def Lang_ListEmptyOp : Lang_Op<"list_empty"> { let arguments = (ins); let results = (outs Lang_Ptr:$res); }
+def Lang_ListLenOp   : Lang_Op<"list_len"> { let arguments = (ins Lang_Ptr:$list); let results = (outs I64:$res); }
+def Lang_ListGetIOp  : Lang_Op<"list_get_i"> { let arguments = (ins Lang_Ptr:$list, I64:$idx); let results = (outs I64:$res); }
+def Lang_ListGetFOp  : Lang_Op<"list_get_f"> { let arguments = (ins Lang_Ptr:$list, I64:$idx); let results = (outs F64:$res); }
+def Lang_ListGetBOp  : Lang_Op<"list_get_b"> { let arguments = (ins Lang_Ptr:$list, I64:$idx); let results = (outs I1:$res); }
+def Lang_ListGetSOp  : Lang_Op<"list_get_s"> { let arguments = (ins Lang_Ptr:$list, I64:$idx); let results = (outs Lang_Ptr:$res); }
