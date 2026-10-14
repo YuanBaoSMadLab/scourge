@@ -91,6 +91,86 @@ VK vkOfAnnName(const std::string& n) {
 }
 
 // ============================================================================
+// 算子注册表：运算符 → 各降级路径元数据（单一事实源）
+// ----------------------------------------------------------------------------
+//  三张表取代散在 genBinary / genBuiltinCall 里的三元选择链：
+//  * kArithOps：算术运算符 → 张量广播编码 tCode（与 C 运行时 sg_tiop/sg_tfop
+//    一致）、纯整数路径 lang op 与返回类型、浮点路径（fSym = lang op 走
+//    panic 兜底；nullptr = arith 直降，无 panic 上下文故无 opLoc）。
+//  * kCmpOps：比较运算符 → 三族 arith 谓词（s = 有符号整型，含 str_cmp 结果
+//    与混合提升路径；u = i1 无符号（bool 按数值比较）；f = 浮点 ordered）。
+//  * kUnOps：一元数学内建 → 张量逐元素编码 fnid（与 C 运行时 sg_unop 一致，
+//    fnid 0 = abs 保 dtype）与标量路径 lang op（iSym 仅 abs 注册——abs 双
+//    路径保 dtype，不提升不挂 opLoc；其余提升 f64 且挂 opLoc）。
+// ============================================================================
+struct OpInfo {
+    const char* op;      ///< 源码运算符
+    int tCode;           ///< 张量广播 op 编码
+    const char* intSym;  ///< 纯整数路径 lang op
+    const char* intRet;  ///< 该路径返回 MLIR 类型（i64/f64）
+    const char* fSym;    ///< 浮点路径 lang op；nullptr = arith 直降
+    const char* fArith;  ///< arith 直降助记符（fSym 为空时有效）
+};
+
+struct CmpInfo {
+    const char* op; ///< 源码运算符
+    const char* s;  ///< 有符号整型谓词
+    const char* u;  ///< i1 无符号谓词
+    const char* f;  ///< 浮点 ordered 谓词
+};
+
+struct UnInfo {
+    const char* name; ///< 内建名
+    int fnid;         ///< 张量逐元素 fn 编码
+    const char* uSym; ///< 标量浮点路径 lang op
+    const char* iSym; ///< 标量整数路径 lang op（仅 abs）
+};
+
+constexpr OpInfo kArithOps[] = {
+    {"+", 0, "lang.addi", "i64", nullptr, "arith.addf"},
+    {"-", 1, "lang.subi", "i64", nullptr, "arith.subf"},
+    {"*", 2, "lang.muli", "i64", nullptr, "arith.mulf"},
+    {"/", 3, "lang.divi", "f64", "lang.divf", nullptr},
+    {"//", 4, "lang.floordivi", "i64", "lang.floordivf", nullptr},
+    {"%", 5, "lang.modi", "i64", "lang.modf", nullptr},
+    {"**", 6, "lang.powi", "i64", "lang.powf", nullptr},
+};
+
+constexpr CmpInfo kCmpOps[] = {
+    {"==", "eq", "eq", "oeq"},
+    {"!=", "ne", "ne", "une"},
+    {"<", "slt", "ult", "olt"},
+    {"<=", "sle", "ule", "ole"},
+    {">", "sgt", "ugt", "ogt"},
+    {">=", "sge", "uge", "oge"},
+};
+
+constexpr UnInfo kUnOps[] = {
+    {"abs", 0, "lang.abs_f", "lang.abs_i"},
+    {"sqrt", 1, "lang.sqrt", nullptr},
+    {"exp", 2, "lang.exp", nullptr},
+    {"log", 3, "lang.log", nullptr},
+};
+
+const OpInfo* findArithOp(const std::string& op) {
+    for (const OpInfo& o : kArithOps)
+        if (op == o.op) return &o;
+    return nullptr;
+}
+
+const CmpInfo* findCmpOp(const std::string& op) {
+    for (const CmpInfo& c : kCmpOps)
+        if (op == c.op) return &c;
+    return nullptr;
+}
+
+const UnInfo* findUnOp(const std::string& name) {
+    for (const UnInfo& u : kUnOps)
+        if (name == u.name) return &u;
+    return nullptr;
+}
+
+// ============================================================================
 // 基础设施
 // ============================================================================
 
@@ -1126,9 +1206,8 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         unsupported(range, "'in' 仅支持 str 右操作数");
     }
 
-    // ---- 比较 ----
-    if (op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" ||
-        op == ">=") {
+    // ---- 比较（谓词查 kCmpOps 三族） ----
+    if (const CmpInfo* cop = findCmpOp(op)) {
         const bool eq = op == "==" || op == "!=";
         if (l.vk == VK::Tensor || r.vk == VK::Tensor)
             unsupported(range, "张量比较运算");
@@ -1141,52 +1220,28 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
             std::string s = fresh();
             emit(s + " = \"lang.str_cmp\"(" + l.ssa + ", " + r.ssa +
                  ") : (!llvm.ptr, !llvm.ptr) -> i64 " + opLoc());
-            std::string sign = op == "=="   ? "eq"
-                               : op == "!=" ? "ne"
-                               : op == "<"  ? "slt"
-                               : op == "<=" ? "sle"
-                               : op == ">"  ? "sgt"
-                                            : "sge";
             std::string b = fresh();
-            emit(b + " = arith.cmpi " + sign + ", " + s + ", " + zeroI64() +
+            emit(b + " = arith.cmpi " + cop->s + ", " + s + ", " + zeroI64() +
                  " : i64");
             return Value{VK::Bool, b};
         }
         if (l.vk == VK::Int && r.vk == VK::Int) {
-            const char* spred = op == "=="   ? "eq"
-                                : op == "!=" ? "ne"
-                                : op == "<"  ? "slt"
-                                : op == "<=" ? "sle"
-                                : op == ">"  ? "sgt"
-                                             : "sge";
             std::string b = fresh();
-            emit(b + " = arith.cmpi " + std::string(spred) + ", " + l.ssa +
-                 ", " + r.ssa + " : i64");
+            emit(b + " = arith.cmpi " + cop->s + ", " + l.ssa + ", " + r.ssa +
+                 " : i64");
             return Value{VK::Bool, b};
         }
         if (l.vk == VK::Bool && r.vk == VK::Bool) {
             // VM 按数值比较（asDouble）——0/1 的无符号整数比较等价。
-            const char* upred = op == "=="   ? "eq"
-                                : op == "!=" ? "ne"
-                                : op == "<"  ? "ult"
-                                : op == "<=" ? "ule"
-                                : op == ">"  ? "ugt"
-                                             : "uge";
             std::string b = fresh();
-            emit(b + " = arith.cmpi " + upred + ", " + l.ssa + ", " + r.ssa +
+            emit(b + " = arith.cmpi " + cop->u + ", " + l.ssa + ", " + r.ssa +
                  " : i1");
             return Value{VK::Bool, b};
         }
         // 数值混合（int/float）：提升 f64；Ne 用 une（NaN != NaN 与 VM 一致）。
         Value lf = promoteF64(l), rf = promoteF64(r);
-        const char* fpred = op == "=="   ? "oeq"
-                            : op == "!=" ? "une"
-                            : op == "<"  ? "olt"
-                            : op == "<=" ? "ole"
-                            : op == ">"  ? "ogt"
-                                         : "oge";
         std::string b = fresh();
-        emit(b + " = arith.cmpf " + fpred + ", " + lf.ssa + ", " + rf.ssa +
+        emit(b + " = arith.cmpf " + cop->f + ", " + lf.ssa + ", " + rf.ssa +
              " : f64");
         return Value{VK::Bool, b};
     }
@@ -1210,15 +1265,9 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
     }
 
     // ---- 张量运算（@ 与算术广播；语义与 VM tensorBinOp / tensorMatMul 一致） ----
-    // op 编码：0=+ 1=- 2=* 3=/ 4=// 5=% 6=**（与 C 运行时 sg_tiop/sg_tfop 一致）。
-    const int tOp = op == "+"    ? 0
-                    : op == "-"  ? 1
-                    : op == "*"  ? 2
-                    : op == "/"  ? 3
-                    : op == "//" ? 4
-                    : op == "%"  ? 5
-                    : op == "**" ? 6
-                                 : -1;
+    // op 编码查 kArithOps（与 C 运行时 sg_tiop/sg_tfop 一致）。
+    const OpInfo* aop = findArithOp(op);
+    const int tOp = aop ? aop->tCode : -1;
     if (op == "@" ||
         (tOp >= 0 && (l.vk == VK::Tensor || r.vk == VK::Tensor))) {
         if (op == "@") {
@@ -1302,25 +1351,13 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
                      t.tRank};
     }
 
-    // ---- 算术 ----
-    if (op == "+" || op == "-" || op == "*" || op == "/" || op == "//" ||
-        op == "%" || op == "**") {
+    // ---- 算术（kArithOps 注册表驱动） ----
+    if (aop) {
         if (!isNumVK(l.vk) || !isNumVK(r.vk))
             unsupported(range, "运算符 '" + op + "' 的操作数类型");
 
         if (l.vk != VK::Float && r.vk != VK::Float) {
             // ---- 纯整数路径 ----
-            struct IntHelper {
-                const char* sym;
-                const char* ret;
-            };
-            IntHelper h = op == "+"    ? IntHelper{"lang.addi", "i64"}
-                          : op == "-"  ? IntHelper{"lang.subi", "i64"}
-                          : op == "*"  ? IntHelper{"lang.muli", "i64"}
-                          : op == "/"  ? IntHelper{"lang.divi", "f64"}
-                          : op == "//" ? IntHelper{"lang.floordivi", "i64"}
-                          : op == "%"  ? IntHelper{"lang.modi", "i64"}
-                                       : IntHelper{"lang.powi", "i64"};
             if (op == "**") {
                 // 负指数结果为 float（结果类型依赖运行时符号）——AOT 要求
                 // 指数为非负整数字面量。
@@ -1330,35 +1367,20 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
                                 "整数幂 '**' 需要非负整数字面量指数");
             }
             std::string ssa = fresh();
-            emit(ssa + " = \"" + h.sym + "\"(" + l.ssa + ", " + r.ssa +
-                 ") : (i64, i64) -> " + h.ret + " " + opLoc());
-            return Value{op == "/" ? VK::Float : VK::Int, ssa};
+            emit(ssa + " = \"" + aop->intSym + "\"(" + l.ssa + ", " + r.ssa +
+                 ") : (i64, i64) -> " + aop->intRet + " " + opLoc());
+            return Value{aop->intRet[0] == 'f' ? VK::Float : VK::Int, ssa};
         }
 
-        // ---- 浮点路径 ----
+        // ---- 浮点路径：arith 直降或 lang op（promote 后 emit） ----
         Value lf = promoteF64(l), rf = promoteF64(r);
-        if (op == "+") {
-            std::string ssa = fresh();
-            emit(ssa + " = arith.addf " + lf.ssa + ", " + rf.ssa + " : f64");
-            return Value{VK::Float, ssa};
-        }
-        if (op == "-") {
-            std::string ssa = fresh();
-            emit(ssa + " = arith.subf " + lf.ssa + ", " + rf.ssa + " : f64");
-            return Value{VK::Float, ssa};
-        }
-        if (op == "*") {
-            std::string ssa = fresh();
-            emit(ssa + " = arith.mulf " + lf.ssa + ", " + rf.ssa + " : f64");
-            return Value{VK::Float, ssa};
-        }
-        const char* sym = op == "/"   ? "lang.divf"
-                          : op == "//" ? "lang.floordivf"
-                          : op == "%"  ? "lang.modf"
-                                       : "lang.powf";
         std::string ssa = fresh();
-        emit(ssa + " = \"" + sym + "\"(" + lf.ssa + ", " + rf.ssa +
-             ") : (f64, f64) -> f64 " + opLoc());
+        if (aop->fSym)
+            emit(ssa + " = \"" + aop->fSym + "\"(" + lf.ssa + ", " + rf.ssa +
+                 ") : (f64, f64) -> f64 " + opLoc());
+        else
+            emit(ssa + " = " + aop->fArith + " " + lf.ssa + ", " + rf.ssa +
+                 " : f64");
         return Value{VK::Float, ssa};
     }
 
@@ -1532,37 +1554,34 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         if (v.vk != VK::Int) unsupported(c.args[0]->range, "range() 参数必须是 int");
         return Value{VK::Range, v.ssa}; // 负数原样存（首轮即结束）
     }
-    if (name == "abs" || name == "sqrt" || name == "exp" || name == "log") {
+    // 一元数学内建（kUnOps 注册表驱动）
+    if (const UnInfo* uop = findUnOp(name)) {
         need(1);
         Value v = genExpr(*c.args[0]);
         if (v.vk == VK::Tensor) {
-            // 逐元素：fnid 0=abs 1=sqrt 2=exp 3=log；abs 保 dtype，其余恒 f64
-            const int fnid = name == "abs"   ? 0
-                             : name == "sqrt" ? 1
-                             : name == "exp"  ? 2
-                                              : 3;
+            // 逐元素：fnid 查表；fnid 0 = abs 保 dtype，其余恒 f64
             std::string ssa = fresh();
-            emit(ssa + " = \"lang.tensor_un\"(" + i32Const(fnid) + ", " +
+            emit(ssa + " = \"lang.tensor_un\"(" + i32Const(uop->fnid) + ", " +
                  v.ssa + ") : (i32, !llvm.ptr) -> !llvm.ptr " + opLoc());
-            return Value{VK::Tensor, ssa, fnid == 0 && v.tInt, v.tRank};
+            return Value{VK::Tensor, ssa, uop->fnid == 0 && v.tInt, v.tRank};
         }
         if (v.vk != VK::Int && v.vk != VK::Float)
             unsupported(c.args[0]->range, name + "() 仅支持数值");
-        if (name == "abs") {
+        if (uop->iSym) { // abs：双路径保 dtype，不提升不挂 opLoc
             std::string ssa = fresh();
             if (v.vk == VK::Int) {
-                emit(ssa + " = \"lang.abs_i\"(" + v.ssa + ") : (i64) -> i64");
+                emit(ssa + " = \"" + uop->iSym + "\"(" + v.ssa +
+                     ") : (i64) -> i64");
                 return Value{VK::Int, ssa};
             }
-            emit(ssa + " = \"lang.abs_f\"(" + v.ssa + ") : (f64) -> f64");
+            emit(ssa + " = \"" + uop->uSym + "\"(" + v.ssa + ") : (f64) -> f64");
             return Value{VK::Float, ssa};
         }
-        const char* sym = name == "sqrt" ? "lang.sqrt"
-                          : name == "exp" ? "lang.exp"
-                                          : "lang.log";
+        // sqrt/exp/log：提升 f64
         Value vf = promoteF64(v);
         std::string ssa = fresh();
-        emit(ssa + " = \"" + sym + "\"(" + vf.ssa + ") : (f64) -> f64 " + opLoc());
+        emit(ssa + " = \"" + uop->uSym + "\"(" + vf.ssa + ") : (f64) -> f64 " +
+             opLoc());
         return Value{VK::Float, ssa};
     }
     if (name == "sum") {
