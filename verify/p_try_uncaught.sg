@@ -1,0 +1,6 @@
+# p_try_uncaught.sg - uncaught panic propagates (exit 1 + stderr)
+def main() -> int:
+    print("before")
+    w = 1.0 / 0.0
+    print("after")
+    return 0

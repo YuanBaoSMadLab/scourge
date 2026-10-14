@@ -1,0 +1,13 @@
+# gpu_panic.sg — GPU 探针：GPU op 执行后 panic（三模 stderr 净字节一致 + 退出码 1）
+def main() -> int:
+    a = [[1.0, 2.0], [3.0, 4.0]]
+    b = [[0.5, 0.5], [0.5, 0.5]]
+    c = a * b
+    d = a + b
+    e = a @ b
+    print("pre_panic=" + str(sum(c) + sum(d) + sum(e)))
+    z = a / b
+    print("div_ok=" + str(z))
+    x = 1.0 / 0.0
+    print("unreachable=" + str(x))
+    return 0

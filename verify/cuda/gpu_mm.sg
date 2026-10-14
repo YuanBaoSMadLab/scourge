@@ -1,0 +1,21 @@
+# gpu_mm.sg — GPU 覆盖集探针：matmul（矩形/方形/向量/链式；int 与混合走 CPU）
+def main() -> int:
+    A = [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]]  # 3x4
+    B = [[0.5, -1.0], [1.5, 0.25], [-2.0, 2.0], [0.125, -0.5]]                 # 4x2
+    C = A @ B
+    print("mm_rect=" + str(C))
+    print("mm_chain=" + str(C @ transpose(C)))  # 3x2 @ 2x3（GPU 链）
+    W = [[1.0, 0.5], [-0.5, 2.0]]
+    X = [[2.0, 0.0], [1.0, 3.0]]
+    print("mm_sq=" + str(W @ X))
+    v = [[1.0], [2.0]]
+    print("mm_vec=" + str(W @ v))
+    # 与逐元素混合：A@B + A@B（两次 GPU matmul + GPU 加）
+    print("mm_ew=" + str(C + C))
+    # int matmul（CPU）
+    I2 = [[1, 2], [3, 4]]
+    I3 = [[5, 6], [7, 8]]
+    print("mm_int=" + str(I2 @ I3))
+    # 混合 int @ f64 → f64（CPU）
+    print("mm_mix=" + str(I2 @ W))
+    return 0

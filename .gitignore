@@ -20,3 +20,8 @@ include/mlir/
 *.mlir
 *.ll
 *.buildcap
+
+# verify/ 验证源级资产入库：探针 .sg、脚本 .ps1、驱动探针 .c/.cu、
+# kernel 源 .ptx 本就不被忽略；kernel 源 .ll 需反白名单（上方全局规则）。
+# 运行产物一律不得写入 verify/（脚本产物统一落 build-rel/verify）。
+!verify/**/*.ll

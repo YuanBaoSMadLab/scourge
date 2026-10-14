@@ -37,8 +37,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "scourge/AOT/LangOps.h"
 
-#include "TensorBridge.hpp"
-#include "GpuCover.hpp"
+#include "scourge/AOT/TensorBridge.hpp"
+#include "scourge/AOT/GpuCover.hpp"
 
 namespace scourge {
 namespace aot {

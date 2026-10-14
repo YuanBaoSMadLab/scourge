@@ -1,0 +1,10 @@
+# p_result.sg - Result ok/err methods (dual-mode probe)
+def main() -> int:
+    r: Result[int, str] = ok(42)
+    e: Result[int, str] = err("bad")
+    print(r.is_ok())
+    print(r.unwrap(0))
+    print(e.is_ok())
+    print(e.unwrap_or(-1))
+    print(str(r.unwrap(0)))
+    return 0

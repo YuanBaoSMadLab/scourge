@@ -1,0 +1,14 @@
+# p_try_nested.sg - nested try/except (dual-mode probe)
+def main() -> int:
+    try:
+        try:
+            y = 1.0 / 0.0
+            print("unreachable-inner")
+        except:
+            print("inner")
+        z = 2.0 / 0.0
+        print("unreachable-outer")
+    except:
+        print("outer")
+    print("done")
+    return 0

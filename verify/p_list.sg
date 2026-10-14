@@ -1,0 +1,13 @@
+# p_list.sg - List literal, len, index, for-in (dual-mode probe)
+def main() -> int:
+    xs: List[str] = ["a", "b", "c"]
+    print(len(xs))
+    print(xs[1])
+    acc = ""
+    for s in xs:
+        acc = acc + s
+    print(acc)
+    ys: List[str] = ["x"]
+    print(len(ys))
+    print(ys[0])
+    return 0

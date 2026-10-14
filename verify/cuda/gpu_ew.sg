@@ -1,0 +1,45 @@
+# gpu_ew.sg — GPU 覆盖集探针：逐元素 tt/ts/st 全 kind（+ - * 走 GPU，/ // % ** 与 int/混合走 CPU）
+def main() -> int:
+    a = [[1.25, -2.5, 3.125], [0.75, -1.5, 2.0]]
+    b = [[0.5, 2.0, -1.25], [1.5, -0.75, 0.125]]
+
+    # tt kind 0-2（GPU 覆盖）
+    print("tt_add=" + str(a + b))
+    print("tt_sub=" + str(a - b))
+    print("tt_mul=" + str(a * b))
+    print("tt_chain=" + str(a * 2.0 + b - 0.5))
+
+    # tt kind 3-6（CPU：'/' 恒 f64、'//'、'%'、'**'）
+    print("tt_div=" + str(a / b))
+    c = [[2.0, 4.0, 8.0], [16.0, 32.0, 64.0]]
+    print("tt_floordiv=" + str(c // c))
+    print("tt_mod=" + str(c % [[3.0, 3.0, 3.0], [3.0, 3.0, 3.0]]))
+    e = [[1.5, 2.0, 2.5], [3.0, 0.5, 1.25]]
+    print("tt_pow=" + str(e ** [[2.0, 2.0, 2.0], [2.0, 2.0, 2.0]]))
+
+    # int tt（CPU）
+    ti = [[2, 4, 6], [8, 16, 32]]
+    tj = [[1, 2, 3], [4, 8, 16]]
+    print("ti_add=" + str(ti + tj))
+    print("ti_mul=" + str(ti * tj))
+    print("ti_div=" + str(ti / tj))
+    print("ti_floordiv=" + str(ti // tj))
+    print("ti_mod=" + str(ti % tj))
+    print("ti_pow=" + str(ti ** tj))
+
+    # ts（右侧标量广播；f64 GPU / int、混合 CPU）
+    print("ts_mul=" + str(a * 2.0))
+    print("ts_add=" + str(a + 0.25))
+    print("ts_sub=" + str(a - 1.5))
+    print("ts_int=" + str(ti * 3))
+    print("ts_mix=" + str(ti * 2.5))
+
+    # st（左侧标量广播；f64 GPU / int CPU）
+    print("st_mul=" + str(2.0 * a))
+    print("st_sub=" + str(10.0 - a))
+    print("st_div=" + str(9.0 / a))
+    print("st_int=" + str(3 * ti))
+
+    # 直接打印张量（print_tensor 通道）
+    print(a * b)
+    return 0

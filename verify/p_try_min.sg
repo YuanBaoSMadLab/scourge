@@ -1,0 +1,9 @@
+# p_try_min.sg - minimal try/except capture (dual-mode probe)
+def main() -> int:
+    try:
+        x = 1.0 / 0.0
+        print("unreachable")
+    except:
+        print("caught")
+    print("after")
+    return 0

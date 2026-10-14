@@ -41,7 +41,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "scourge/AOT/LangOps.h"
 
-#include "GpuCover.hpp"
+#include "scourge/AOT/GpuCover.hpp"
 
 namespace scourge {
 namespace aot {

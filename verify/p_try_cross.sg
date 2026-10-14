@@ -1,0 +1,14 @@
+# p_try_cross.sg - break/continue crossing try (dual-mode probe)
+def main() -> int:
+    total = 0
+    for i in range(6):
+        try:
+            if i == 2:
+                continue
+            if i == 5:
+                break
+            total = total + i
+        except:
+            print("never")
+    print(total)
+    return 0
