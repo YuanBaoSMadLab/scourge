@@ -636,18 +636,23 @@ void Compiler::compileStmt(const Stmt& s) {
     case Stmt::Kind::For: {
         auto& st = static_cast<const For&>(s);
         // tmp 迭代源 + counter 两槽；循环变量单独一槽。
+        // N2 修复：iter/counter 为循环内部状态，不进名字映射——嵌套同名
+        // 循环各自持有独立槽，内层不再覆写外层迭代器（否则外层回边读到
+        // 已耗尽的内层迭代器而静默提前终止）。var 槽仍按名复用：与 Python
+        // 一致，外层每次推进由 ForNext 后的 StoreLocal 重新赋值。
+        auto freshSlot = [&]() { return locals_->nlocals++; };
+        compileExpr(*st.iter);
+        uint32_t tmp = freshSlot();
+        emit(Op::StoreLocal, tmp);
+        uint32_t counter = freshSlot();
+        emit(Op::LoadConst, addConst(Value::makeInt(0)));
+        emit(Op::StoreLocal, counter);
         auto slotOf = [&](const std::string& name) {
             auto it = locals_->slots.find(name);
             if (it == locals_->slots.end())
                 it = locals_->slots.emplace(name, locals_->nlocals++).first;
             return it->second;
         };
-        compileExpr(*st.iter);
-        uint32_t tmp = slotOf("<iter>" + st.var);
-        emit(Op::StoreLocal, tmp);
-        uint32_t counter = slotOf("<i>" + st.var);
-        emit(Op::LoadConst, addConst(Value::makeInt(0)));
-        emit(Op::StoreLocal, counter);
         uint32_t var = slotOf(st.var);
 
         uint32_t top = here();
