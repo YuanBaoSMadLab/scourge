@@ -54,6 +54,13 @@ const char kRuntimeC[] = R"RT(/* Scourge AOT 运行时（scourge build 内嵌生
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+/* 控制台编码初始化（__attribute__((constructor)) 先于 main 执行）：
+ * print 系列输出 UTF-8 字节，将输出代码页切至 65001，中文等多字节文本
+ * 在任意区域设置的控制台原样显示；重定向到管道/文件时写原始字节流，
+ * 不受代码页影响。 */
+__attribute__((constructor)) static void sg_console_init(void) {
+    SetConsoleOutputCP(CP_UTF8);
+}
 #endif
 
 /* ---- try/except 蹦床 ----

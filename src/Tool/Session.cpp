@@ -5,6 +5,8 @@
 //  从 main.cpp 提取：会话为多命令共享基础设施（check/interface/run/REPL），
 //  文件划分遵循"一模块一职责"。加载阶段串行保证 FileId 确定性；
 //  检查阶段分层并行 + 主线程定序并入，输出与并发度无关。
+//  源码读取统一走 readFileNormalized：编码自适应（BOM/UTF-8/ANSI）+
+//  换行归一化，任意主机/编辑器保存的源文件零配置可编译。
 // ============================================================================
 #include "scourge/Tool/Session.hpp"
 
@@ -14,6 +16,12 @@
 #include <thread>
 #include <utility>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include "scourge/Interface/SgiGen.hpp"
 #include "scourge/Syntax/Lexer.hpp"
 #include "scourge/Syntax/Parser.hpp"
@@ -22,10 +30,121 @@ namespace scourge {
 
 namespace {
 
+#ifdef _WIN32
 // ----------------------------------------------------------------------------
-// 源码读取：统一换行符（词法器只处理 \n），保持位置确定性。
-// 一次性按文件长度读入（避免 ostringstream 对小文件的中间缓冲拷贝）；
-// 换行归一化按 \r 批量切段拼接，无 \r 时零拷贝直接采用原文。
+// 源码编码自适应（零配置，面向全球机型）。裁决顺序：
+//   1. BOM 显式声明（UTF-8 / UTF-16 LE / UTF-16 BE）→ 按声明解码；
+//   2. 无 BOM → 严格 UTF-8 校验（MB_ERR_INVALID_CHARS），有效即原样采用
+//      （生态事实标准，不做无谓转码，行号/列号按字节保持稳定）；
+//   3. 校验失败 → 按系统 ANSI 代码页（GBK/Shift-JIS/Latin-1 等）重解为
+//      UTF-8，兼容记事本"ANSI"保存；
+//   4. 两者皆败 → 原样保留，交由词法器按字节报错定位。
+// 顺序纪律：必须先转码再归一化换行（UTF-16 的 \r\n 是 0D 00 0A 00）。
+// ----------------------------------------------------------------------------
+void u16ToUtf8(const std::wstring& s, std::string& out) {
+    out.clear();
+    out.reserve(s.size() * 3);
+    for (size_t i = 0; i < s.size(); ++i) {
+        unsigned cp = static_cast<unsigned short>(s[i]);
+        if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < s.size() &&
+            static_cast<unsigned short>(s[i + 1]) >= 0xDC00 &&
+            static_cast<unsigned short>(s[i + 1]) <= 0xDFFF) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) +
+                 (static_cast<unsigned short>(s[i + 1]) - 0xDC00);
+            ++i; // 高低位代理对合成增补平面码点
+        } else if (cp >= 0xD800 && cp <= 0xDFFF) {
+            cp = 0xFFFD; // 孤立代理 → 替换字符
+        }
+        if (cp < 0x80) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp < 0x800) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
+}
+
+/// 上述裁决的入口。超大文件跳过检测（Win32 API 入参为 int）。
+void decodeSourceBytes(const std::string& raw, std::string& out) {
+    if (raw.size() > 0x7FFFFFF0u) {
+        out = raw;
+        return;
+    }
+    // BOM 显式识别。
+    if (raw.size() >= 3 && static_cast<unsigned char>(raw[0]) == 0xEF &&
+        static_cast<unsigned char>(raw[1]) == 0xBB &&
+        static_cast<unsigned char>(raw[2]) == 0xBF) {
+        out = raw.substr(3);
+        return;
+    }
+    if (raw.size() >= 2 && static_cast<unsigned char>(raw[0]) == 0xFF &&
+        static_cast<unsigned char>(raw[1]) == 0xFE) {
+        std::wstring w;
+        w.reserve(raw.size() / 2);
+        for (size_t i = 2; i + 1 < raw.size(); i += 2)
+            w.push_back(static_cast<wchar_t>(
+                static_cast<unsigned char>(raw[i]) |
+                (static_cast<unsigned char>(raw[i + 1]) << 8)));
+        if ((raw.size() - 2) % 2 != 0) w.push_back(L'\uFFFD'); // 尾部半码元
+        u16ToUtf8(w, out);
+        return;
+    }
+    if (raw.size() >= 2 && static_cast<unsigned char>(raw[0]) == 0xFE &&
+        static_cast<unsigned char>(raw[1]) == 0xFF) {
+        std::wstring w;
+        w.reserve(raw.size() / 2);
+        for (size_t i = 2; i + 1 < raw.size(); i += 2)
+            w.push_back(static_cast<wchar_t>(
+                (static_cast<unsigned char>(raw[i]) << 8) |
+                static_cast<unsigned char>(raw[i + 1])));
+        if ((raw.size() - 2) % 2 != 0) w.push_back(L'\uFFFD');
+        u16ToUtf8(w, out);
+        return;
+    }
+
+    // 无 BOM：严格 UTF-8 校验，有效即原样（常见快路径）。
+    if (!raw.empty()) {
+        const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                          raw.data(),
+                                          static_cast<int>(raw.size()),
+                                          nullptr, 0);
+        if (n > 0) {
+            out = raw;
+            return;
+        }
+        // ANSI 代码页 → UTF-16 → UTF-8。
+        const UINT acp = GetACP();
+        const int wlen = MultiByteToWideChar(acp, 0, raw.data(),
+                                             static_cast<int>(raw.size()),
+                                             nullptr, 0);
+        if (wlen > 0) {
+            std::wstring w(static_cast<size_t>(wlen), L'\0');
+            if (MultiByteToWideChar(acp, 0, raw.data(),
+                                    static_cast<int>(raw.size()), &w[0],
+                                    wlen) == wlen) {
+                u16ToUtf8(w, out);
+                return;
+            }
+        }
+    }
+    out = raw;
+}
+#endif // _WIN32
+
+// ----------------------------------------------------------------------------
+// 源码读取：编码自适应（Windows，见 decodeSourceBytes）+ 统一换行符
+//（词法器只处理 \n），保持位置确定性。一次性按文件长度读入（避免
+// ostringstream 对小文件的中间缓冲拷贝）；换行归一化按 \r 批量切段拼接，
+// 无 \r 时零拷贝直接采用原文。
 // ----------------------------------------------------------------------------
 bool readFileNormalized(const std::filesystem::path& p, std::string& out) {
     std::ifstream in(p, std::ios::binary);
@@ -40,23 +159,30 @@ bool readFileNormalized(const std::filesystem::path& p, std::string& out) {
     if (size > 0 && !in.read(raw.data(), size)) return false;
     if (size > 0) raw.resize(static_cast<size_t>(in.gcount()));
 
+#ifdef _WIN32
+    std::string text;
+    decodeSourceBytes(raw, text);
+#else
+    std::string text = std::move(raw);
+#endif
+
     // \r\n 与孤立 \r 均归一为 \n；无 \r 直接移出（常见快路径）。
-    if (raw.find('\r') == std::string::npos) {
-        out = std::move(raw);
+    if (text.find('\r') == std::string::npos) {
+        out = std::move(text);
         return true;
     }
     out.clear();
-    out.reserve(raw.size());
+    out.reserve(text.size());
     size_t i = 0;
     for (;;) {
-        const size_t r = raw.find('\r', i);
+        const size_t r = text.find('\r', i);
         if (r == std::string::npos) {
-            out.append(raw, i, std::string::npos);
+            out.append(text, i, std::string::npos);
             break;
         }
-        out.append(raw, i, r - i);
+        out.append(text, i, r - i);
         out.push_back('\n');
-        i = (r + 1 < raw.size() && raw[r + 1] == '\n') ? r + 2 : r + 1;
+        i = (r + 1 < text.size() && text[r + 1] == '\n') ? r + 2 : r + 1;
     }
     return true;
 }
