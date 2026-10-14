@@ -59,7 +59,7 @@ target_include_directories(scourge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 # ---------------------------------------------------------------------------
 add_executable(scourge src/Tool/main.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp
     src/Tool/Builder.cpp src/AOT/InProcess.cpp src/AOT/LangDialect.cpp
-    src/AOT/LangToLLVM.cpp src/AOT/LangToLinalg.cpp)
+    src/AOT/LangToAffine.cpp src/AOT/LangToLLVM.cpp src/AOT/LangToLinalg.cpp)
 target_link_libraries(scourge PRIVATE scourge_core)
 
 # ---- 进程内 MLIR/LLVM（build 命令阶段 2+3 内联，摆脱 mlir-opt/mlir-translate）----
@@ -124,8 +124,8 @@ target_include_directories(scourge PRIVATE "${SCOURGE_LANG_GEN}")
 target_link_libraries(scourge PRIVATE
     MLIRIR MLIRParser MLIRPass MLIRTransformUtils
     MLIRFuncDialect MLIRArithDialect MLIRControlFlowDialect MLIRLLVMDialect
-    MLIRLinalgDialect MLIRMemRefDialect MLIRSCFDialect
-    MLIRLinalgTransforms MLIRSCFToControlFlow
+    MLIRLinalgDialect MLIRMemRefDialect MLIRSCFDialect MLIRAffineDialect
+    MLIRLinalgTransforms MLIRSCFToControlFlow MLIRAffineToStandard
     MLIRMemRefToLLVM MLIRIndexToLLVM
     MLIRConvertToLLVMPass MLIRTargetLLVM
     MLIRLLVMToLLVMIRTranslation MLIRBuiltinToLLVMIRTranslation

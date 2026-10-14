@@ -25,10 +25,13 @@
 #include <string>
 #include <utility>
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h" // v23 快照无独立 Affine.h；方言声明随此头提供
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
@@ -322,12 +325,20 @@ public:
         //    一致——全量插入，未用符号无副作用）。
         declareRuntimeExterns(mod, ctx);
 
-        // 2) 全量转换：lang 非法，builtin/func/arith/cf/llvm 合法。
+        // 2) 全量转换：lang 非法；builtin/func/arith/cf/llvm/memref/linalg
+        //    /affine 合法——memref/linalg/affine 是前序降级 pass（LangToAffine/
+        //    LangToLinalg）的产物，留给管线后段（linalg-to-loops / lower-affine
+        //    / one-shot convert-to-llvm）消费。注意：未注册的 op 不算 legal，
+        //    full conversion 会对它硬失败（"failed to legalize"），必须显式
+        //    列出全部 passthrough 方言。
         mlir::ConversionTarget target(*ctx);
         target.addLegalDialect<mlir::BuiltinDialect, mlir::func::FuncDialect,
                                mlir::arith::ArithDialect,
                                mlir::cf::ControlFlowDialect,
-                               mlir::LLVM::LLVMDialect>();
+                               mlir::LLVM::LLVMDialect,
+                               mlir::memref::MemRefDialect,
+                               mlir::linalg::LinalgDialect,
+                               mlir::affine::AffineDialect>();
         target.addIllegalDialect<::scourge::aot::lang::LangDialect>();
 
         mlir::RewritePatternSet patterns(ctx);
