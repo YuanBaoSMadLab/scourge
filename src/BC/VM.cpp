@@ -363,6 +363,13 @@ void VM::callFunc(int fidx, uint32_t argc) {
         return;
     }
 
+    // @extern（H 专项）：动态库调用，实参从调用栈弹出（实现分块 VMExtern.cpp）。
+    if (fn.isExtern) {
+        if (frames_.empty()) panicHere("VM 内部错误：extern 函数无调用帧");
+        doExtern(fn, argc);
+        return;
+    }
+
     if (argc < fn.requiredArgs || argc > fn.paramCount)
         panicHere("函数 '" + displayName(fn) + "' 实参个数不符（需要 " +
                   std::to_string(fn.requiredArgs) + "~" +

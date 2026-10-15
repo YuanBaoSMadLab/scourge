@@ -29,6 +29,8 @@ struct VMOptions {
     /// 入口函数名（默认 main）。REPL 以 __repl__ 包装求值，
     /// 避免与用户在会话中定义的 main 冲突。
     std::string entryFunc = "main";
+    /// args() 内建返回的脚本参数（不含程序名；0.9.4 H 专项）。
+    std::vector<std::string> args;
 };
 
 class VM {
@@ -81,6 +83,16 @@ private:
     Value doUnaryOp(Unary op, const Value& v);
     int64_t normIndex(int64_t idx, int64_t len, const char* what);
     Value repeatStr(const std::string& s, int64_t n);
+
+    // ---- 系统编程（H 专项；实现分块在 VMSys.cpp） ------------------------------
+    /// args/env/时间日期/进程/信号内建执行（doBuiltin 白名单分派；panic 消息
+    /// 与 AOT BuilderRTSys.hpp 的 sg_* 逐字一致）。
+    void sysBuiltin(const std::string& n, std::vector<Value>& a);
+
+    // ---- @extern 动态库调用（H 专项；实现分块在 VMExtern.cpp） -----------------
+    /// MS x64 机器码 thunk 调用：实参从调用栈弹出（Value 自描述类型），
+    /// 返回按 FuncBC.externRet 读回；panic 消息与 BuilderRTSys.hpp 逐字一致。
+    void doExtern(const FuncBC& fn, uint32_t argc);
 
     // ---- 张量（P1 执行路径；panic 语义同样集中在此） ----------------------------
     /// 逐元素运算（同形张量）与标量广播（张量 ∘ 数值标量）。

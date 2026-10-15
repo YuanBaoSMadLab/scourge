@@ -10,6 +10,8 @@
 //  成功态按 payloadKind 编码载荷、失败态仅携带错误信息。
 //  v2：新增 Tensor 常量（dtype + 形状 + 元素）与 MatMul 指令、
 //  LoadIndex/StoreIndex 的 b=下标个数语义（P1 张量执行）。
+//  v5：FuncBC 新增 @extern 三元组（kFlagExtern + externDll + externRet，
+//  0.9.4 H 专项——旧格式函数无 extern，缺省字段语义安全）。
 // ============================================================================
 #include "scourge/BC/Serialize.hpp"
 
@@ -21,12 +23,13 @@ namespace bc {
 namespace {
 
 constexpr char kMagic[4] = {'S', 'G', 'B', 'C'};
-constexpr uint32_t kFormatVersion = 2;
+constexpr uint32_t kFormatVersion = 5;
 constexpr uint8_t kOpCount = static_cast<uint8_t>(Op::NewTensor) + 1;
 
 constexpr uint8_t kFlagBuiltin = 1;
 constexpr uint8_t kFlagTopLevel = 2;
 constexpr uint8_t kFlagAsync = 4;
+constexpr uint8_t kFlagExtern = 8;
 
 // ----------------------------------------------------------------------------
 // 字节流写端（小端，逐字段显式布局）
@@ -306,8 +309,13 @@ void encodeFunc(Writer& w, const FuncBC& f) {
     if (f.isBuiltin) flags |= kFlagBuiltin;
     if (f.isTopLevel) flags |= kFlagTopLevel;
     if (f.isAsync) flags |= kFlagAsync;
+    if (f.isExtern) flags |= kFlagExtern;
     w.u8(flags);
     w.str(f.builtinName);
+    if (f.isExtern) {
+        w.str(f.externDll);
+        w.u8(static_cast<uint8_t>(f.externRet));
+    }
 }
 
 bool decodeFunc(Reader& r, FuncBC& f) {
@@ -365,7 +373,13 @@ bool decodeFunc(Reader& r, FuncBC& f) {
     f.isBuiltin = (flags & kFlagBuiltin) != 0;
     f.isTopLevel = (flags & kFlagTopLevel) != 0;
     f.isAsync = (flags & kFlagAsync) != 0;
-    return r.str(f.builtinName);
+    if (!r.str(f.builtinName)) return false;
+    if (!(flags & kFlagExtern)) return true;
+    f.isExtern = true;
+    uint8_t ret = 0;
+    if (!r.str(f.externDll) || !r.u8(ret)) return false;
+    f.externRet = static_cast<char>(ret);
+    return true;
 }
 
 } // namespace

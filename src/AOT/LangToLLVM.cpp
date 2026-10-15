@@ -552,6 +552,79 @@ private:
     mutable PanicCtxCache ctxCache_;
 };
 
+// ============================================================================
+// 降级 pattern：lang.extern_call → sg_extern_resolve + LLVM 间接调用
+// ----------------------------------------------------------------------------
+// @extern 动态库调用（0.9.4 H 专项）。MS x64 ABI 的 shadow space/寄存器
+// 分配/对齐交给 LLVM 后端；解析失败/符号缺失 panic 语义在 sg_extern_resolve
+// （消息与 VMExtern.cpp 逐字一致，上下文 fn/file/line 由 Location 恢复）；
+// str 返回经 sg_extern_wrap_str 深拷贝（外部串生命周期不归运行时管理）。
+// 附加约定（与 VM thunk 一致）：int 形参传 i64（32 位形参读低 32 位兼容）；
+// float 仅 double 形参；bool 传 i1；32 位 int 返回读全 RAX 安全（x86-64
+// 写 EAX 自动零扩展）。
+// ============================================================================
+class LangExternCallRewrite : public mlir::ConversionPattern {
+public:
+    explicit LangExternCallRewrite(mlir::MLIRContext* ctx)
+        : mlir::ConversionPattern(mlir::Pattern::MatchAnyOpTypeTag{}, 5, ctx) {}
+
+    mlir::LogicalResult
+    matchAndRewrite(mlir::Operation* op, mlir::ArrayRef<mlir::Value> operands,
+                    mlir::ConversionPatternRewriter& rewriter) const override {
+        if (op->getName().getStringRef() != "lang.extern_call")
+            return mlir::failure(); // 让位其他 pattern
+        if (operands.size() < 2) {
+            op->emitError("lang.extern_call 缺少 dll/sym 操作数");
+            return mlir::failure();
+        }
+        mlir::Location loc = op->getLoc();
+        mlir::MLIRContext* ctx = op->getContext();
+        mlir::Type ptrTy = mlir::LLVM::LLVMPointerType::get(ctx);
+
+        // 解析（带 panic 上下文）：sg_extern_resolve(dll, sym, fn, file, line)
+        mlir::Value fnVal, fileVal, lineVal;
+        if (failed(ensurePanicCtx(op, rewriter, ctxCache_, fnVal, fileVal,
+                                  lineVal)))
+            return mlir::failure();
+        auto resolve = rewriter.create<mlir::func::CallOp>(
+            loc, "sg_extern_resolve", mlir::TypeRange{ptrTy},
+            mlir::ValueRange{operands[0], operands[1], fnVal, fileVal,
+                             lineVal});
+
+        // 间接调用：函数指针为首操作数。CallOp 带 AttrSizedOperandSegments
+        // （callee_operands / op_bundle_operands 两段），须显式给段大小——
+        // 泛型 builder 不会自动分段。
+        mlir::SmallVector<mlir::Value> callArgs(operands.begin() + 2,
+                                                operands.end());
+        callArgs.insert(callArgs.begin(), resolve.getResult(0));
+        mlir::SmallVector<mlir::Type> retTys(op->getResultTypes());
+        auto call = rewriter.create<mlir::LLVM::CallOp>(
+            loc, mlir::TypeRange(retTys), callArgs,
+            mlir::ArrayRef<mlir::NamedAttribute>{});
+        // AttrSizedOperandSegments：泛型 build 不分段，补 callee_operands
+        // 段大小（op_bundle_operands 恒 0）；验证在转换完成后进行。
+        call->setAttr("operandSegmentSizes",
+                      rewriter.getDenseI32ArrayAttr(
+                          {static_cast<int32_t>(callArgs.size()), 0}));
+        call->setAttr("op_bundle_sizes", rewriter.getDenseI32ArrayAttr({}));
+
+        // str 返回（ptr 结果）：经 sg_extern_wrap_str 深拷贝。
+        if (!retTys.empty() &&
+            mlir::isa<mlir::LLVM::LLVMPointerType>(retTys[0])) {
+            auto wrapped = rewriter.create<mlir::func::CallOp>(
+                loc, "sg_extern_wrap_str", mlir::TypeRange{ptrTy},
+                mlir::ValueRange{call.getResult()});
+            rewriter.replaceOp(op, wrapped.getResults());
+            return mlir::success();
+        }
+        rewriter.replaceOp(op, call.getResults());
+        return mlir::success();
+    }
+
+private:
+    mutable PanicCtxCache ctxCache_;
+};
+
 } // namespace
 
 // ============================================================================
@@ -602,8 +675,11 @@ public:
 
         mlir::RewritePatternSet patterns(ctx);
         // 标量 int add/sub/mul/neg 优先 IR 内联（benefit 10，非目标 op 返回
-        // failure 自动让位）；其余 lang op 走 @sg_* 运行时调用。
+        // failure 自动让位）；@extern 间接调用次之（benefit 5，抢在查表
+        // LangCallRewrite 之前——kLowerings 无此 op，落到它会硬失败）；
+        // 其余 lang op 走 @sg_* 运行时调用。
         patterns.add<LangInlineIntRewrite>(ctx);
+        patterns.add<LangExternCallRewrite>(ctx);
         patterns.add<LangCallRewrite>(ctx, gpuMode_);
         if (mlir::failed(
                 mlir::applyFullConversion(mod, target, std::move(patterns))))
@@ -620,6 +696,26 @@ private:
         mlir::OpBuilder::InsertionGuard guard(b);
         b.setInsertionPointToStart(mod.getBody());
         for (const OpLower& l : kLowerings) {
+            mlir::SmallVector<mlir::Type> argTys;
+            for (const char* c = l.externArgs; *c; ++c)
+                argTys.push_back(typeForCode(ctx, *c));
+            mlir::SmallVector<mlir::Type> retTys;
+            if (l.ret != 'v') retTys.push_back(typeForCode(ctx, l.ret));
+            auto fn = b.create<mlir::func::FuncOp>(
+                loc, l.sg, mlir::FunctionType::get(ctx, argTys, retTys));
+            fn.setVisibility(mlir::SymbolTable::Visibility::Private);
+        }
+        // @extern 支撑运行时（H 专项）：解析器 ABI (dll, sym, fn, file, line)
+        // ——panic 上下文由 LangExternCallRewrite 手动 ensurePanicCtx 后显式
+        // 传入（hasCtx=false），失败消息与 VMExtern.cpp 逐字一致；wrap_str
+        // 深拷贝外部返回串。
+        static constexpr OpLower kExternSupport[] = {
+            {"lang.extern_resolve", "sg_extern_resolve", "pp", "ppppi", 'p',
+             false},
+            {"lang.extern_wrap_str", "sg_extern_wrap_str", "p", "p", 'p',
+             false},
+        };
+        for (const OpLower& l : kExternSupport) {
             mlir::SmallVector<mlir::Type> argTys;
             for (const char* c = l.externArgs; *c; ++c)
                 argTys.push_back(typeForCode(ctx, *c));

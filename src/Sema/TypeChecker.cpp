@@ -109,6 +109,37 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
             } else {
                 sig.ret = resolveTypeExpr(*f.retType);
             }
+            // @extern（0.9.4 H 专项）：签名限定——返回类型必须显式注解，
+            // 参数/返回仅标量域（int/float/bool/str，返回可 none），拒绝
+            // 缺省参数；函数体由外部动态库提供（双模后端均不发射）。
+            bool isExtern = false;
+            for (const auto& d : f.decorators) isExtern |= (d.name == "extern");
+            if (isExtern) {
+                sig.isExtern = true;
+                if (!f.retType)
+                    diag_.error(Errc::E2002_CannotInfer, file_, f.nameRange,
+                                "@extern 函数返回类型必须显式注解");
+                auto scalarOk = [](Type::Kind k) {
+                    return k == Type::Kind::Int || k == Type::Kind::Float ||
+                           k == Type::Kind::Bool || k == Type::Kind::Str;
+                };
+                for (size_t k = 0; k < sig.params.size(); ++k) {
+                    if (!scalarOk(sig.params[k]->kind))
+                        diag_.error(
+                            Errc::E1007_UnsupportedFeature, file_,
+                            f.params[k].range,
+                            "@extern 参数类型仅支持 int/float/bool/str");
+                }
+                if (sig.ret && !scalarOk(sig.ret->kind) &&
+                    sig.ret->kind != Type::Kind::None)
+                    diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                f.retType->range,
+                                "@extern 返回类型仅支持 int/float/bool/str/none");
+                if (sig.requiredArgs != sig.params.size())
+                    diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                f.nameRange,
+                                "@extern 函数参数不支持缺省值");
+            }
             for (const auto& c : f.contracts)
                 sig.contracts.push_back({c.kind, c.expr.get()});
             localFuncs_[f.name] = std::move(sig);

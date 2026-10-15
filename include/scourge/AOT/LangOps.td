@@ -108,6 +108,38 @@ def Lang_TruncOp : Lang_Op<"trunc"> { let arguments = (ins F64:$val); let result
 def Lang_RandomOp : Lang_Op<"random"> { let arguments = (ins); let results = (outs F64:$res); }
 def Lang_SeedOp   : Lang_Op<"seed">   { let arguments = (ins I64:$val); let results = (outs); }
 
+// ============================================================================
+// 系统编程内建（0.9.4 H 专项）：命令行参数/环境变量/时间日期/进程/信号。
+// panic 语义下沉 sg_* 运行时（消息与 VMSys.cpp 逐字一致，双模差分由 verify
+// 探针锁定）：localtime/gmtime 转换失败、spawn_wait 启动失败挂上下文；
+// 其余纯查询不 panic。日历列表 = [年,月,日,时,分,秒,星期0=周日,年积日(1起)]。
+// ============================================================================
+def Lang_ArgsOp        : Lang_Op<"args">         { let arguments = (ins); let results = (outs Lang_Ptr:$res); }
+def Lang_EnvOp         : Lang_Op<"env">          { let arguments = (ins Lang_Ptr:$name); let results = (outs Lang_Ptr:$res); }
+def Lang_HasEnvOp      : Lang_Op<"has_env">      { let arguments = (ins Lang_Ptr:$name); let results = (outs I1:$res); }
+def Lang_SetEnvOp      : Lang_Op<"set_env">      { let arguments = (ins Lang_Ptr:$name, Lang_Ptr:$value); let results = (outs I1:$res); }
+def Lang_UnsetEnvOp    : Lang_Op<"unset_env">    { let arguments = (ins Lang_Ptr:$name); let results = (outs); }
+def Lang_EpochOp       : Lang_Op<"epoch">        { let arguments = (ins); let results = (outs I64:$res); }
+def Lang_EpochMsOp     : Lang_Op<"epoch_ms">     { let arguments = (ins); let results = (outs I64:$res); }
+def Lang_LocaltimeOp   : Lang_Op<"localtime">    { let arguments = (ins I64:$ep); let results = (outs Lang_Ptr:$res); }
+def Lang_GmtimeOp      : Lang_Op<"gmtime">       { let arguments = (ins I64:$ep); let results = (outs Lang_Ptr:$res); }
+def Lang_SystemOp      : Lang_Op<"system">       { let arguments = (ins Lang_Ptr:$cmd); let results = (outs I64:$res); }
+def Lang_SpawnWaitOp   : Lang_Op<"spawn_wait">   { let arguments = (ins Lang_Ptr:$path, Lang_Ptr:$args); let results = (outs I64:$res); }
+def Lang_SignalCaughtOp : Lang_Op<"signal_caught"> { let arguments = (ins); let results = (outs I1:$res); }
+def Lang_SignalResetOp : Lang_Op<"signal_reset"> { let arguments = (ins); let results = (outs); }
+
+// ============================================================================
+// @extern 真实现（0.9.4 H 专项）：动态库外部函数调用（MS x64 ABI）。
+// args = [dll_ptr, sym_ptr, 实参...]；实参类型域限定 int/float/bool/str
+// （i64/f64/i1/!llvm.ptr），返回可选（str 返回由降级层经 sg_extern_wrap_str
+// 深拷贝）。解析失败/符号缺失 panic 语义下沉 sg_extern_resolve（消息与
+// VMExtern.cpp 逐字一致）；dll/sym 为 NUL 结尾窄串直传。
+// ============================================================================
+def Lang_ExternCallOp : Lang_Op<"extern_call"> {
+    let arguments = (ins Variadic<AnyType>:$args);
+    let results = (outs Optional<AnyType>:$res);
+}
+
 // sorted(List) → 新列表：运行时按 SgList etag 泛型稳定升序（0=i64 1=f64
 // 2=str 3=bool；int/float 混合仅 VM 可能，AOT 列表恒同质）。
 def Lang_SortedOp : Lang_Op<"sorted"> { let arguments = (ins Lang_Ptr:$list); let results = (outs Lang_Ptr:$res); }

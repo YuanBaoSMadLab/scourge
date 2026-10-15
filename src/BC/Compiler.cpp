@@ -21,7 +21,11 @@ const char* builtinNames[] = {
     // v0.9.3 标量数学/随机/排序（与 MLIRGen builtinNames 同表）
     "sin",  "cos",  "tan",   "asin", "acos", "atan", "sinh", "cosh",
     "tanh", "atan2", "floor", "ceil", "round", "trunc",
-    "random", "seed", "sorted"};
+    "random", "seed", "sorted",
+    // 0.9.4 H 专项：系统编程（args/env/时间/进程/信号；同表）
+    "args", "env", "has_env", "set_env", "unset_env", "epoch", "epoch_ms",
+    "localtime", "gmtime", "system", "spawn_wait", "signal_caught",
+    "signal_reset"};
 
 bool isBuiltinName(const std::string& n) {
     for (const char* b : builtinNames)
@@ -788,6 +792,33 @@ bool Compiler::compileModule(const Module& m) {
 
     // 声明遍 2：本模块函数（内建优先不遮蔽，与检查器解析顺序一致）。
     // 依赖方模块可能已为本模块函数创建占位条目——复用并补全签名。
+    // @extern（H 专项）：标记签名壳（体不编译，VM 走动态库 thunk；
+    // AOT 走 lang.extern_call），返回类型码由检查器 sig 反解。
+    auto markExtern = [&](int idx, const FuncDef& fd) {
+        bool ext = false;
+        for (const auto& d : fd.decorators) ext |= (d.name == "extern");
+        if (!ext) return;
+        FuncBC& fn = program_.funcs[static_cast<size_t>(idx)];
+        fn.isExtern = true;
+        for (const auto& d : fd.decorators) {
+            if (d.name == "extern" && !d.args.empty() &&
+                d.args[0]->kind == Expr::Kind::StrLit) {
+                fn.externDll = static_cast<const StrLit&>(*d.args[0]).strValue;
+                break;
+            }
+        }
+        auto rt = registry_.find(m.name);
+        if (rt == registry_.end()) return;
+        auto st = rt->second->funcs.find(fd.name);
+        if (st == rt->second->funcs.end() || !st->second.ret) return;
+        switch (st->second.ret->kind) {
+        case Type::Kind::Int: fn.externRet = 'i'; break;
+        case Type::Kind::Float: fn.externRet = 'f'; break;
+        case Type::Kind::Bool: fn.externRet = 'b'; break;
+        case Type::Kind::Str: fn.externRet = 's'; break;
+        default: fn.externRet = 'v'; break;
+        }
+    };
     std::vector<const FuncDef*> defs;
     for (const auto& stmt : m.body) {
         if (stmt->kind != Stmt::Kind::FuncDef) continue;
@@ -816,6 +847,7 @@ bool Compiler::compileModule(const Module& m) {
             fn.defaults = std::move(defaults);
             fn.isAsync = f.isAsync;
         }
+        markExtern(idx, f);
         visibleFuncs_.emplace(f.name, idx);
     }
 
@@ -826,6 +858,8 @@ bool Compiler::compileModule(const Module& m) {
             program_.funcs[static_cast<size_t>(it->second)].module != m.name)
             continue; // 与内建重名：调用按检查器语义走内建；体不进入调用图
         FuncBC& fn = program_.funcs[static_cast<size_t>(it->second)];
+        if (fn.isExtern)
+            continue; // @extern：体只有 pass，不发射（H 专项）
         LocalInfo locals;
         for (const auto& p : fd->params)
             locals.slots.emplace(p.name, locals.nlocals++);

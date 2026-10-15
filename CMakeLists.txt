@@ -47,6 +47,8 @@ add_library(scourge_core STATIC
     src/Interface/SgiGen.cpp
     src/BC/Compiler.cpp
     src/BC/VM.cpp
+    src/BC/VMSys.cpp
+    src/BC/VMExtern.cpp
     src/BC/Serialize.cpp
     src/AOT/MLIRGen.cpp
     src/Tool/Session.cpp

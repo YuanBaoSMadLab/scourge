@@ -29,6 +29,7 @@
 #include <sstream>
 #include <system_error>
 
+#include "BuilderRTSys.hpp" // 系统编程运行时片段（H 专项，同目录私有头）
 #include "scourge/AOT/InProcess.hpp"
 #include "scourge/AOT/MLIRGen.hpp"
 #include "scourge/BC/Serialize.hpp"
@@ -3887,13 +3888,15 @@ uint64_t mainObjKey(const std::string& tag, bool gpuMode,
 }
 
 /// rt.obj 缓存键（源无关）：格式版本、工具链标签、gpuMode、运行时源文本。
-/// kRuntimeC / kGpuRuntimeC / kGpuPtxC / kGpuOpenCLC 内嵌于编译器二进制，文本
-/// 哈希入键——开发期改动运行时源自动失效，无需手工递增版本号。
+/// kRuntimeC / kSysRuntimeC / kGpuRuntimeC / kGpuPtxC / kGpuOpenCLC 内嵌于
+/// 编译器二进制，文本哈希入键——开发期改动运行时源自动失效，无需手工递增
+/// 版本号。
 uint64_t rtObjKey(const std::string& tag, bool gpuMode) {
     uint64_t h = fnvKey(kObjCacheVer);
     h = fnvKey(tag, h);
     h = fnvKey(gpuMode ? "gpu" : "cpu", h);
     h = fnvKey(kRuntimeC, h);
+    h = fnvKey(kSysRuntimeC, h);
     if (gpuMode) {
         h = fnvKey(kGpuRuntimeC, h);
         h = fnvKey(kGpuPtxC, h);
@@ -3990,7 +3993,7 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
             int rc = runCapture(clang.string(),
                                 "\"" + objMain.string() + "\" \"" +
                                     objRt.string() + "\" -o \"" +
-                                    outPath.string() + "\"",
+                                    outPath.string() + "\" -lshell32",
                                 capPath, toolOut);
             if (rc == 0) {
                 b.fromCache = true;
@@ -4027,6 +4030,10 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
     {
         std::ofstream f(rtPath, std::ios::binary);
         f << kRuntimeC;
+        /* 系统编程片段（0.9.4 H）：args/env/时间/进程/信号，复用
+         * kRuntimeC 的 SgList/sg_panic/sg_io_msg/windows.h 定义；
+         * shellapi 链接见各链接命令（-lshell32）。 */
+        f << kSysRuntimeC;
         if (gpuMode) {
             /* GPU 分派层：内嵌 kernel 源（Windows 分支内定义，供 JIT 加载）
              * + 后端抽象分派函数（覆盖集 op，失败回退 CPU） */
@@ -4085,7 +4092,7 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
 
         rc = runCapture(clang.string(),
                         "\"" + objMain.string() + "\" \"" + objRt.string() +
-                            "\" -o \"" + outPath.string() + "\"",
+                            "\" -o \"" + outPath.string() + "\" -lshell32",
                         capPath, toolOut);
         if (rc != 0) {
             b.log = "构建中止：clang 链接失败（exit " + std::to_string(rc) +
@@ -4101,7 +4108,7 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         clang.string(),
         "-O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS \"" +
             llPath.string() + "\" \"" + rtPath.string() +
-            "\" -o \"" + outPath.string() + "\"",
+            "\" -o \"" + outPath.string() + "\" -lshell32",
         capPath, toolOut);
     if (rc != 0) {
         b.log = "构建中止：clang 链接失败（exit " + std::to_string(rc) +

@@ -165,6 +165,10 @@ struct FuncBC {
     std::string builtinName;
     bool isTopLevel = false;            ///< 模块顶层初始化代码（伪函数）
     bool isAsync = false;               ///< P0 阶段 await 透传，直接同步执行
+    bool isExtern = false;              ///< @extern：动态库外部函数（H 专项；
+                                        ///< 体不编译，VM 走 VMExtern thunk）
+    std::string externDll;              ///< 动态库文件名（@extern 装饰器参数）
+    char externRet = 'v';               ///< 返回类型码：i/f/b/s/v（thunk 读回）
 };
 
 struct Program {

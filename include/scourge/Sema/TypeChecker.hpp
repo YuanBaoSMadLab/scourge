@@ -35,6 +35,7 @@ struct FuncSig {
     size_t requiredArgs = 0; ///< 无默认值的参数个数（其余在尾部有默认值）
     bool isPure = false;
     bool retPending = false; ///< 返回类型待推断（无注解，由 return 语句统一）
+    bool isExtern = false;   ///< @extern：动态库外部函数（体不发射，H 专项）
 
     /// 契约子句引用（表达式借用自 AST，生命周期由 Module 持有保证）。
     struct ContractRef {
