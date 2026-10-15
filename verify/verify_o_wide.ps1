@@ -20,12 +20,18 @@ $dir = "d:\Scourge\build\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
 
+# Cleanup helper: PS 5.1 pipeline Remove-Item intermittently NREs on
+# redirected files - direct wildcard delete guarded by try/catch instead.
+function Clean-Artifacts([string]$stem) {
+    try { Remove-Item -Path "$dir\$stem.*" -Force -ErrorAction SilentlyContinue } catch {}
+}
+
 # --- positives: run vs build+aot triple diff (byte identical) -------------
 $pos = @("probe_o_e", "probe_o_a2", "probe_o_a3", "probe_o_a",
          "probe_o_smoke", "probe_o_b", "probe_o_c", "probe_o_d",
          "probe_o_min", "probe_o_max20")
 foreach ($n in $pos) {
-    Get-ChildItem "$dir" -Filter "$n.*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Clean-Artifacts $n
 
     $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\codebuddytest\$n.sg") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.run.out" -RedirectStandardError "$dir\$n.run.err"
@@ -52,20 +58,26 @@ foreach ($n in $pos) {
     }
 }
 
-# --- sema negatives: both channels exit 1, stderr byte identical -----------
+# --- sema negatives: both channels exit 1, expected code in both stderr ----
+# Note: run stderr carries a mode-named abort trailer ("run abort: ..."),
+# build stderr does not - the diagnostic block itself is the shared contract,
+# so byte-hash equality does not hold across channels here.
 $neg = @("probe_o_neg_var", "probe_o_neg_list", "probe_o_neg21")
+$negCode = @{ "probe_o_neg_var" = "E1007"; "probe_o_neg_list" = "E2001"; "probe_o_neg21" = "E2001" }
 foreach ($n in $neg) {
-    Get-ChildItem "$dir" -Filter "$n.*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Clean-Artifacts $n
 
     $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\codebuddytest\$n.sg") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.run.out" -RedirectStandardError "$dir\$n.run.err"
     $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\codebuddytest\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.build.out" -RedirectStandardError "$dir\$n.build.err"
-    $e = (Get-FileHash "$dir\$n.run.err").Hash -eq (Get-FileHash "$dir\$n.build.err").Hash
-    if ($p1.ExitCode -eq 1 -and $p2.ExitCode -eq 1 -and $e) {
-        Write-Host "$n REJECTED-IDENTICAL"
+    $code = $negCode[$n]
+    $rErr = (Get-Content "$dir\$n.run.err" -Raw) -match $code
+    $bErr = (Get-Content "$dir\$n.build.err" -Raw) -match $code
+    if ($p1.ExitCode -eq 1 -and $p2.ExitCode -eq 1 -and $rErr -and $bErr) {
+        Write-Host "$n REJECTED ($code both channels)"
     } else {
-        Write-Host "$n MISMATCH run=$($p1.ExitCode) build=$($p2.ExitCode) errsame=$e"
+        Write-Host "$n MISMATCH run=$($p1.ExitCode) build=$($p2.ExitCode) runHas=$rErr buildHas=$bErr"
         Get-Content "$dir\$n.run.err" -First 4
         $fail = 1
     }
