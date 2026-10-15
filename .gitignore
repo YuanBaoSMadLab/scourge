@@ -48,3 +48,7 @@ vendor/
 verify/stdlib/_*
 verify/stdlib/*_aot.ll
 verify/stdlib/*_rt.c
+
+# verify 探针就地运行/对拍产物（各脚本临时输出）
+*.out
+verify/types/_*
