@@ -1,0 +1,39 @@
+# gpu_ext.sg — 0.9.3 GPU 覆盖集扩展探针：max/min 归约、一元 abs/sqrt、
+# 部分索引切片（设备内拷贝）、下标读写（设备直读直写）。GPU 构建下全链走
+# sg_gpu_*（含 GPU 输出直作后续 GPU op 输入的设备驻留路径），五模输出
+# 逐字节一致。
+def main() -> int:
+    a = [[3.5, -2.25, 7.125], [0.75, -9.5, 2.0]]
+    print("max2d=" + str(max(a)))
+    print("min2d=" + str(min(a)))
+    print("max1d=" + str(max(a[0])))
+    print("min1d=" + str(min(a[0])))
+    ti = [[3, -2, 7], [9, -5, 2]]
+    print("maxi=" + str(max(ti)))
+    print("mini=" + str(min(ti)))
+    # 一元：abs 保 dtype，sqrt 恒 f64（int 入先转 f64）
+    print("absf=" + str(abs(a)))
+    print("absi=" + str(abs(ti)))
+    print("sqrtf=" + str(sqrt(a)))
+    print("sqrti=" + str(sqrt(ti)))
+    # 链式：matmul → abs → max（GPU 输出直作下一 GPU op 输入）
+    print("chain=" + str(max(abs(a @ transpose(a)))))
+    # 切片：部分索引 → 子张量（GPU 设备内拷贝 + 惰性回拷）
+    s = a[1]
+    print("slice=" + str(s))
+    print("smax=" + str(max(s)))
+    # 设备驻留张量的下标写（设备直写）与读（设备直读）
+    b = abs(a @ transpose(a))
+    b[0, 1] = 42.0
+    print("b=" + str(b))
+    print("b01=" + str(b[0, 1]))
+    print("bsum=" + str(sum(b)))
+    # host 驻留张量的下标读写（CPU 路径回归）
+    c = [[1.0, 2.0], [3.0, 4.0]]
+    c[1, 0] = -3.0
+    print("c=" + str(c))
+    ci = [[1, 2], [3, 4]]
+    ci[0, 1] = -7
+    print("ci=" + str(ci))
+    print("cget=" + str(c[1, 0]) + "," + str(ci[0, 1]))
+    return 0

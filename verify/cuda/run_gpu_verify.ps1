@@ -12,7 +12,7 @@ $scourge = "d:\Scourge\build-rel\scourge.exe"
 $src     = "d:\Scourge\verify\cuda"
 $dir     = "d:\Scourge\build-rel\verify\cuda"
 New-Item -ItemType Directory -Force $dir | Out-Null
-$probes  = @("gpu_ew", "gpu_mm", "gpu_mm_tile", "gpu_sum_tr", "gpu_panic", "gpu_dyn", "gpu_int", "gpu_chain")
+$probes  = @("gpu_ew", "gpu_mm", "gpu_mm_tile", "gpu_sum_tr", "gpu_panic", "gpu_dyn", "gpu_int", "gpu_chain", "gpu_ext")
 
 # $mode: "run" | "cpu" | "gpu" | "fb" | "ocl"
 function Invoke-Net([string]$exe, [string]$argStr, [string]$tag, [string]$mode) {

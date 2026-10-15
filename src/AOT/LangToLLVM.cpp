@@ -630,15 +630,11 @@ private:
             fn.setVisibility(mlir::SymbolTable::Visibility::Private);
         }
         if (!gpuMode) return;
-        // GPU 覆盖集声明（sg_<rest> → sg_gpu_<rest>，ABI 逐一相同）。
-        // 覆盖集固定七类（GpuCover.hpp covers 判定的 op 全集），CPU 同名
-        // 函数仍然补插（未用符号无副作用；非覆盖形态仍需它们兜底）。
+        // GPU 覆盖集声明（sg_<rest> → sg_gpu_<rest>，ABI 逐一相同）。名单
+        // 单一事实源在 GpuCover.hpp（kGpuCoveredLang / coveredLangName），
+        // 与 covers 判定同源——此处查表，禁止平行维护名单。
         for (const OpLower& l : kLowerings) {
-            if (std::strncmp(l.lang, "lang.tensor_binop_", 18) != 0 &&
-                std::strcmp(l.lang, "lang.tensor_matmul") != 0 &&
-                std::strcmp(l.lang, "lang.tensor_sum_f") != 0 &&
-                std::strcmp(l.lang, "lang.tensor_sum_i") != 0 &&
-                std::strcmp(l.lang, "lang.tensor_transpose") != 0)
+            if (!gpu::coveredLangName(l.lang))
                 continue;
             std::string sym = "sg_gpu_";
             sym += l.sg + 3;
