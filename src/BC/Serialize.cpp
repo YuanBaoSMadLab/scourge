@@ -10,8 +10,14 @@
 //  成功态按 payloadKind 编码载荷、失败态仅携带错误信息。
 //  v2：新增 Tensor 常量（dtype + 形状 + 元素）与 MatMul 指令、
 //  LoadIndex/StoreIndex 的 b=下标个数语义（P1 张量执行）。
+//  v3：op 上界覆盖 IntToFloat/NewDict；新增 Dict 常量（按插入序编
+//  key/val 对，解码逐项 set 重建桶表，与运行时语义零分叉）。
+//  v4：op 上界覆盖 NewSet；新增 Set 常量（按首插序仅编元素，解码
+//  逐项 add 重建链表桶表，与运行时语义零分叉）。
 //  v5：FuncBC 新增 @extern 三元组（kFlagExtern + externDll + externRet，
 //  0.9.4 H 专项——旧格式函数无 extern，缺省字段语义安全）。
+//  v6：op 上界覆盖 NewTuple；新增 Tuple 常量（按源序仅编元素，复用
+//  list 字段递归编码，与运行时语义零分叉；0.9.6 元组缺省参数/常量池）。
 // ============================================================================
 #include "scourge/BC/Serialize.hpp"
 
@@ -23,8 +29,8 @@ namespace bc {
 namespace {
 
 constexpr char kMagic[4] = {'S', 'G', 'B', 'C'};
-constexpr uint32_t kFormatVersion = 5;
-constexpr uint8_t kOpCount = static_cast<uint8_t>(Op::NewTensor) + 1;
+constexpr uint32_t kFormatVersion = 7; // v7：+capMask（0.9.7 能力模型）
+constexpr uint8_t kOpCount = static_cast<uint8_t>(Op::NewTuple) + 1;
 
 constexpr uint8_t kFlagBuiltin = 1;
 constexpr uint8_t kFlagTopLevel = 2;
@@ -150,6 +156,40 @@ void encodePayload(Writer& w, Value::Kind k, const Value& v) {
     }
     case Value::Kind::Result:
         break; // 当前值模型：载荷不会是 Result
+    case Value::Kind::Dict: {
+        // 按插入序编 key/val 对（buckets 是派生结构，不编码）。
+        if (!v.dict) { // 防御：空字典按 0 项编码
+            w.u32(0);
+            break;
+        }
+        const uint32_t n = static_cast<uint32_t>(v.dict->entries.size());
+        w.u32(n);
+        for (const auto& e : v.dict->entries) {
+            encodeValueRec(w, e.key);
+            encodeValueRec(w, e.val);
+        }
+        break;
+    }
+    case Value::Kind::Set: {
+        // 按首插序仅编元素（links/buckets 是派生结构，不编码）。
+        if (!v.set) { // 防御：空集合按 0 项编码
+            w.u32(0);
+            break;
+        }
+        const uint32_t n = static_cast<uint32_t>(v.set->entries.size());
+        w.u32(n);
+        for (const auto& e : v.set->entries) encodeValueRec(w, e);
+        break;
+    }
+    case Value::Kind::Tuple: {
+        // 按源序仅编元素（元组定长不可变，无派生结构；复用 list 字段，
+        // 编码形式与 List 一致——读取侧以 kind 字节区分，无歧义）。
+        const uint32_t n = v.list ? static_cast<uint32_t>(v.list->size()) : 0;
+        w.u32(n);
+        if (v.list)
+            for (const auto& el : *v.list) encodeValueRec(w, el);
+        break;
+    }
     }
 }
 
@@ -172,7 +212,7 @@ bool decodePayload(Reader& r, Value::Kind k, Value& v);
 bool decodeValueRec(Reader& r, Value& v) {
     uint8_t k;
     if (!r.u8(k)) return false;
-    if (k > static_cast<uint8_t>(Value::Kind::Tensor)) {
+    if (k > static_cast<uint8_t>(Value::Kind::Tuple)) {
         r.ok = false;
         return false;
     }
@@ -182,7 +222,7 @@ bool decodeValueRec(Reader& r, Value& v) {
         uint8_t isOk = 0;
         uint8_t pk = 0;
         if (!r.u8(isOk) || !r.u8(pk)) return false;
-        if (pk > static_cast<uint8_t>(Value::Kind::Result)) {
+        if (pk > static_cast<uint8_t>(Value::Kind::Tuple)) {
             r.ok = false;
             return false;
         }
@@ -278,6 +318,63 @@ bool decodePayload(Reader& r, Value::Kind k, Value& v) {
     case Value::Kind::Result:
         r.ok = false;
         return false;
+    case Value::Kind::Dict: {
+        uint32_t n = 0;
+        if (!r.u32(n)) return false;
+        // 每项至少 2 字节（key/val 各占 kind 字节），防计数虚高。
+        if (n > r.remaining() / 2) {
+            r.ok = false;
+            return false;
+        }
+        auto dd = std::make_shared<DictData>();
+        for (uint32_t i = 0; i < n; ++i) {
+            Value k;
+            Value val;
+            if (!decodeValueRec(r, k) || !decodeValueRec(r, val))
+                return false;
+            // 复用运行时插入：扩容/去重/重链与 VM 语义零分叉。
+            dd->set(std::move(k), std::move(val));
+        }
+        v.dict = std::move(dd);
+        return true;
+    }
+    case Value::Kind::Set: {
+        uint32_t n = 0;
+        if (!r.u32(n)) return false;
+        // 每项至少 1 字节（元素 kind 字节），防计数虚高。
+        if (n > r.remaining()) {
+            r.ok = false;
+            return false;
+        }
+        auto sd = std::make_shared<SetData>();
+        for (uint32_t i = 0; i < n; ++i) {
+            Value el;
+            if (!decodeValueRec(r, el)) return false;
+            // 复用运行时插入：扩容/去重/重链与 VM 语义零分叉。
+            sd->add(std::move(el));
+        }
+        v.set = std::move(sd);
+        return true;
+    }
+    case Value::Kind::Tuple: {
+        // 按源序重建元素向量（定长不可变，无去重/重链）。
+        uint32_t n = 0;
+        if (!r.u32(n)) return false;
+        // 每个元素至少占 1 字节 → 计数不得超出剩余，防虚高 reserve。
+        if (n > r.remaining()) {
+            r.ok = false;
+            return false;
+        }
+        auto vec = std::make_shared<std::vector<Value>>();
+        vec->reserve(n);
+        for (uint32_t i = 0; i < n; ++i) {
+            Value el;
+            if (!decodeValueRec(r, el)) return false;
+            vec->push_back(std::move(el));
+        }
+        v.list = std::move(vec);
+        return true;
+    }
     }
     return false;
 }
@@ -419,6 +516,7 @@ std::string encodeProgram(const Program& p, const CacheMeta& meta) {
         w.str(g.first);
         w.str(g.second);
     }
+    w.u64(p.capMask); // 0.9.7：能力授予集随码本持久化（运行时门禁依据）
 
     w.u32(static_cast<uint32_t>(p.funcs.size()));
     for (const auto& f : p.funcs) encodeFunc(w, f);
@@ -466,6 +564,7 @@ bool decodeProgram(const std::string& bytes, Program& p, CacheMeta& meta) {
         if (!r.str(g.first) || !r.str(g.second)) return false;
         p.globalNames.push_back(std::move(g));
     }
+    if (!r.u64(p.capMask)) return false; // 0.9.7：与 encodeProgram 对位
     if (!r.u32(n)) return false;
     if (n > r.remaining()) return false;
     for (; n > 0; --n) {

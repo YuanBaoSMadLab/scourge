@@ -83,11 +83,34 @@ private:
     Value doUnaryOp(Unary op, const Value& v);
     int64_t normIndex(int64_t idx, int64_t len, const char* what);
     Value repeatStr(const std::string& s, int64_t n);
+    /// str / List 成员方法执行（CallMethod 分派尾段；实现分块在 VMMethod.cpp，
+    /// panic 消息与 AOT sg_str_* / sg_list_* 逐字一致）。
+    void callValueMethod(Method m, const Value& self,
+                         const std::vector<Value>& args);
+
+    // ---- 网络/睡眠（F/G 专项；实现分块在 VMNet.cpp，Winsock） ------------------
+    /// net_* / sleep 内建执行（doBuiltin 前缀分派；panic 消息与 AOT
+    /// sg_net_* / sg_sleep 逐字一致）。句柄为 1 起始的表下标（不透明 int）。
+    void netBuiltin(const std::string& n, std::vector<Value>& a);
+    std::vector<uintptr_t> netSocks_; ///< 套接字句柄表，0 = 空槽（close 后回收）
+
+    // ---- 标准库广度（M 专项；实现分块在 VMStd.cpp） ---------------------------
+    /// mean/var/std/reversed/sha256/crc32 内建执行（doBuiltin 白名单分派；
+    /// panic 消息与数值结果与 BuilderRTStd.hpp 的 sg_* 逐字一致）。
+    void stdBuiltin(const std::string& n, std::vector<Value>& a);
 
     // ---- 系统编程（H 专项；实现分块在 VMSys.cpp） ------------------------------
     /// args/env/时间日期/进程/信号内建执行（doBuiltin 白名单分派；panic 消息
     /// 与 AOT BuilderRTSys.hpp 的 sg_* 逐字一致）。
     void sysBuiltin(const std::string& n, std::vector<Value>& a);
+
+    // ---- JSON（M 专项；实现分块在 VMJson.cpp） ---------------------------------
+    /// json_decode 内建执行（doBuiltin 白名单分派；解析语义与 panic 消息
+    /// 与 BuilderRTJson.hpp 的 sg_json_* 逐字一致——数字 int/float 判定、
+    /// \uXXXX 解码、嵌套深度上限 128、紧凑 dump 编码同规范）。
+    void jsonBuiltin(const std::string& n, std::vector<Value>& a);
+    /// Json 成员方法执行（VMMethod 尾部按 self.kind==Json 路由进来）。
+    void jsonMethod(Method m, const Value& self, const std::vector<Value>& args);
 
     // ---- @extern 动态库调用（H 专项；实现分块在 VMExtern.cpp） -----------------
     /// MS x64 机器码 thunk 调用：实参从调用栈弹出（Value 自描述类型），
@@ -133,6 +156,12 @@ private:
     /// splitmix64 下一步（与 kRuntimeC 的 sg_rng_next 逐位一致的唯一实现语义）。
     uint64_t rngNext();
 };
+
+// ---- JSON 编码（namespace 级自由函数；stringify 的 Json 分支复用） -----------
+/// Json 值 → 紧凑 JSON 文本（对象按插入序；float %.17g 往返精度；控制字符
+/// \u00xx 转义；UTF-8 字节透传）。与 BuilderRTJson.hpp 的 sg_json_dump
+/// 逐字一致（非 Json 值入参属 VM 内部错误，恒 panic 语义由调用方保证）。
+std::string jsonDump(const Value& v);
 
 } // namespace bc
 } // namespace scourge

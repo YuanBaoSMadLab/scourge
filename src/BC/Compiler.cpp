@@ -17,15 +17,26 @@ struct CompileAbort {};
 const char* builtinNames[] = {
     "print",     "str",   "len", "sum",       "now",   "range", "ok", "err",
     "abs",       "sqrt",  "exp", "log",       "max",   "min",
-    "transpose", "reshape",
+    "transpose", "reshape", "data_ptr",
     // v0.9.3 标量数学/随机/排序（与 MLIRGen builtinNames 同表）
     "sin",  "cos",  "tan",   "asin", "acos", "atan", "sinh", "cosh",
     "tanh", "atan2", "floor", "ceil", "round", "trunc",
     "random", "seed", "sorted",
+    // 0.9.4 IO 子系统（与 MLIRGen builtinNames 同表）
+    "input", "read_text", "write_text", "append_text", "exists",
+    "list_dir",
+    // 0.9.4 F/G 专项：网络客户端与睡眠（与 MLIRGen builtinNames 同表）
+    "net_connect", "net_send", "net_recv", "net_close", "net_udp_send",
+    "net_http_get", "sleep",
+    "net_bind", "net_accept", "net_set_timeout",
     // 0.9.4 H 专项：系统编程（args/env/时间/进程/信号；同表）
     "args", "env", "has_env", "set_env", "unset_env", "epoch", "epoch_ms",
     "localtime", "gmtime", "system", "spawn_wait", "signal_caught",
-    "signal_reset"};
+    "signal_reset",
+    // 0.9.4 M 专项：标准库广度（统计/倒序/哈希；与 MLIRGen builtinNames 同表）
+    "mean", "var", "std", "reversed", "sha256", "crc32",
+    // 0.9.4 M 专项：JSON（动态 Json 值类型）
+    "json_decode"};
 
 bool isBuiltinName(const std::string& n) {
     for (const char* b : builtinNames)
@@ -213,6 +224,33 @@ int Compiler::lookupFunc(const std::string& name) const {
     return it == visibleFuncs_.end() ? -1 : it->second;
 }
 
+std::string Compiler::foldModuleKey(const Expr& base) const {
+    std::vector<std::string> trail; // Attr 链成员段（逆序：外层先收）
+    const Expr* leaf = &base;
+    while (leaf->kind == Expr::Kind::Attr) {
+        trail.push_back(static_cast<const Attr&>(*leaf).name);
+        leaf = static_cast<const Attr&>(*leaf).base.get();
+    }
+    if (leaf->kind != Expr::Kind::Name) return {};
+    auto first = modAlias_.find(static_cast<const Name&>(*leaf).name);
+    if (first == modAlias_.end()) return {};
+    std::string cur = first->second;
+    // 与检查器 qualifiedModuleName 同构：重写段（与真名尾段重合，源自
+    // 宽容首段绑定）跳过，其余段下钻——每段全名须为已加载模块
+    // （registry 与检查器 imports_ 同源），任一段缺失即交回方法分派。
+    for (size_t k = trail.size(); k-- > 0;) {
+        const std::string& seg = trail[k];
+        std::string suffix = '.' + seg;
+        if (cur.size() > suffix.size() &&
+            cur.compare(cur.size() - suffix.size(), suffix.size(), suffix) ==
+                0)
+            continue;
+        cur += suffix;
+        if (!registry_.count(cur)) return {};
+    }
+    return cur;
+}
+
 // ----------------------------------------------------------------------------
 // 常量与全局
 // ----------------------------------------------------------------------------
@@ -270,6 +308,15 @@ Value Compiler::constOf(const Expr& e) const {
         return Value::makeStr(static_cast<const StrLit&>(e).strValue);
     case Expr::Kind::NoneLit:
         return Value::makeNone();
+    case Expr::Kind::TupleLit: {
+        // 缺省参数元组常量：逐元素递归求值（元素限标量/嵌套元组，
+        // 检查器 checkTupleLit 白名单已保证可常量化）。
+        auto& tl = static_cast<const TupleLit&>(e);
+        auto vec = std::make_shared<std::vector<Value>>();
+        vec->reserve(tl.elems.size());
+        for (const auto& el : tl.elems) vec->push_back(constOf(*el));
+        return Value::makeTuple(std::move(vec));
+    }
     case Expr::Kind::Unary: {
         // bc::Unary 是操作码枚举，AST 节点需显式限定 scourge::Unary。
         auto& u = static_cast<const scourge::Unary&>(e);
@@ -347,6 +394,11 @@ void Compiler::compileExpr(const Expr& e) {
         if (isBuiltinName(n.name) || lookupFunc(n.name) >= 0) {
             unsupported(e, "函数作为头等值将在 P1 提供；当前函数只能被调用");
         }
+        // from-import 常量（0.9.6）：别名 → 源模块全局重定向。
+        if (auto fg = fromGlobals_.find(n.name); fg != fromGlobals_.end()) {
+            emit(Op::LoadGlobal, addGlobal(fg->second.first, fg->second.second));
+            return;
+        }
         // 模块级全局（含导入模块的常量经 Attr 走 LoadGlobal）
         emit(Op::LoadGlobal, addGlobal(moduleName_, n.name));
         return;
@@ -423,11 +475,12 @@ void Compiler::compileExpr(const Expr& e) {
         auto& c = static_cast<const Call&>(e);
         if (c.callee->kind == Expr::Kind::Attr) {
             auto& at = static_cast<const Attr&>(*c.callee);
-            // 跨模块调用：m.func(args) → 声明遍已为 import 模块建立
-            // 函数索引（importedFuncs_），直接按索引调用。
-            if (at.base->kind == Expr::Kind::Name) {
-                auto& mn = static_cast<const Name&>(*at.base);
-                auto mit = importedFuncs_.find(mn.name);
+            // 跨模块调用：m.func(args) / a.b.func(args)（0.9.6 点分链）。
+            // 声明遍已为 import 模块建立函数索引（importedFuncs_），
+            // 模块前缀经 foldModuleKey 折叠为键后按索引调用。
+            std::string qm = foldModuleKey(*at.base);
+            if (!qm.empty()) {
+                auto mit = importedFuncs_.find(qm);
                 if (mit != importedFuncs_.end()) {
                     auto fit = mit->second.find(at.name);
                     if (fit != mit->second.end()) {
@@ -442,10 +495,44 @@ void Compiler::compileExpr(const Expr& e) {
                 }
             }
             // Result 消费方法：self 与实参依次压栈后 CallMethod。
+            // 0.9.4 追加 str/List 成员方法（contains/index 同名——VM 运行时
+            // 按 self.kind 分派；名称映射须与 Sema checkAttr 签名表一致）。
             Method m;
             if (at.name == "is_ok") m = Method::IsOk;
             else if (at.name == "unwrap") m = Method::Unwrap;
             else if (at.name == "unwrap_or") m = Method::UnwrapOr;
+            else if (at.name == "upper") m = Method::StrUpper;
+            else if (at.name == "lower") m = Method::StrLower;
+            else if (at.name == "trim") m = Method::StrTrim;
+            else if (at.name == "trim_start") m = Method::StrTrimStart;
+            else if (at.name == "trim_end") m = Method::StrTrimEnd;
+            else if (at.name == "split") m = Method::StrSplit;
+            else if (at.name == "join") m = Method::StrJoin;
+            else if (at.name == "replace") m = Method::StrReplace;
+            else if (at.name == "find") m = Method::StrFind;
+            else if (at.name == "contains") m = Method::Contains;
+            else if (at.name == "index") m = Method::Index;
+            else if (at.name == "startswith") m = Method::StrStartsWith;
+            else if (at.name == "endswith") m = Method::StrEndsWith;
+            else if (at.name == "count") m = Method::ListCount;
+            // 0.9.4 M 专项：Json 成员方法（Sema checkAttr 已按 base kind
+            // 分派；VM callValueMethod 按 self.kind==Json 路由到 VMJson.cpp）
+            else if (at.name == "is_null") m = Method::JsonIsNull;
+            else if (at.name == "is_bool") m = Method::JsonIsBool;
+            else if (at.name == "is_int") m = Method::JsonIsInt;
+            else if (at.name == "is_float") m = Method::JsonIsFloat;
+            else if (at.name == "is_str") m = Method::JsonIsStr;
+            else if (at.name == "is_list") m = Method::JsonIsList;
+            else if (at.name == "is_obj") m = Method::JsonIsObj;
+            else if (at.name == "as_int") m = Method::JsonAsInt;
+            else if (at.name == "as_float") m = Method::JsonAsFloat;
+            else if (at.name == "as_bool") m = Method::JsonAsBool;
+            else if (at.name == "as_str") m = Method::JsonAsStr;
+            else if (at.name == "at") m = Method::JsonAt;
+            else if (at.name == "get") m = Method::JsonGet;
+            else if (at.name == "len") m = Method::JsonLen;
+            else if (at.name == "keys") m = Method::JsonKeys;
+            else if (at.name == "dump") m = Method::JsonDump;
             else unsupported(e, "成员方法 '" + at.name + "'");
             compileExpr(*at.base); // self
             for (const auto& a : c.args) compileExpr(*a);
@@ -469,11 +556,11 @@ void Compiler::compileExpr(const Expr& e) {
 
     case Expr::Kind::Attr: {
         auto& at = static_cast<const Attr&>(e);
-        // 模块常量访问：m.CONST → LoadGlobal(模块, 名)
-        if (at.base->kind == Expr::Kind::Name &&
-            importedFuncs_.count(static_cast<const Name&>(*at.base).name)) {
-            auto& mn = static_cast<const Name&>(*at.base);
-            emit(Op::LoadGlobal, addGlobal(mn.name, at.name));
+        // 模块常量访问：m.CONST / a.b.CONST → LoadGlobal(规范模块名, 名)
+        // （0.9.6 点分链；绑定键经 foldModuleKey 还原真实全限定名）。
+        std::string qm = foldModuleKey(*at.base);
+        if (!qm.empty()) {
+            emit(Op::LoadGlobal, addGlobal(qm, at.name));
             return;
         }
         unsupported(e, "非调用位置的成员访问 '" + at.name + "'");
@@ -491,29 +578,70 @@ void Compiler::compileExpr(const Expr& e) {
 
     case Expr::Kind::ListLit: {
         auto& ll = static_cast<const ListLit&>(e);
-        // 数值字面量即张量（与检查器 checkListLit 同判定）→ Tensor 常量。
-        if (isTensorLiteral(ll)) {
-            emit(Op::LoadConst, addConst(constTensorOf(ll)));
-            return;
-        }
-        // 检查器判定为张量但含运行时元素 → NewTensor 逐元素构造。
+        // 单一事实源 = 检查器 checkedAsTensor：张量字面量（全常量 → 常量池；
+        // 含运行时元素 → NewTensor 逐元素构造）；其余一律 NewList——
+        // 含 0.9.3 List 数值元素路径（List 注解上下文的数值字面量）。
         if (ll.checkedAsTensor) {
+            if (isTensorLiteral(ll)) {
+                emit(Op::LoadConst, addConst(constTensorOf(ll)));
+                return;
+            }
             for (const auto& el : ll.elems) compileExpr(*el);
             emit(Op::NewTensor, 0, static_cast<uint32_t>(ll.elems.size()));
             return;
         }
-        for (const auto& el : ll.elems) compileExpr(*el);
+        for (const auto& el : ll.elems) {
+            compileExpr(*el);
+            if (needsF64(*el)) emit(Op::IntToFloat); // Q3 List[float] 元素提升
+        }
         emit(Op::NewList, static_cast<uint32_t>(ll.elems.size()));
         return;
     }
 
+    case Expr::Kind::DictLit: {
+        auto& dl = static_cast<const DictLit&>(e);
+        // 检查器判为空集合（Set[T] 注解上下文的空 {}）→ NewSet(0)
+        //（单一事实源 checkedAsSet，与 checkedAsTensor 同架构）。
+        if (dl.checkedAsSet) {
+            emit(Op::NewSet, 0);
+            return;
+        }
+        // 栈序 k1,v1,k2,v2,...；float 统一键/值的 int 元素做边界提升
+        //（Q3，promoteF64_ 单一事实源，与 ListLit 同规则）。
+        for (const auto& p : dl.pairs) {
+            compileExpr(*p.first);
+            if (needsF64(*p.first)) emit(Op::IntToFloat);
+            compileExpr(*p.second);
+            if (needsF64(*p.second)) emit(Op::IntToFloat);
+        }
+        emit(Op::NewDict, static_cast<uint32_t>(dl.pairs.size()));
+        return;
+    }
+
+    case Expr::Kind::SetLit: {
+        auto& sl = static_cast<const SetLit&>(e);
+        // 栈序 e1,e2,...；float 统一元素的 int 元素做边界提升
+        //（Q3，promoteF64_ 单一事实源，与 DictLit 同规则）。
+        for (const auto& el : sl.elems) {
+            compileExpr(*el);
+            if (needsF64(*el)) emit(Op::IntToFloat);
+        }
+        emit(Op::NewSet, static_cast<uint32_t>(sl.elems.size()));
+        return;
+    }
+
+    case Expr::Kind::TupleLit: {
+        // 异构定长不可变元组：逐元素编译后 NewTuple 装箱（不做跨元素
+        // float 统一提升，与检查器 checkTupleLit 白名单一致）。
+        auto& tl = static_cast<const TupleLit&>(e);
+        for (const auto& el : tl.elems) compileExpr(*el);
+        emit(Op::NewTuple, static_cast<uint32_t>(tl.elems.size()));
+        return;
+    }
     case Expr::Kind::Await:
         // await 类型透传（Task 语义 P2 落地）；VM 内同步执行。
         compileExpr(*static_cast<const Await&>(e).operand);
         return;
-
-    case Expr::Kind::TupleLit:
-        unsupported(e, "元组值");
     }
     unsupported(e, "该表达式");
 }
@@ -524,6 +652,14 @@ void Compiler::compileExpr(const Expr& e) {
 
 void Compiler::compileStmtList(const StmtList& list) {
     for (const auto& s : list) compileStmt(*s);
+}
+
+void Compiler::emitDefers() {
+    // LIFO 内联展开词法上位于该 return 之前的 defer 块。panic 传播走
+    // 运行时 catch 栈回退，不经过 return 点，故不触发 defer（契约见
+    // AST Defer 注释；VM/AOT 双模同构）。
+    for (size_t k = deferStack_.size(); k > 0; --k)
+        compileStmtList(*deferStack_[k - 1]);
 }
 
 void Compiler::compileStmt(const Stmt& s) {
@@ -685,6 +821,11 @@ void Compiler::compileStmt(const Stmt& s) {
         if (st.value) {
             compileExpr(*st.value);
             if (needsF64(*st.value)) emit(Op::IntToFloat); // Q3 边界提升（返回）
+        }
+        // defer 先于返回指令：返回值已驻留栈顶，defer 块语句栈自平衡
+        // （语句不变式），执行完弹返回值——与 AOT 展开语义逐点对齐。
+        emitDefers();
+        if (st.value) {
             emit(Op::Return);
         } else {
             emit(Op::ReturnNone);
@@ -709,6 +850,11 @@ void Compiler::compileStmt(const Stmt& s) {
     }
 
     case Stmt::Kind::Pass:
+        return;
+
+    case Stmt::Kind::Defer:
+        // 仅登记不发射：展开发生在 return 点（emitDefers，LIFO）。
+        deferStack_.push_back(&static_cast<const Defer&>(s).body);
         return;
 
     case Stmt::Kind::Assert: {
@@ -765,29 +911,78 @@ bool Compiler::compileModule(const Module& m) {
         program_.funcs.push_back(std::move(f));
     }
 
-    // 声明遍 1：import 模块的函数与全局 → 跨模块解析表。
+    // 声明遍 1：import 模块的函数与全局 → 跨模块解析表（0.9.6 L 节）。
+    // importedFuncs_ 只存规范全名键；首段/末段宽容/别名等绑定键经
+    // modAlias_ 映射到规范名（与检查器"绑定名-真名解耦"同构）。
     importedFuncs_.clear();
     visibleFuncs_.clear();
+    modAlias_.clear();
+    fromGlobals_.clear();
     for (const char* b : builtinNames)
         visibleFuncs_.emplace(b, builtinIndex(b));
+    // 确保模块 full 的函数表就绪（占位声明复用既有条目）；模块不在
+    // registry 时注册空表——调用点由检查器先行拒绝，此处不重复诊断。
+    auto ensureImported = [&](const std::string& full)
+        -> const std::map<std::string, int>& {
+        auto found = importedFuncs_.find(full);
+        if (found != importedFuncs_.end()) return found->second;
+        std::map<std::string, int> into;
+        if (auto it = registry_.find(full); it != registry_.end())
+            for (const auto& [fname, sig] : it->second->funcs) {
+                int idx = lookupModuleFunc(full, fname);
+                if (idx < 0) {
+                    idx = declareFunc(full, fname,
+                                      static_cast<uint32_t>(sig.params.size()),
+                                      static_cast<uint32_t>(sig.requiredArgs),
+                                      {}, sig.def ? sig.def->isAsync : false);
+                    program_.funcs[static_cast<size_t>(idx)].nlocals =
+                        0; // 声明占位；体由其模块编译
+                }
+                into.emplace(fname, idx);
+            }
+        return importedFuncs_.emplace(full, std::move(into)).first->second;
+    };
     for (const auto& stmt : m.body) {
         if (stmt->kind != Stmt::Kind::Import) continue;
         auto& im = static_cast<const Import&>(*stmt);
-        auto it = registry_.find(im.module);
-        if (it == registry_.end()) continue;
-        std::map<std::string, int> into;
-        for (const auto& [fname, sig] : it->second->funcs) {
-            int idx = lookupModuleFunc(im.module, fname);
-            if (idx < 0) {
-                idx = declareFunc(im.module, fname,
-                                  static_cast<uint32_t>(sig.params.size()),
-                                  static_cast<uint32_t>(sig.requiredArgs),
-                                  {}, sig.def ? sig.def->isAsync : false);
-                program_.funcs[static_cast<size_t>(idx)].nlocals = 0; // 声明占位；体由其模块编译
+        const std::string full = im.module();
+        if (im.isFrom) {
+            // from <mod> import x [as y]：解析序与检查器一致
+            // （函数 → 全局 → 子模块）；全未命中由检查器报 E5003。
+            const auto& funcs = ensureImported(full);
+            auto rit = registry_.find(full);
+            for (const auto& item : im.items) {
+                const std::string& bind =
+                    item.alias.empty() ? item.name : item.alias;
+                if (auto fit = funcs.find(item.name); fit != funcs.end()) {
+                    visibleFuncs_.emplace(bind, fit->second);
+                    continue;
+                }
+                if (rit != registry_.end() &&
+                    rit->second->globals.count(item.name)) {
+                    fromGlobals_.emplace(bind,
+                                         std::make_pair(full, item.name));
+                    continue;
+                }
+                std::string sub = full + "." + item.name;
+                if (registry_.count(sub)) {
+                    ensureImported(sub);
+                    modAlias_.emplace(bind, sub);
+                }
             }
-            into.emplace(fname, idx);
+            continue;
         }
-        importedFuncs_.emplace(im.module, std::move(into));
+        ensureImported(full);
+        modAlias_.emplace(full, full);
+        if (!im.alias.empty()) {
+            // import a.b as c：仅别名绑定（Python 语义）。
+            modAlias_.emplace(im.alias, full);
+            continue;
+        }
+        // Python 式首段绑定 + 末段宽容（AI 幻觉写法亦可编译；键冲突
+        // 由检查器 E2007 把关，此处 emplace 首绑定优先保持确定性）。
+        if (!im.path.empty()) modAlias_.emplace(im.path.front(), full);
+        if (im.path.size() > 1) modAlias_.emplace(im.path.back(), full);
     }
 
     // 声明遍 2：本模块函数（内建优先不遮蔽，与检查器解析顺序一致）。
@@ -800,6 +995,7 @@ bool Compiler::compileModule(const Module& m) {
         if (!ext) return;
         FuncBC& fn = program_.funcs[static_cast<size_t>(idx)];
         fn.isExtern = true;
+        fn.isVariadic = fd.isVariadic; // O 节：变参装载分叉的依据
         for (const auto& d : fd.decorators) {
             if (d.name == "extern" && !d.args.empty() &&
                 d.args[0]->kind == Expr::Kind::StrLit) {
@@ -867,7 +1063,9 @@ bool Compiler::compileModule(const Module& m) {
         locals_ = &locals;
         loopDepth_ = 0;
         openTries_.clear();
+        deferStack_.clear();
         compileStmtList(fd->body);
+        emitDefers(); // 函数尾隐式 return None 前展开全部 defer
         emit(Op::ReturnNone); // 隐式 return None
         fn_->nlocals = locals.nlocals;
         fn_ = nullptr;
@@ -885,6 +1083,7 @@ bool Compiler::compileModule(const Module& m) {
         LocalInfo locals; // 顶层用全局槽，不复用局部
         fn_ = &fn;
         locals_ = &locals;
+        deferStack_.clear(); // 顶层无 defer（检查器已限），防跨函数残留
         compileStmtList(m.body);
         emit(Op::ReturnNone);
         fn_->nlocals = locals.nlocals;

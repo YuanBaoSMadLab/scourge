@@ -1,0 +1,13 @@
+# probe_cap_pure.sg — 零能力声明：纯计算内建（数学/哈希/容器/字符串）不
+# 触达程序外世界，无需授权——"能力 = 环境交互"的单义性（0.9.7）。本探针
+# 无任何 capability 声明即应双模通过；sha256/crc32 为确定性纯函数，
+# 输出逐字节锁定（sha256("abc") 为 FIPS 向量，crc32("123456789") 为
+# 0xCBF43926 锁定向量）。
+def main() -> int:
+    print(abs(-7), max([3, 9]), min([3, 9]))
+    xs: List[int] = [3, 1, 2]
+    print(sorted(xs))
+    print(sha256("abc"))
+    print(crc32("123456789"))
+    print("abc".upper(), len("hello"))
+    return 0

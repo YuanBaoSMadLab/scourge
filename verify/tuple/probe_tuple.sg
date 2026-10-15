@@ -1,0 +1,55 @@
+# Tuple 探针（0.9.6）：双模逐字节对拍
+# 覆盖：构造全类型 / 嵌套 / 下标读 / len / == != （真假两面） /
+# print repr（含转义）/ str 拼接 / 单元素尾逗号 / 空元组 / 函数返回。
+# 约定：不含全局元组（AOT 与 List/Dict/Set 全局同拒）；
+#       不含长度不一致比较（检查器 E2001 静态拒绝，非运行时 False）。
+
+def make() -> (int, str):
+    return (1, "a")
+
+def main():
+    # 构造：全类型元素 + 深嵌套
+    t = (1, 2.5, True, "hi", None, (3, (4,)))
+    print(t)
+    # (1, 2.5, True, "hi", None, (3, (4,)))
+
+    # 下标读：标量 + 链式嵌套
+    print(t[0], t[1], t[2], t[3], t[4])
+    print(t[5][1][0])
+
+    # len
+    print(len(t))
+
+    # 单元素尾逗号 / 空元组
+    print((1,))
+    print(("a",))
+    print(())
+    print((None,))
+
+    # == / !=：同构真、异值假、数值族跨类型、嵌套相等、str 比较
+    print(t == (1, 2.5, True, "hi", None, (3, (4,))))
+    print(t != (1, 2.5, True, "hi", None, (3, (4,))))
+    print((1, "a") == (1.0, "a"))
+    print((1, "a") != (1, "b"))
+    print(t[5] == (3, (4,)))
+    print(("a",) == ("a",))
+    print((True, 1) == (True, 1))
+
+    # print repr 转义：反斜杠 / 引号 / 换行 / 制表
+    print(("a\"b", "c\\d", "e\nf", "g\th"))
+
+    # str() 与拼接
+    s = "x" + str((1, "a\nb"))
+    print(s)
+    print(str(()))
+    print(str((1,)))
+
+    # 函数返回元组 + 解包消费
+    print(make())
+    print(make()[1])
+    print(len(make()))
+
+    # 混合嵌套：元组含元组含 str
+    n = ((1, "in"), ("out", 2))
+    print(n)
+    print(n[0][1], n[1][0])

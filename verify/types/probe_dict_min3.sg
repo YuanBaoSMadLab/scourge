@@ -1,0 +1,4 @@
+def main() -> int:
+    f: Dict[float, float] = {1.5: 10}
+    print(f)
+    return 0

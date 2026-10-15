@@ -1,0 +1,2 @@
+# glib@1.9/core.sg —— 包缓存旧版本（vermain 探针应选中 1.10 而非本版）
+VERSION = "1.9"

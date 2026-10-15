@@ -52,6 +52,7 @@
 #include "scourge/AOT/LangOps.h"
 
 #include "scourge/AOT/GpuCover.hpp"
+#include "scourge/Common/Capability.hpp"
 
 namespace scourge {
 namespace aot {
@@ -73,6 +74,8 @@ struct OpLower {
     const char* externArgs; ///< sg_* 完整 ABI 类型码
     char ret;           ///< 返回类型码
     bool hasCtx;        ///< 调用是否追加 panic 上下文 (fn, file, line)
+    const char* cap = nullptr; ///< 能力域名（Capability.hpp；需授权行非空，
+                               ///< LangCallRewrite 前置 sg_cap_check 查位）
 };
 
 const OpLower kLowerings[] = {
@@ -100,6 +103,7 @@ const OpLower kLowerings[] = {
     {"lang.str_from_f64", "sg_str_from_f64", "f", "f", 'p', false},
     {"lang.str_from_bool", "sg_str_from_bool", "b", "b", 'p', false},
     {"lang.str_from_tensor", "sg_str_from_tensor", "p", "p", 'p', false},
+    {"lang.str_escape", "sg_str_escape", "p", "p", 'p', false}, // 0.9.6 元组 repr
     // ---- 数学内建 ----
     {"lang.abs_i", "sg_abs_i64", "i", "i", 'i', false},
     {"lang.abs_f", "sg_abs_f64", "f", "f", 'f', false},
@@ -124,7 +128,27 @@ const OpLower kLowerings[] = {
     {"lang.random", "sg_random", "", "", 'f', false},
     {"lang.seed", "sg_seed", "i", "i", 'v', false},
     {"lang.sorted", "sg_sorted", "p", "pppi", 'p', true},
-    {"lang.now", "sg_now", "", "", 'f', false},
+    // ---- IO 内建（0.9.4）：失败 panic 的五个挂上下文；exists 纯查询不挂 ----
+    {"lang.input", "sg_input", "", "ppi", 'p', true, "io"},
+    {"lang.read_text", "sg_read_text", "p", "pppi", 'p', true, "io"},
+    {"lang.write_text", "sg_write_text", "pp", "ppppi", 'i', true, "io"},
+    {"lang.append_text", "sg_append_text", "pp", "ppppi", 'i', true, "io"},
+    {"lang.exists", "sg_exists", "p", "p", 'b', false, "io"},
+    {"lang.list_dir", "sg_list_dir", "p", "pppi", 'p', true, "io"},
+    // ---- 网络/睡眠（0.9.4 F/G 专项）：句柄 I64 不透明；全部挂 panic 上下文 ----
+    {"lang.net_connect", "sg_net_connect", "pi", "pippi", 'i', true, "net"},
+    {"lang.net_send", "sg_net_send", "ip", "ipppi", 'i', true, "net"},
+    {"lang.net_recv", "sg_net_recv", "ii", "iippi", 'p', true, "net"},
+    {"lang.net_close", "sg_net_close", "i", "ippi", 'v', true, "net"},
+    {"lang.net_udp_send", "sg_net_udp_send", "pip", "pipppi", 'i', true, "net"},
+    {"lang.net_http_get", "sg_net_http_get", "p", "pppi", 'p', true, "net"},
+    {"lang.sleep", "sg_sleep", "i", "ippi", 'v', true, "time"},
+    // ---- F/G 迭代 2：TCP 服务端与收发超时 ----
+    {"lang.net_bind", "sg_net_bind", "pi", "pippi", 'i', true, "net"},
+    {"lang.net_accept", "sg_net_accept", "i", "ippi", 'i', true, "net"},
+    {"lang.net_set_timeout", "sg_net_set_timeout", "ii", "iippi", 'v', true,
+     "net"},
+    {"lang.now", "sg_now", "", "", 'f', false, "time"},
     // ---- 打印 ----
     {"lang.print_i64", "sg_print_i64", "i", "i", 'v', false},
     {"lang.print_f64", "sg_print_f64", "f", "f", 'v', false},
@@ -159,6 +183,9 @@ const OpLower kLowerings[] = {
     {"lang.tensor_reduce_f", "sg_tensor_reduce_f", "Ipp", "Ippppi", 'f', true},
     {"lang.tensor_transpose", "sg_tensor_transpose", "p", "pppi", 'p', true},
     {"lang.tensor_reshape", "sg_tensor_reshape", "pip", "pipppi", 'p', true},
+    // ---- data_ptr（0.9.6 O 节 FFI 宽类型域；str 路径在 MLIRGen 就地
+    // ptrtoint 不落 op；空张量 panic 消息与 VM doBuiltin 逐字一致） ----
+    {"lang.data_ptr", "sg_data_ptr", "p", "pppi", 'i', true},
     // ---- Result（错误即值；载荷按位编码，unwrap 携带缺省值） ----
     {"lang.result_ok_i", "sg_result_ok_i", "i", "i", 'p', false},
     {"lang.result_ok_f", "sg_result_ok_f", "f", "f", 'p', false},
@@ -182,6 +209,81 @@ const OpLower kLowerings[] = {
     {"lang.list_get_f", "sg_list_get_f", "pi", "pippi", 'f', true},
     {"lang.list_get_b", "sg_list_get_b", "pi", "pippi", 'b', true},
     {"lang.list_get_s", "sg_list_get_s", "pi", "pippi", 'p', true},
+    {"lang.list_in_i", "sg_list_in_i", "pi", "pi", 'b', false},
+    {"lang.list_in_f", "sg_list_in_f", "pf", "pf", 'b', false},
+    {"lang.list_in_b", "sg_list_in_b", "pb", "pb", 'b', false},
+    {"lang.list_in_s", "sg_list_in_s", "pp", "pp", 'b', false},
+    // ---- Dict（键/值统一 64 位槽 ABI；插入序迭代。new/set NaN 键、
+    // get 缺键、key_at 越界 panic 挂上下文） ----
+    {"lang.dict_new", "sg_dict_new", "IIipp", "IIippppi", 'p', true},
+    {"lang.dict_len", "sg_dict_len", "p", "p", 'i', false},
+    {"lang.dict_get", "sg_dict_get", "pi", "pippi", 'i', true},
+    {"lang.dict_set", "sg_dict_set", "pii", "piippi", 'v', true},
+    {"lang.dict_in", "sg_dict_in", "pi", "pi", 'b', false},
+    {"lang.dict_key_at", "sg_dict_key_at", "pi", "pippi", 'i', true},
+    // ---- Set（0.9.3：仅键表，复用 SgDict 链式哈希；元素语义 = Dict 键。
+    // new NaN 元素、elem_at 越界 panic 挂上下文） ----
+    {"lang.set_new", "sg_set_new", "Iip", "Iipppi", 'p', true},
+    {"lang.set_len", "sg_set_len", "p", "p", 'i', false},
+    {"lang.set_in", "sg_set_in", "pi", "pi", 'b', false},
+    {"lang.set_elem_at", "sg_set_elem_at", "pi", "pippi", 'i', true},
+    // ---- str / List 成员方法（0.9.4；panic 消息与 VM callValueMethod 逐字
+    // 一致；contains 不设新 op——str 用 str_contains，List 用 list_in_*） ----
+    {"lang.str_upper", "sg_str_upper", "p", "p", 'p', false},
+    {"lang.str_lower", "sg_str_lower", "p", "p", 'p', false},
+    {"lang.str_trim", "sg_str_trim", "p", "p", 'p', false},
+    {"lang.str_trim_start", "sg_str_trim_start", "p", "p", 'p', false},
+    {"lang.str_trim_end", "sg_str_trim_end", "p", "p", 'p', false},
+    {"lang.str_split", "sg_str_split", "pp", "ppppi", 'p', true},
+    {"lang.str_join", "sg_str_join", "pp", "ppppi", 'p', true},
+    {"lang.str_replace", "sg_str_replace", "ppp", "pppppi", 'p', true},
+    {"lang.str_find", "sg_str_find", "pp", "pp", 'i', false},
+    {"lang.str_index", "sg_str_index", "pp", "ppppi", 'i', true},
+    {"lang.str_startswith", "sg_str_startswith", "pp", "pp", 'I', false},
+    {"lang.str_endswith", "sg_str_endswith", "pp", "pp", 'I', false},
+    {"lang.list_index", "sg_list_index", "pIi", "pIippi", 'i', true},
+    {"lang.list_count", "sg_list_count", "pIi", "pIi", 'i', false},
+    {"lang.list_format", "sg_list_format", "p", "p", 'p', false},
+    {"lang.print_list", "sg_print_list", "p", "p", 'v', false},
+    // ---- 系统编程内建（0.9.4 H 专项）：panic 的三个挂上下文，其余纯查询 ----
+    {"lang.args", "sg_args", "", "", 'p', false, "env"},
+    {"lang.env", "sg_env", "p", "p", 'p', false, "env"},
+    {"lang.has_env", "sg_has_env", "p", "p", 'b', false, "env"},
+    {"lang.set_env", "sg_set_env", "pp", "pp", 'b', false, "env"},
+    {"lang.unset_env", "sg_unset_env", "p", "p", 'v', false, "env"},
+    {"lang.epoch", "sg_epoch", "", "", 'i', false, "time"},
+    {"lang.epoch_ms", "sg_epoch_ms", "", "", 'i', false, "time"},
+    {"lang.localtime", "sg_localtime", "i", "ippi", 'p', true, "time"},
+    {"lang.gmtime", "sg_gmtime", "i", "ippi", 'p', true, "time"},
+    {"lang.system", "sg_system", "p", "p", 'i', false, "proc"},
+    {"lang.spawn_wait", "sg_spawn_wait", "pp", "ppppi", 'i', true, "proc"},
+    {"lang.signal_caught", "sg_signal_caught", "", "", 'b', false, "signal"},
+    {"lang.signal_reset", "sg_signal_reset", "", "", 'v', false, "signal"},
+    // 0.9.4 M 专项：标准库广度（统计/倒序/哈希）
+    {"lang.tensor_mean", "sg_tensor_mean", "p", "pppi", 'f', true},
+    {"lang.tensor_var", "sg_tensor_var", "p", "pppi", 'f', true},
+    {"lang.tensor_std", "sg_tensor_std", "p", "pppi", 'f', true},
+    {"lang.list_mean", "sg_list_mean", "p", "pppi", 'f', true},
+    {"lang.list_var", "sg_list_var", "p", "pppi", 'f', true},
+    {"lang.list_std", "sg_list_std", "p", "pppi", 'f', true},
+    {"lang.list_reversed", "sg_list_reversed", "p", "p", 'p', false},
+    {"lang.str_reversed", "sg_str_reversed", "p", "p", 'p', false},
+    {"lang.sha256", "sg_sha256", "p", "p", 'p', false},
+    {"lang.crc32", "sg_crc32", "p", "p", 'i', false},
+    // ---- JSON（0.9.4 M 专项：动态 Json 值；tag 序 0=null 1=bool 2=int
+    //      3=float 4=str 5=arr 6=obj，与 JsonData::JK / SgJson 同序） ----
+    {"lang.json_decode", "sg_json_decode", "p", "pppi", 'p', true},
+    {"lang.json_is", "sg_json_is", "pI", "pI", 'b', false},
+    {"lang.json_as_int", "sg_json_as_int", "p", "pppi", 'i', true},
+    {"lang.json_as_float", "sg_json_as_float", "p", "pppi", 'f', true},
+    {"lang.json_as_bool", "sg_json_as_bool", "p", "pppi", 'b', true},
+    {"lang.json_as_str", "sg_json_as_str", "p", "pppi", 'p', true},
+    {"lang.json_get_idx", "sg_json_get_idx", "pi", "pippi", 'p', true},
+    {"lang.json_get_key", "sg_json_get_key", "pp", "pp", 'p', false},
+    {"lang.json_len", "sg_json_len", "p", "pppi", 'i', true},
+    {"lang.json_keys", "sg_json_keys", "p", "pppi", 'p', true},
+    {"lang.json_dump", "sg_json_dump", "p", "p", 'p', false},
+    {"lang.print_json", "sg_print_json", "p", "p", 'v', false},
 };
 
 const OpLower* findLowering(mlir::StringRef name) {
@@ -200,6 +302,15 @@ mlir::Type typeForCode(mlir::MLIRContext* ctx, char c) {
     case 'p': return mlir::LLVM::LLVMPointerType::get(ctx);
     default: return {};
     }
+}
+
+/// 形参侧类型码展开：'b' → i32。MS x64 下 i1 形参经 8 位子寄存器传递且
+/// 不保证高位清零，而 C 运行时形参是 int（读全 32 位寄存器）——残留垃圾
+/// 会把 false 读成 true（实测：xor 取反后的布尔经 sg_print_bool 暴露）。
+/// 降级层统一 zext 到 i32 对齐 C ABI；返回方向 C 写 EAX 自动零扩展、
+/// 调用方按 i1 读 AL，无垃圾问题——返回码保持 'b'→i1。
+mlir::Type argTypeForCode(mlir::MLIRContext* ctx, char c) {
+    return c == 'b' ? mlir::Builder(ctx).getI32Type() : typeForCode(ctx, c);
 }
 
 /// 符号净化：非 [A-Za-z0-9_] → '_'；发生过替换时追加确定性 FNV 短哈希防碰撞
@@ -491,6 +602,29 @@ private:
         msgCache_;
 };
 
+/// 门禁 what 字符串（"read_text" 等）：模块级全局去重 + 调用点 AddressOf。
+/// dom 不下 IR——C 侧 sg_cap_check 按 bit 查 Builder 生成的域表（单一事实源
+/// 经 kAllCaps 生成）。AddressOf 就地创建（支配调用点），LLVM 优化去重。
+mlir::Value capWhatAddr(mlir::Operation* op,
+                        mlir::ConversionPatternRewriter& rewriter,
+                        const std::string& what) {
+    mlir::ModuleOp mod =
+        op->getParentOfType<mlir::func::FuncOp>()
+            ->getParentOfType<mlir::ModuleOp>();
+    mlir::Location loc = op->getLoc();
+    mlir::MLIRContext* ctx = op->getContext();
+    std::string sym = ".sg_capw_" + what;
+    {
+        mlir::OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(mod.getBody());
+        if (!mlir::SymbolTable::lookupSymbolIn(mod, sym))
+            createStrGlobal(rewriter, loc, sym, what);
+    }
+    mlir::Type ptrTy = mlir::LLVM::LLVMPointerType::get(ctx);
+    return rewriter.create<mlir::LLVM::AddressOfOp>(
+        loc, ptrTy, mlir::FlatSymbolRefAttr::get(ctx, sym));
+}
+
 // ============================================================================
 // 降级 pattern：每个 lang op → func.call @sg_*
 // ============================================================================
@@ -521,19 +655,50 @@ public:
         }
         mlir::Location loc = op->getLoc();
 
-        // panic 上下文（fn/file/line）恢复（与内联 pattern 共享基建）
+        // panic 上下文（fn/file/line）恢复（与内联 pattern 共享基建）。
+        // 能力行也需上下文——sg_cap_check 拒绝时 panic 输出与 VM panicHere
+        // 逐字一致（hasCtx=false 的能力行由 MLIRGen 挂 opLoc 保障）。
         mlir::Value fnVal, fileVal, lineVal;
-        if (l->hasCtx &&
+        if ((l->cap || l->hasCtx) &&
             failed(ensurePanicCtx(op, rewriter, ctxCache_, fnVal, fileVal,
                                   lineVal)))
             return mlir::failure();
+
+        // 能力运行时门禁（0.9.7 第二道）：@sg_caps 位掩码查位，未授权即
+        // panic（消息由 C 侧拼装，与 VM capPanicMsg 逐字一致）。检查期
+        // E5004 是第一道；此处拦截绕过检查器的执行路径（纵深防御）。
+        if (l->cap) {
+            Cap cap;
+            if (!capFromName(l->cap, cap)) {
+                op->emitError("降级表能力域名非法：" + std::string(l->cap));
+                return mlir::failure();
+            }
+            rewriter.create<mlir::func::CallOp>(
+                loc, "sg_cap_check", mlir::TypeRange{},
+                mlir::ValueRange{
+                    rewriter.create<mlir::arith::ConstantOp>(
+                        loc, rewriter.getI64Type(),
+                        rewriter.getI64IntegerAttr(
+                            static_cast<int64_t>(capBit(cap)))),
+                    capWhatAddr(op, rewriter, l->lang + 5), fnVal, fileVal,
+                    lineVal});
+        }
 
         mlir::SmallVector<mlir::Value> args;
         if (std::strcmp(l->sg, "sg_panic") == 0) {
             // sg_panic ABI：上下文位于 msg 之前
             args = {fnVal, fileVal, lineVal, operands[0]};
         } else {
-            args.append(operands.begin(), operands.end());
+            // bool 形参（externArgs 码 'b'）zext 到 i32 对齐 C ABI（见
+            // argTypeForCode：MS x64 i1 传参高位不保证清零）。operands 与
+            // externArgs 前段逐位对应；ctx 三元组（p/p/i）无 'b' 码。
+            for (size_t k = 0; k < operands.size(); ++k) {
+                if (l->externArgs[k] == 'b')
+                    args.push_back(rewriter.create<mlir::arith::ExtUIOp>(
+                        loc, rewriter.getI32Type(), operands[k]));
+                else
+                    args.push_back(operands[k]);
+            }
             if (l->hasCtx) {
                 args.push_back(fnVal);
                 args.push_back(fileVal);
@@ -607,6 +772,22 @@ public:
                       rewriter.getDenseI32ArrayAttr(
                           {static_cast<int32_t>(callArgs.size()), 0}));
         call->setAttr("op_bundle_sizes", rewriter.getDenseI32ArrayAttr({}));
+        // 变参（0.9.6 O 节）：lang 层 {variadic} 标记 → 间接 call 挂
+        // var_callee_type，LLVM 后端按 MS x64 varargs 发射（浮点位模式进
+        // GP 位置槽 + xmm 位置槽 + AL），与 VM thunk 位置式装载双模一致；
+        // 定参调用不带标记，LLVM 定参 ABI（浮点仅 xmm 序数槽）。
+        if (op->getAttr("variadic")) {
+            mlir::SmallVector<mlir::Type> argTys;
+            for (size_t k = 2; k < operands.size(); ++k)
+                argTys.push_back(operands[k].getType());
+            mlir::Type retTy = retTys.empty()
+                                   ? mlir::Type(mlir::LLVM::LLVMVoidType::get(
+                                         op->getContext()))
+                                   : retTys[0];
+            call->setAttr("var_callee_type",
+                         mlir::TypeAttr::get(mlir::LLVM::LLVMFunctionType::get(
+                             retTy, argTys, /*isVarArg=*/true)));
+        }
 
         // str 返回（ptr 结果）：经 sg_extern_wrap_str 深拷贝。
         if (!retTys.empty() &&
@@ -639,7 +820,8 @@ class LangToLLVMPass
 public:
     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LangToLLVMPass)
 
-    explicit LangToLLVMPass(bool gpuMode) : gpuMode_(gpuMode) {}
+    explicit LangToLLVMPass(bool gpuMode, uint64_t capMask)
+        : gpuMode_(gpuMode), capMask_(capMask) {}
 
     mlir::StringRef getArgument() const override {
         return "scourge-lang-to-llvm";
@@ -655,7 +837,7 @@ public:
         // 1) 模块级补插 @sg_* 外部声明（kExterns 表搬家；与原 MLIRGen 行为
         //    一致——全量插入，未用符号无副作用）。gpuMode 下补插
         //    @sg_gpu_* 覆盖集声明（ABI 与对应 @sg_* 一致）。
-        declareRuntimeExterns(mod, ctx, gpuMode_);
+        declareRuntimeExterns(mod, ctx, gpuMode_, capMask_);
 
         // 2) 全量转换：lang 非法；builtin/func/arith/cf/llvm/memref/linalg
         //    /affine 合法——memref/linalg/affine 是前序降级 pass（LangToAffine/
@@ -688,9 +870,11 @@ public:
 
 private:
     const bool gpuMode_; // CUDA 第 1 层：覆盖集换发 @sg_gpu_* 并补插声明
+    const uint64_t capMask_; // 能力授予掩码（@sg_caps 注入值）
 
     static void declareRuntimeExterns(mlir::ModuleOp mod,
-                                      mlir::MLIRContext* ctx, bool gpuMode) {
+                                      mlir::MLIRContext* ctx, bool gpuMode,
+                                      uint64_t capMask) {
         mlir::OpBuilder b(ctx);
         mlir::Location loc = mod.getLoc();
         mlir::OpBuilder::InsertionGuard guard(b);
@@ -698,7 +882,7 @@ private:
         for (const OpLower& l : kLowerings) {
             mlir::SmallVector<mlir::Type> argTys;
             for (const char* c = l.externArgs; *c; ++c)
-                argTys.push_back(typeForCode(ctx, *c));
+                argTys.push_back(argTypeForCode(ctx, *c));
             mlir::SmallVector<mlir::Type> retTys;
             if (l.ret != 'v') retTys.push_back(typeForCode(ctx, l.ret));
             auto fn = b.create<mlir::func::FuncOp>(
@@ -714,17 +898,29 @@ private:
              false},
             {"lang.extern_wrap_str", "sg_extern_wrap_str", "p", "p", 'p',
              false},
+            // 能力运行时门禁（0.9.7）：ABI (bit, what, fn, file, line) =
+            // "ipppi"。bit/what 由 LangCallRewrite 前置生成；sg_extern_resolve
+            // 亦调用（ffi 域入口查位）。
+            {"lang.cap_check", "sg_cap_check", "", "ipppi", 'v', false},
         };
         for (const OpLower& l : kExternSupport) {
             mlir::SmallVector<mlir::Type> argTys;
             for (const char* c = l.externArgs; *c; ++c)
-                argTys.push_back(typeForCode(ctx, *c));
+                argTys.push_back(argTypeForCode(ctx, *c));
             mlir::SmallVector<mlir::Type> retTys;
             if (l.ret != 'v') retTys.push_back(typeForCode(ctx, l.ret));
             auto fn = b.create<mlir::func::FuncOp>(
                 loc, l.sg, mlir::FunctionType::get(ctx, argTys, retTys));
             fn.setVisibility(mlir::SymbolTable::Visibility::Private);
         }
+        // @sg_caps：程序能力授予掩码（会话层对依赖闭包求并，builder 传入）
+        // ——external constant 全局进 main.obj，rt.c 侧 extern 读取（rt.obj
+        // 保持程序无关，缓存键不失效）。external 链接必需：internal 符号
+        // 无法跨 TU 被 rt.obj 引用。
+        b.create<mlir::LLVM::GlobalOp>(
+            loc, b.getI64Type(), /*isConstant=*/true,
+            mlir::LLVM::Linkage::External, "sg_caps",
+            b.getI64IntegerAttr(static_cast<int64_t>(capMask)));
         if (!gpuMode) return;
         // GPU 覆盖集声明（sg_<rest> → sg_gpu_<rest>，ABI 逐一相同）。名单
         // 单一事实源在 GpuCover.hpp（kGpuCoveredLang / coveredLangName），
@@ -745,7 +941,7 @@ private:
                                               const OpLower& l) {
         mlir::SmallVector<mlir::Type> argTys;
         for (const char* c = l.externArgs; *c; ++c)
-            argTys.push_back(typeForCode(ctx, *c));
+            argTys.push_back(argTypeForCode(ctx, *c));
         mlir::SmallVector<mlir::Type> retTys;
         if (l.ret != 'v') retTys.push_back(typeForCode(ctx, l.ret));
         return mlir::FunctionType::get(ctx, argTys, retTys);
@@ -754,8 +950,9 @@ private:
 
 } // namespace
 
-std::unique_ptr<mlir::Pass> createLangToLLVMPass(bool gpuMode) {
-    return std::make_unique<LangToLLVMPass>(gpuMode);
+std::unique_ptr<mlir::Pass> createLangToLLVMPass(bool gpuMode,
+                                                 uint64_t capMask) {
+    return std::make_unique<LangToLLVMPass>(gpuMode, capMask);
 }
 
 } // namespace aot

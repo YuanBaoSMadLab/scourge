@@ -1,0 +1,6 @@
+# neg_cap_io.sg — 未授权负例：无 capability 声明使用 io 内建 → 检查期
+# E5004 拒编（run 与 build 同一门禁，消息定位首个使用点）。
+def main() -> int:
+    s = read_text("no_such_file.txt")
+    print(len(s))
+    return 0

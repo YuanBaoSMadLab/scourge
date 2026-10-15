@@ -25,7 +25,9 @@ struct RunOutcome {
 };
 
 /// 一次完整「加载 → 缓存判定 → 检查/编译 → VM 执行」。
+/// scriptArgs：args() 内建返回的脚本参数（不含程序名；0.9.4 H 专项）。
 RunOutcome runOnce(const std::filesystem::path& inPath, bool useCache,
-                   bool captureOut);
+                   bool captureOut,
+                   const std::vector<std::string>& scriptArgs = {});
 
 } // namespace scourge

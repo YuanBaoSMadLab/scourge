@@ -1,0 +1,9 @@
+# 变体实验：float 值 dict / float 键 dict 分开测
+def main() -> int:
+    g: Dict[int, float] = {1: 2.5, 3: 4.5}
+    print(g[1])
+    print(g[3])
+    h: Dict[float, int] = {1.5: 10, 2.5: 20}
+    print(h[1.5])
+    print(h[2.5])
+    return 0

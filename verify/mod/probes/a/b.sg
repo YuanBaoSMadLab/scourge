@@ -1,0 +1,13 @@
+# a/b.sg —— 0.9.6 L 节探针目标模块（点分路径/别名/from-import/可见性）
+BASE = 10
+LIMIT = 100
+
+def add(x: int, y: int) -> int:
+    return x + y
+
+def mul(x: int, y: int) -> int:
+    return x * y
+
+@private
+def secret() -> int:
+    return 7

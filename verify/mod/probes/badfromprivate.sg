@@ -1,0 +1,6 @@
+# badfromprivate.sg —— from-import @private 函数（预期 E5003）
+from a.b import secret
+
+def main() -> int:
+    print(secret())
+    return 0

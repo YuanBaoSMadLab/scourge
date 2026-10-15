@@ -58,8 +58,10 @@ private:
     StmtPtr parseSimple();      ///< 赋值/增强赋值/表达式语句
     StmtPtr parseReturn();
     StmtPtr parseImport();      ///< import / from-import
+    StmtPtr parseCapability();  ///< capability 域声明（0.9.7，软关键字）
     StmtPtr parseAssert();
     StmtPtr parseTry();         ///< try/except（panic 恢复路径）
+    StmtPtr parseDefer();       ///< defer（函数级清理钩子，函数体顶层）
     StmtList parseBlock();      ///< 消耗 ': INDENT … DEDENT'
     void endOfStatement();      ///< 语句尾：消耗换行（缺失即报错并恢复）
     void syncToStatementBoundary();

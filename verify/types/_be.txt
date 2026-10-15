@@ -1,0 +1,3 @@
+d:\Scourge\verify\types\probe_list_num.sg:17:11: error[E1007]: AOT 后端暂不支持：'in' 仅支持 str 右操作数
+  17 |     print(3 in xs)
+     |           ^~~~~~~

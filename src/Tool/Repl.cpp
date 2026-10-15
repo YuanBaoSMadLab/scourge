@@ -18,6 +18,7 @@
 
 #include "scourge/BC/Compiler.hpp"
 #include "scourge/BC/VM.hpp"
+#include "scourge/Common/Capability.hpp"
 #include "scourge/Sema/TypeChecker.hpp"
 #include "scourge/Tool/Session.hpp"
 #include "scourge/Syntax/Lexer.hpp"
@@ -46,10 +47,11 @@ enum class UnitKind {
 
 /// 语句起始关键字白名单。值关键字（True/False/None/not/and/or/in/except/
 /// elif/else/await）不在其列——以它们开头的输入仍按表达式求值或交检查器报错。
+/// capability 软关键字亦按语句并入会话（0.9.7：顶层声明随 preamble 重编译）。
 bool isStmtKeyword(const std::string& kw) {
     static const char* kStmtKw[] = {
         "def", "try", "while", "for", "if", "assert", "async",
-        "pass", "return", "break", "continue",
+        "pass", "return", "break", "continue", "capability",
     };
     for (const char* k : kStmtKw)
         if (kw == k) return true;
@@ -283,7 +285,7 @@ void Repl::acceptImport(const std::string& unit) {
             err_ << "REPL 暂不支持 from-import（仅 import <模块>）\n";
             return;
         }
-        names.push_back(im.module);
+        names.push_back(im.module());
     }
     if (names.empty()) {
         err_ << "import 语句未解析出模块名\n";
@@ -371,7 +373,15 @@ bool Repl::compileSession(const std::string& source, bool execute) {
     bc::VMOptions vo;
     vo.entryFunc = kReplEntry;
     vo.out = [this](const std::string& s) { out_ << s; };
-    bc::VM vm(compiler.take(), vo);
+    // 能力授予集（0.9.7）：repl 轮模块（preamble 内 capability 声明）+
+    // import 模块闭包——与 run 的模块并集同语义。
+    bc::Program prog = compiler.take();
+    prog.capMask = capMaskOf(*mod);
+    for (const auto& n : order) {
+        const Module* m = session.loadedModule(n);
+        if (m) prog.capMask |= capMaskOf(*m);
+    }
+    bc::VM vm(std::move(prog), vo);
     if (!vm.run(order, "repl")) {
         const bc::Panic& p = vm.lastPanic();
         // 定位：repl 轮模块用合成名，import 模块用磁盘路径。

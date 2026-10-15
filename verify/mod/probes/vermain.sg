@@ -1,0 +1,8 @@
+# vermain.sg —— 本地包缓存版本择优探针（SCOURGE_PACKAGES 指向含
+# glib@1.9 与 glib@1.10 的缓存目录；数值感知取大 → 应加载 1.10）
+# 预期输出：1.10
+import glib.core
+
+def main() -> int:
+    print(core.VERSION)
+    return 0

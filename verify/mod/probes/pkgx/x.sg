@@ -1,0 +1,4 @@
+# pkgx/x.sg —— @internal 包内函数（同包 pkgx.* 可见，包外拒绝）
+@internal
+def helper(n: int) -> int:
+    return n * 3

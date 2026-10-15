@@ -1,0 +1,26 @@
+# probe_cap.sg — 能力模型双模探针（0.9.7）：capability io, time 授权后
+# io/time 内建正常执行；未授权拒绝路径见 neg_cap_*.sg；纯内建零授权见
+# probe_cap_pure.sg。双模对拍约定：路径相对 CWD；epoch/now 只断言区间
+# 不锁定具体值（时钟不可复现）。
+capability io, time
+
+def main() -> int:
+    p = "probe_cap_tmp.txt"
+
+    # 1) io 授权路径：写/查/读回（write/append 返回本次写入字节数）
+    print(write_text(p, "line-one\nline-two"))
+    print(exists(p))
+    s = read_text(p)
+    print(len(s))
+    print(s)
+    print(append_text(p, "!"))
+    print(read_text(p))
+
+    # 2) time 授权路径：只断言区间（时钟不可复现，与 VM/AOT 同口径）；
+    #    sleep 返回 None，丢弃式调用（与 probe_g_sleep 同范式）
+    print(epoch() > 1700000000)
+    print(epoch_ms() > 0)
+    print(now() >= 0.0)
+    sleep(0)
+    print("cap-ok")
+    return 0

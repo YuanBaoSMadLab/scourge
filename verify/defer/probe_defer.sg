@@ -1,0 +1,51 @@
+# defer 双模探针（0.9.5）：LIFO 展开序、返回值求值先于 defer、
+# 裸 return / 函数尾隐式返回触发、defer 内 try/except 自帧、
+# panic 传播不触发 defer（契约：展开点静态可枚举）。
+# VM 与 AOT stdout 逐字节一致即通过。
+
+def f1() -> int:
+    defer:
+        print("d1-first")
+    defer:
+        print("d2-second")
+    print("body-f1")
+    return 10
+
+def f2() -> int:
+    x = 5
+    defer:
+        x = x + 100
+    return x          # 返回值先求值：defer 改 x 不影响返回值
+
+def f3():             # 裸 return：显式 return None 仍触发 defer
+    defer:
+        print("d3-tail")
+    print("body-f3")
+    return
+
+def f4() -> int:
+    defer:
+        print("d4-a")
+        try:
+            read_text("definitely-missing-file")  # panic：defer 内 try 自帧捕获
+        except:
+            print("caught-in-defer")
+        print("d4-b")
+    return 4
+
+def f5() -> int:
+    defer:
+        print("d5-should-not-print")
+    read_text("definitely-missing-file")  # panic 传播不经过 return 点：defer 不触发
+    return 5
+
+def main() -> int:
+    print(f1())       # body-f1 / d2-second / d1-first / 10
+    print(f2())       # 5
+    f3()              # body-f3 / d3-tail
+    print(f4())       # d4-a / caught-in-defer / d4-b / 4
+    try:
+        f5()
+    except:
+        print("f5-panicked-no-defer")
+    return 0

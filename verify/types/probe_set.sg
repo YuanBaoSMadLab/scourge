@@ -1,0 +1,65 @@
+# Set 全链路探针：构造/去重/len/in/for/嵌套打印/注解对齐/空集合/重赋值
+# 双模契约：run 与 build 输出必须逐字节一致
+
+def main() -> int:
+    # 1. 基本构造 + len（int / float / str / bool 四种槽位）
+    s1: Set[int] = {3, 1, 2, 1}
+    print(len(s1))                # 3（去重）
+    s2: Set[float] = {1.5, 2.5, 1.5}
+    print(len(s2))                # 2
+    s3: Set[str] = {"b", "a", "b"}
+    print(len(s3))                # 2
+    s4: Set[bool] = {True, False, True}
+    print(len(s4))                # 2
+
+    # 2. 裸字面量自推断（无注解）
+    s5 = {10, 20, 30}
+    print(len(s5))                # 3
+
+    # 3. in 成员判定（含未命中）
+    print(2 in s1)                # True
+    print(9 in s1)                # False
+    print("a" in s3)              # True
+    print(1.5 in s2)              # True
+
+    # 4. for 遍历（首插序，确定性）
+    total = 0
+    for x in s1:
+        total = total + x
+    print(total)                  # 6
+    for w in s3:
+        print(w)                  # b a（首插序）
+
+    # 5. 混合 int∘float 统一（int∘float → float）
+    s6: Set[float] = {1, 2.5}
+    print(len(s6))                # 2
+    print(1.0 in s6)              # True（int 1 提升后同键）
+
+    # 6. 空集合（Set 注解上下文的 {}）
+    s7: Set[int] = {}
+    print(len(s7))                # 0
+    print(1 in s7)                # False
+
+    # 7. 重赋值（既有变量对齐）
+    s7 = {5, 6}
+    print(len(s7))                # 2
+    print(5 in s7)                # True
+
+    # 8. 函数边界：传参 + 返回
+    print(setSize(s5))            # 3
+    s8 = makeSet()
+    print(len(s8))                # 2
+
+    # 9. 循环中构造（10 轮压测防退化）
+    acc = 0
+    for i in range(10):
+        t: Set[int] = {i, i + 1, i}
+        acc = acc + len(t)
+    print(acc)                    # 20
+    return 0
+
+def setSize(s: Set[int]) -> int:
+    return len(s)
+
+def makeSet() -> Set[str]:
+    return {"x", "y", "x"}

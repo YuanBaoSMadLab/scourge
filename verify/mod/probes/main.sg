@@ -1,0 +1,24 @@
+# main.sg —— 0.9.6 L 节正向探针：点分路径/别名/from-import/子模块链
+# 预期输出（14 行）：
+#   3 / 5 / 12 / 100 / 10 / 10 / 30 / 100 / 11 / 42 / 100 / sub-c / tag:sub-c / tag:sub-c
+import a.b
+import a.b as ab
+from a.b import add, mul as times, LIMIT as K
+from a.b import c
+
+def main() -> int:
+    print(a.b.add(1, 2))   # 规范点分调用
+    print(a.add(2, 3))     # 首段宽容（Python 式绑定）
+    print(b.mul(3, 4))     # 末段宽容（AI 幻觉容错）
+    print(a.b.LIMIT)       # 点分常量
+    print(a.BASE)          # 首段宽容常量
+    print(b.BASE)          # 末段宽容常量
+    print(ab.add(10, 20))  # 别名调用
+    print(ab.LIMIT)        # 别名常量
+    print(add(5, 6))       # from 函数
+    print(times(6, 7))     # from 别名函数
+    print(K)               # from 别名全局
+    print(c.NAME)          # from 子模块常量
+    print(c.tag())         # from 子模块调用
+    print(a.b.c.tag())     # 完整链下钻（首段绑定 + 重写段 + 子模块下钻）
+    return 0

@@ -21,11 +21,16 @@
 #include <unordered_set>
 #include <vector>
 
+#include "scourge/Common/Capability.hpp"
 #include "scourge/Common/Diagnostic.hpp"
 #include "scourge/Sema/Type.hpp"
 #include "scourge/Syntax/AST.hpp"
 
 namespace scourge {
+
+/// 成员可见性（0.9.6 L 节）：public 默认；private 仅本模块；
+/// internal 仅本包（模块名首段相同的家族；无点顶层模块等价 private）。
+enum class Vis { Public, Private, Internal };
 
 /// 函数签名（跨模块可见；.sgi 生成亦复用）。
 struct FuncSig {
@@ -36,6 +41,8 @@ struct FuncSig {
     bool isPure = false;
     bool retPending = false; ///< 返回类型待推断（无注解，由 return 语句统一）
     bool isExtern = false;   ///< @extern：动态库外部函数（体不发射，H 专项）
+    bool isVariadic = false; ///< 参数表尾 ...（仅 @extern 合法，O 节 FFI 宽类型域）
+    Vis vis = Vis::Public;   ///< @private/@internal（0.9.6 L 节）
 
     /// 契约子句引用（表达式借用自 AST，生命周期由 Module 持有保证）。
     struct ContractRef {
@@ -118,6 +125,7 @@ private:
     void collectTopLevel(Module& m, ModuleSymbols& out);
     void checkFunction(FuncDef& f, ModuleSymbols& out);
     void checkStmtList(const StmtList& list);
+    void checkNested(const StmtList& list); ///< 嵌套块检查（blockDepth_ 供 defer 顶层限制）
     void checkStmt(const Stmt& s);
     void checkContractDefs(const FuncDef& f);
 
@@ -130,6 +138,9 @@ private:
     TypePtr checkAttr(const Expr& e);
     TypePtr checkIndex(const Expr& e);
     TypePtr checkListLit(const Expr& e);
+    TypePtr checkDictLit(const Expr& e);
+    TypePtr checkSetLit(const Expr& e);
+    TypePtr checkTupleLit(const Expr& e);
     TypePtr checkName(const Expr& e);
 
     // ---- 契约静态验证（调用点） -------------------------------------------------
@@ -149,11 +160,20 @@ private:
     void requireBool(const TypePtr& t, const SourceRange& r, std::string_view what);
     void noteSimilarName(const std::string& name);
 
+    // ---- 跨模块（0.9.6 L 节：点分路径/别名/可见性） ----------------------------
+    /// 折叠模块限定前缀：Name（"m"）或 Attr 链（"a.b"）→ 全限定模块名；
+    /// 逐段验证子模块在 imports_ 中存在，失败返回空串。
+    std::string qualifiedModuleName(const Expr& base) const;
+    /// 可见性门禁：违规报 E5003 并返回 false（curMod_ 为当前模块全名）。
+    bool checkVis(Vis v, const std::string& defModule,
+                  const std::string& member, const SourceRange& r);
+
     TypePtr fail(Errc code, const SourceRange& r, std::string msg);
 
     DiagEngine& diag_;
     const ModuleRegistry& imports_;
     FileId file_ = kInvalidFile;
+    std::string curMod_; ///< 当前检查模块全名（可见性判定基准）
 
     Scope scope_;
     std::map<std::string, FuncSig> localFuncs_;
@@ -163,8 +183,40 @@ private:
     int loopDepth_ = 0;
     bool inAsyncFn_ = false;        ///< 当前函数是否 async def（await 合法性）
     bool checkingEnsures_ = false;  ///< ensures 检查时绑定 result
+    bool inFunc_ = false;           ///< 当前是否在函数体内（defer 位置限制）
+    /// 当前在 @pure 函数体内（K 专项：纯度静态强制——禁非纯内建/非纯函数）
+    bool inPureFn_ = false;
+    int blockDepth_ = 0;            ///< 嵌套块深度（if/while/for/try 体；defer 顶层限制）
+    bool inDefer_ = false;          ///< 当前在 defer 块内（禁 return/break/continue/defer）
     ExprTypeMap exprTypes_;         ///< 表达式类型注解表（单一事实源，见上）
     std::unordered_set<const Expr*> promoteF64_; ///< 边界 int→float 提升集
+    /// List 上下文偏好（单发旗标）：赋值目标为 List 注解/既有 List 变量时
+    /// 指向右侧列表字面量，checkListLit 据此把数值字面量按 List[T] 推断
+    /// （默认数值字面量 = Tensor）。检查完表达式立即清空。
+    const Expr* asListLit_ = nullptr;
+    /// Dict 上下文偏好（单发旗标，同 asListLit_ 架构）：赋值/缺省值目标为
+    /// Dict[K,V] 注解（或既有 Dict 变量）时指向目标类型，checkDictLit
+    /// 据此把键/值统一对齐注解（int 元素按槽位提升）——否则字面量自推断
+    /// Dict{float,int} 与变量注解 Dict{float,float} 槽位语义脱节，读取侧
+    /// 按变量注解位还原即漂移。检查完表达式立即清空。
+    const Type* dictTarget_ = nullptr;
+    /// Set 上下文偏好（单发旗标，同 dictTarget_ 架构）：赋值/缺省值目标为
+    /// Dict[K,V]/Set[T] 注解（或既有变量）时指向目标类型，checkSetLit 据此把
+    /// 元素统一对齐注解（int 元素提升）；空 {} 在 Set 上下文判为空集合
+    /// （checkedAsSet）。检查完表达式立即清空。
+    const Type* setTarget_ = nullptr;
+
+    // ---- 能力门禁（0.9.7）------------------------------------------------------
+    /// 本模块 capability 声明集（collectTopLevel 扫描并集；check 开头重置）。
+    uint64_t declaredCaps_ = 0;
+    /// 能力使用点：需授权内建名 / @extern 函数名 + 域 + 首个使用位置。
+    /// check 收尾统一裁决——每个未声明域报一条 E5004（定位首次使用）。
+    struct CapUse {
+        std::string what; ///< 内建名或 @extern 函数名（诊断提示用）
+        Cap cap;
+        SourceRange range;
+    };
+    std::vector<CapUse> capUses_;
 };
 
 } // namespace scourge

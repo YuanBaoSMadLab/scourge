@@ -1,0 +1,6 @@
+# badprivate.sg —— 跨模块访问 @private（预期 E5003，双模诊断逐字一致）
+import a.b
+
+def main() -> int:
+    print(a.b.secret())
+    return 0

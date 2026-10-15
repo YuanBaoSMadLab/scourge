@@ -29,10 +29,15 @@
 #include <sstream>
 #include <system_error>
 
+#include "BuilderRTStr.hpp" // 私有分块头（与本文件同目录，不入 include/）
+#include "BuilderRTStd.hpp" // 标准库广度片段（统计/倒序/哈希；M 专项）
+#include "BuilderRTJson.hpp" // JSON 运行时片段（M 专项，vendored jsmn）
+#include "BuilderRTNet.hpp" // 网络/睡眠运行时片段（F/G 专项，同目录私有头）
 #include "BuilderRTSys.hpp" // 系统编程运行时片段（H 专项，同目录私有头）
 #include "scourge/AOT/InProcess.hpp"
 #include "scourge/AOT/MLIRGen.hpp"
 #include "scourge/BC/Serialize.hpp"
+#include "scourge/Common/Capability.hpp"
 #include "scourge/Tool/Session.hpp"
 
 namespace fs = std::filesystem;
@@ -994,6 +999,21 @@ double sg_tensor_reduce_f(int isMax, SgTensor* t, const char* name,
     return best;
 }
 
+/* data_ptr（0.9.6 O 节 FFI 宽类型域）：张量连续原生缓冲首地址。
+ * 空张量 panic 消息与 VM doBuiltin 逐字一致（双模差分锁定点）；
+ * str 路径不走此函数——AOT str 是全局常量，MLIRGen 就地 ptrtoint。 */
+int64_t sg_data_ptr(SgTensor* t, const char* fn, const char* file,
+                    int64_t line) {
+    if (sg_tsize(t) == 0) {
+        char msg[64];
+        snprintf(msg, sizeof msg, "data_ptr() 不支持空张量");
+        sg_panic(fn, file, line, msg);
+    }
+    sg_tsync(t); /* 设备驻留先回拷（回拷后地址才是宿主侧有效缓冲） */
+    return (int64_t)(intptr_t)(t->isInt ? (const void*)t->i64
+                                        : (const void*)t->f64);
+}
+
 SgTensor* sg_tensor_transpose(SgTensor* t, const char* fn, const char* file,
                               int64_t line) {
     if (t->rank != 2) {
@@ -1437,6 +1457,44 @@ uint64_t sg_dict_key_at(SgDict* d, int64_t idx, const char* fn,
     return d->ents[idx].k;
 }
 
+/* ---- 集合（0.9.3）：仅键的插入序哈希表。完整复用 SgDict 链式哈希实现
+ * （值槽恒 0、vtag=4 哨兵）——单一哈希实现零重复，插入序/去重/扩容语义
+ * 与 VM SetData 完全一致；NaN 元素在此显式拒绝（消息与 VM 逐字一致，
+ * 内层 sg_dict_check_key 不会先触发，因为 NaN 不会到达它）。 ---- */
+SgDict* sg_set_new(int32_t ktag, int64_t n, const int64_t* keys,
+                   const char* fn, const char* file, int64_t line) {
+    for (int64_t i = 0; i < n; ++i) {
+        if (ktag == 1) {
+            double dv;
+            memcpy(&dv, &keys[i], sizeof dv);
+            if (dv != dv) sg_panic(fn, file, line, "集合元素不能为 NaN");
+        }
+    }
+    SgDict* d = (SgDict*)sg_xmalloc(sizeof(SgDict));
+    d->len = 0;
+    d->bcap = 8;
+    d->ktag = ktag;
+    d->vtag = 4; /* 哨兵：仅键表（值槽恒 0，无观察面） */
+    d->ec_cap = n > 4 ? n : 4;
+    d->ents = (SgDictEnt*)sg_xmalloc(sizeof(SgDictEnt) * (size_t)d->ec_cap);
+    d->buckets = (int32_t*)sg_xmalloc(sizeof(int32_t) * (size_t)d->bcap);
+    for (int64_t i = 0; i < d->bcap; ++i) d->buckets[i] = 0;
+    for (int64_t i = 0; i < n; ++i)
+        sg_dict_set(d, (uint64_t)keys[i], 0, fn, file, line);
+    return d;
+}
+
+int64_t sg_set_len(SgDict* d) { return d->len; }
+
+int sg_set_in(SgDict* d, uint64_t k) { return sg_dict_find(d, k) >= 0; }
+
+uint64_t sg_set_elem_at(SgDict* d, int64_t idx, const char* fn,
+                        const char* file, int64_t line) {
+    if (idx < 0 || idx >= d->len)
+        sg_panic(fn, file, line, "集合迭代下标越界");
+    return d->ents[idx].k;
+}
+
 /* ---- sorted（v0.9.3）：按 etag 稳定升序，返回新列表。
  * 稳定性经 (值, 原下标) 装饰 + qsort 实现（qsort 不稳定，下标决胜）。
  * NaN 显式拒绝：NaN 不可比破坏全序，panic 而非静默（与 VM 同语义同消息）。
@@ -1515,6 +1573,162 @@ SgList* sg_sorted(SgList* l, const char* fn, const char* file, int64_t line) {
     if (!out->data) exit(1);
     for (int64_t k = 0; k < n; ++k) ((char**)out->data)[k] = (char*)tmp[k].key;
     free(tmp);
+    return out;
+}
+
+/* ---- IO 内建（0.9.4）：函数式文件/目录/标准输入。与 VM 的约定逐字对齐：
+ * 路径窄字节串（ANSI 代码页语义）；文本一律二进制模式（禁 CRT 文本转换，
+ * 否则 CRLF 差异破坏双模逐字节一致）；失败 panic 消息与 VM panicHere 逐字
+ * 一致；list_dir 结果按字节序排序（枚举顺序不可依赖——确定性红线）。 ---- */
+static char* sg_io_msg(const char* pre, const char* path) {
+    size_t a = strlen(pre), b = strlen(path);
+    char* m = (char*)malloc(a + b + 1);
+    if (!m) exit(1);
+    memcpy(m, pre, a);
+    memcpy(m + a, path, b + 1);
+    return m;
+}
+
+/* fgetc 逐字节到 '\n'（与 VM 同构）；去行尾 '\r'（二进制重定向时出现）。 */
+const char* sg_input(const char* fn, const char* file, int64_t line) {
+    size_t cap = 256, len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) exit(1);
+    int c, got = 0;
+    while ((c = fgetc(stdin)) != EOF) {
+        got = 1;
+        if (c == '\n') break;
+        if (len + 1 >= cap) {
+            cap *= 2;
+            char* nb = (char*)realloc(buf, cap);
+            if (!nb) exit(1);
+            buf = nb;
+        }
+        buf[len++] = (char)c;
+    }
+    if (!got)
+        sg_panic(fn, file, line, "input() 输入流已结束");
+    while (len > 0 && buf[len - 1] == '\r') buf[--len] = 0;
+    buf[len] = 0;
+    return buf;
+}
+
+const char* sg_read_text(const char* path, const char* fn, const char* file,
+                         int64_t line) {
+    FILE* f = fopen(path, "rb");
+    if (!f)
+        sg_panic(fn, file, line,
+                 sg_io_msg("read_text() 无法打开文件: ", path));
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        sg_panic(fn, file, line,
+                 sg_io_msg("read_text() 无法读取文件: ", path));
+    }
+    long n = ftell(f);
+    if (n < 0) {
+        fclose(f);
+        sg_panic(fn, file, line,
+                 sg_io_msg("read_text() 无法读取文件: ", path));
+    }
+    fseek(f, 0, SEEK_SET);
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) exit(1);
+    size_t rd = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    if ((long)rd != n)
+        sg_panic(fn, file, line,
+                 sg_io_msg("read_text() 无法读取文件: ", path));
+    buf[n] = 0;
+    return buf;
+}
+
+/* write/append 公共尾：mode "wb"/"ab"；写入或关闭失败 panic（消息与 VM 一致）。 */
+static int64_t sg_write_file(const char* path, const char* data,
+                             const char* mode, const char* name,
+                             const char* fn, const char* file, int64_t line) {
+    char pre[64];
+    snprintf(pre, sizeof pre, "%s() 无法打开文件: ", name);
+    FILE* f = fopen(path, mode);
+    if (!f)
+        sg_panic(fn, file, line, sg_io_msg(pre, path));
+    size_t len = strlen(data);
+    int ok = fwrite(data, 1, len, f) == len;
+    if (ok)
+        ok = fclose(f) == 0;
+    else
+        fclose(f);
+    if (!ok) {
+        snprintf(pre, sizeof pre, "%s() 写入失败: ", name);
+        sg_panic(fn, file, line, sg_io_msg(pre, path));
+    }
+    return (int64_t)len;
+}
+
+int64_t sg_write_text(const char* path, const char* data, const char* fn,
+                      const char* file, int64_t line) {
+    return sg_write_file(path, data, "wb", "write_text", fn, file, line);
+}
+
+int64_t sg_append_text(const char* path, const char* data, const char* fn,
+                       const char* file, int64_t line) {
+    return sg_write_file(path, data, "ab", "append_text", fn, file, line);
+}
+
+int sg_exists(const char* path) {
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+}
+
+static int sg_sort_names(const void* x, const void* y) {
+    return strcmp(*(const char* const*)x, *(const char* const*)y);
+}
+
+SgList* sg_list_dir(const char* path, const char* fn, const char* file,
+                    int64_t line) {
+    /* 通配拼接：尾分隔符直接加 '*'，否则补 '\\'（与 VM directory_iterator
+     * 枚举"直接子项"语义一致）。 */
+    size_t pl = strlen(path);
+    int hasSep = pl > 0 && (path[pl - 1] == '\\' || path[pl - 1] == '/');
+    char* pattern = (char*)malloc(pl + 3);
+    if (!pattern) exit(1);
+    memcpy(pattern, path, pl);
+    size_t k = pl;
+    if (!hasSep) pattern[k++] = '\\';
+    pattern[k++] = '*';
+    pattern[k] = 0;
+
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE)
+        sg_panic(fn, file, line,
+                 sg_io_msg("list_dir() 无法打开目录: ", path));
+
+    /* 收集（跳过 "." ".."，与 VM 显式过滤对齐）→ qsort 字节序 → SgList。 */
+    size_t cap = 16, cnt = 0;
+    char** names = (char**)malloc(cap * sizeof(char*));
+    if (!names) exit(1);
+    do {
+        const char* nm = fd.cFileName;
+        if (nm[0] == '.' && (nm[1] == 0 || (nm[1] == '.' && nm[2] == 0)))
+            continue;
+        if (cnt + 1 >= cap) {
+            cap *= 2;
+            char** nb = (char**)realloc(names, cap * sizeof(char*));
+            if (!nb) exit(1);
+            names = nb;
+        }
+        names[cnt++] = sg_dup(nm);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    qsort(names, cnt, sizeof(char*), sg_sort_names);
+
+    SgList* out = sg_list_empty();
+    out->len = (int64_t)cnt;
+    out->etag = 2;
+    out->data = malloc(sizeof(char*) * (cnt > 0 ? cnt : 1));
+    if (!out->data) exit(1);
+    for (size_t j = 0; j < cnt; ++j) ((char**)out->data)[j] = names[j];
+    free(names);
     return out;
 }
 )RT";
@@ -3887,16 +4101,58 @@ uint64_t mainObjKey(const std::string& tag, bool gpuMode,
     return h;
 }
 
+/// 能力运行时门禁片段（0.9.7）：域表按 kAllCaps 生成（单一事实源，禁止
+/// 手工平行名单）+ sg_cap_check 定义。置于 kRuntimeC 之后（sg_panic 可用），
+/// kSysRuntimeC 的 sg_extern_resolve 入口查位依赖其 SG_CAP_FFI_BIT 宏。
+/// @sg_caps 由 LangToLLVM 注入 main.obj（external constant），此处 extern。
+std::string capRuntimeC() {
+    std::string s =
+        "\n/* ---- 能力运行时门禁（0.9.7）----\n"
+        " * @sg_caps：程序能力授予掩码（LangToLLVM 注入 main.obj 的\n"
+        " * external constant）。未授权即 panic，消息与 VM capPanicMsg\n"
+        " * （Common/Capability.hpp 单点生成）逐字一致。域表由编译器按\n"
+        " * kAllCaps 生成。 */\n"
+        "extern unsigned long long sg_caps;\n"
+        "#define SG_CAP_FFI_BIT " + std::to_string(capBit(Cap::Ffi)) +
+        "ULL\n"
+        "static const struct { unsigned long long bit; const char* name; }\n"
+        "    sg_cap_names[] = {\n";
+    for (Cap c : kAllCaps)
+        s += "        {" + std::to_string(capBit(c)) + "ULL, \"" +
+             std::string(capName(c)) + "\"},\n";
+    s += "    };\n"
+         "void sg_cap_check(unsigned long long bit, const char* what,\n"
+         "                  const char* fn, const char* file, int64_t line) {\n"
+         "    if ((sg_caps & bit) != 0) return;\n"
+         "    const char* dom = \"?\";\n"
+         "    for (unsigned i = 0;\n"
+         "         i < sizeof sg_cap_names / sizeof sg_cap_names[0]; ++i)\n"
+         "        if (sg_cap_names[i].bit == bit) {\n"
+         "            dom = sg_cap_names[i].name;\n"
+         "            break;\n"
+         "        }\n"
+         "    char msg[128];\n"
+         "    snprintf(msg, sizeof msg, \"capability '%s' not granted (%s)\",\n"
+         "             dom, what);\n"
+         "    sg_panic(fn, file, line, msg);\n"
+         "}\n";
+    return s;
+}
+
 /// rt.obj 缓存键（源无关）：格式版本、工具链标签、gpuMode、运行时源文本。
-/// kRuntimeC / kSysRuntimeC / kGpuRuntimeC / kGpuPtxC / kGpuOpenCLC 内嵌于
-/// 编译器二进制，文本哈希入键——开发期改动运行时源自动失效，无需手工递增
-/// 版本号。
+/// kRuntimeC / kGpuRuntimeC / kGpuPtxC / kGpuOpenCLC 内嵌于编译器二进制，文本
+/// 哈希入键——开发期改动运行时源自动失效，无需手工递增版本号。
 uint64_t rtObjKey(const std::string& tag, bool gpuMode) {
     uint64_t h = fnvKey(kObjCacheVer);
     h = fnvKey(tag, h);
     h = fnvKey(gpuMode ? "gpu" : "cpu", h);
     h = fnvKey(kRuntimeC, h);
+    h = fnvKey(capRuntimeC(), h); // 能力门禁片段（域表随 kAllCaps 变化自动失效）
+    h = fnvKey(kStrRuntimeC, h);
+    h = fnvKey(kNetRuntimeC, h);
     h = fnvKey(kSysRuntimeC, h);
+    h = fnvKey(kStdRuntimeC, h);
+    h = fnvKey(kJsonRuntimeC, h);
     if (gpuMode) {
         h = fnvKey(kGpuRuntimeC, h);
         h = fnvKey(kGpuPtxC, h);
@@ -3957,6 +4213,14 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         return b;
     }
     auto order = session.modulesInDependencyOrder(entry);
+    // 能力授予掩码（0.9.7）：依赖闭包全部模块的 capability 声明并集——
+    // 与 run 命令的 Program.capMask 同一语义（Capability.hpp 位布局），
+    // 经 convertToLLVMInProcess → LangToLLVM 以 @sg_caps 注入 main.obj。
+    uint64_t sessionCaps = 0;
+    for (const auto& name : order) {
+        const Module* m = session.loadedModule(name);
+        if (m) sessionCaps |= capMaskOf(*m);
+    }
 
     // ---- 中间产物路径（与可执行同目录，便于检视） ----
     fs::path dir = outPath.parent_path();
@@ -3993,7 +4257,7 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
             int rc = runCapture(clang.string(),
                                 "\"" + objMain.string() + "\" \"" +
                                     objRt.string() + "\" -o \"" +
-                                    outPath.string() + "\" -lshell32",
+                                    outPath.string() + "\" -lws2_32 -lshell32",
                                 capPath, toolOut);
             if (rc == 0) {
                 b.fromCache = true;
@@ -4030,10 +4294,26 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
     {
         std::ofstream f(rtPath, std::ios::binary);
         f << kRuntimeC;
+        /* 能力运行时门禁片段（0.9.7）：域表按 kAllCaps 生成 + sg_cap_check
+         * 定义；置于 kRuntimeC 之后（sg_panic 可用），kSysRuntimeC 的
+         * sg_extern_resolve 入口查位依赖其 SG_CAP_FFI_BIT 宏。 */
+        f << capRuntimeC();
+        /* str/List 成员方法片段（0.9.4）：置于 kRuntimeC 之后——复用其
+         * SgList/sg_dup/sg_panic 定义；缓存键已计入该片段文本 */
+        f << kStrRuntimeC;
+        /* 网络/睡眠片段（0.9.4 F/G）：同 Str 片段模式，复用 kRuntimeC 的
+         * sg_panic/sg_io_msg/windows.h 定义；winsock 链接见各链接命令。 */
+        f << kNetRuntimeC;
         /* 系统编程片段（0.9.4 H）：args/env/时间/进程/信号，复用
          * kRuntimeC 的 SgList/sg_panic/sg_io_msg/windows.h 定义；
          * shellapi 链接见各链接命令（-lshell32）。 */
         f << kSysRuntimeC;
+        /* 标准库广度片段（0.9.4 M）：统计/倒序/哈希，复用 kRuntimeC 的
+         * SgTensor/SgList/sg_panic/sg_tsync/sg_tsize 与 math.h 定义。 */
+        f << kStdRuntimeC;
+        /* JSON 片段（0.9.4 M）：vendored jsmn（MIT）+ SgJson 适配层，复用
+         * kRuntimeC 的 SgList/sg_dup/sg_panic 定义。 */
+        f << kJsonRuntimeC;
         if (gpuMode) {
             /* GPU 分派层：内嵌 kernel 源（Windows 分支内定义，供 JIT 加载）
              * + 后端抽象分派函数（覆盖集 op，失败回退 CPU） */
@@ -4050,7 +4330,8 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
     // ---- 阶段 3（合并）：进程内 MLIR → LLVM dialect → LLVM IR ----
     // gpuMode：GPU 覆盖集 op 保持 lang 层直达 LangToLLVM（调用换 sg_gpu_*，
     // 内联降级跳过）；.mlir 落盘产物与 CPU 模式逐字节相同。
-    if (!aot::convertToLLVMInProcess(mlir, llPath.string(), toolOut, gpuMode)) {
+    if (!aot::convertToLLVMInProcess(mlir, llPath.string(), toolOut, gpuMode,
+                                     sessionCaps)) {
         std::ofstream cap(capPath, std::ios::binary);
         cap << toolOut;
         b.log = "构建中止：MLIR → LLVM IR 进程内转换失败\n" + toolOut;
@@ -4092,7 +4373,7 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
 
         rc = runCapture(clang.string(),
                         "\"" + objMain.string() + "\" \"" + objRt.string() +
-                            "\" -o \"" + outPath.string() + "\" -lshell32",
+                            "\" -o \"" + outPath.string() + "\" -lws2_32 -lshell32",
                         capPath, toolOut);
         if (rc != 0) {
             b.log = "构建中止：clang 链接失败（exit " + std::to_string(rc) +
@@ -4108,7 +4389,7 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         clang.string(),
         "-O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS \"" +
             llPath.string() + "\" \"" + rtPath.string() +
-            "\" -o \"" + outPath.string() + "\" -lshell32",
+            "\" -o \"" + outPath.string() + "\" -lws2_32 -lshell32",
         capPath, toolOut);
     if (rc != 0) {
         b.log = "构建中止：clang 链接失败（exit " + std::to_string(rc) +

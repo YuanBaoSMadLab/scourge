@@ -41,6 +41,7 @@
 #include "scourge/BC/Compiler.hpp"
 #include "scourge/BC/Serialize.hpp"
 #include "scourge/BC/VM.hpp"
+#include "scourge/Common/Capability.hpp"
 #include "scourge/Common/JsonWriter.hpp"
 #include "scourge/Syntax/Lexer.hpp"
 #include "scourge/Syntax/Parser.hpp"
@@ -568,7 +569,14 @@ DriverRun runDriver(Session& session, const std::string& modName,
     bc::VMOptions vo;
     vo.entryFunc = "__sgt__";
     vo.out = [&](const std::string& s) { r.out += s; };
-    bc::VM vm(compiler.take(), vo);
+    // 能力授予集（0.9.7）：驱动模块 + import 闭包，与 run 同语义。
+    bc::Program prog = compiler.take();
+    prog.capMask = capMaskOf(*mod);
+    for (const auto& n : order) {
+        const Module* m = session.loadedModule(n);
+        if (m) prog.capMask |= capMaskOf(*m);
+    }
+    bc::VM vm(std::move(prog), vo);
     if (!vm.run(order, modName)) {
         const bc::Panic& p = vm.lastPanic();
         std::string where = session.loadedModulePath(p.module);

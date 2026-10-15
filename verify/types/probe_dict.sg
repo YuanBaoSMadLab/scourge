@@ -1,0 +1,26 @@
+# probe_dict.sg — 0.9.3 Dict[K,V] 探针（双模对拍）
+# 预期（run 与 build 输出逐字节一致）：
+#   2 / 30 / 5 / True / False / 20 / 3 / a b c 逐行 / 2 / 4 / 1.0 / 2.0
+def main() -> int:
+    d: Dict[str, int] = {"a": 10, "b": 20}
+    print(len(d))
+    print(d["b"])
+    d["c"] = 30
+    print(d["c"])
+    print("a" in d)
+    print("z" in d)
+    d["a"] = 20
+    print(d["a"])
+    print(len(d))
+    for k in d:
+        print(k)
+    e: Dict[str, int] = {}
+    e["x"] = 1
+    e["y"] = 2
+    print(len(e))
+    print(e["y"] - e["x"] + 3)
+    f: Dict[float, float] = {1.5: 10, 2.5: 20}
+    f[2.5] = 4
+    print(f[1.5] / 10)
+    print(f[2.5] / 2)
+    return 0

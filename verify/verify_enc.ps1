@@ -5,10 +5,10 @@
 #   T2 (non-BMP emoji, GBK cannot encode) in 3 encodings       -> identical stdout
 #   AOT: build one T1 probe, run exe, stdout identical to run mode
 $ErrorActionPreference = 'Stop'
-$root = 'd:\Scourge\build-rel\verify\enc'
+$root = 'd:\Scourge\build\verify\enc'
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-$scourge = 'd:\Scourge\build-rel\scourge.exe'
+$scourge = 'd:\Scourge\build\scourge.exe'
 
 $t1 = -join @([char]0x4F60, [char]0x597D, [char]0x2C, [char]0x4E16, [char]0x754C, [char]0x41, [char]0x42, [char]0x43)
 $t2 = [string][char]0x4F60 + [string][char]0x597D + [string][char]0xD83C + [string][char]0xDF89 + [string][char]0x21
@@ -71,6 +71,14 @@ $h3 = Run-Probe (Write-Probe 'enc2_u16le' $t2 $u16le $false) 'g2_u16le'
 Compare-Group 'T2: utf8nb/utf8bom/u16le (emoji U+1F389)' @($h1, $h2, $h3)
 
 # ---- AOT: build + exe output identical to run mode ----
+# Env note: drop lowercase proxy duplicates (case-insensitive .NET dict).
+foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
+    $up = $n.ToUpperInvariant()
+    if ([Environment]::GetEnvironmentVariable($n, 'Process') -ne $null -and
+        [Environment]::GetEnvironmentVariable($up, 'Process') -ne $null) {
+        [Environment]::SetEnvironmentVariable($n, $null, 'Process')
+    }
+}
 $exe = Join-Path $root 'enc_aot.exe'
 if (Test-Path $exe) { Remove-Item -Force $exe }
 $exeOut = Join-Path $root 'aot.out'

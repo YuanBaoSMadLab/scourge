@@ -23,7 +23,7 @@ struct TypeExpr;
 using TypeExprPtr = std::unique_ptr<TypeExpr>;
 
 struct TypeExpr {
-    enum class Kind : uint8_t { Named, Tensor };
+    enum class Kind : uint8_t { Named, Tensor, Tuple };
 
     Kind kind;
     SourceRange range;
@@ -31,6 +31,7 @@ struct TypeExpr {
     /// Named：类型名与泛型参数（int / List[int] / Dict[str, int] /
     /// Result[T, E] / Option[T] / 自定义），参数语义由 Sema 按名字解释。
     /// Tensor：元素类型 params[0] + 形状 shape。
+    /// Tuple：元组类型 (int, str)（0.9.6），params = 各元素类型注解。
     std::string name;
     std::vector<TypeExprPtr> params;
 
@@ -66,7 +67,9 @@ struct Expr {
         Attr,    ///< base, name（模块成员访问）
         ListLit, ///< elems
         Await,   ///< operand（仅 async def 内合法，E2010）
-        TupleLit ///< elems（仅形状注解使用；值位置报错）
+        TupleLit,///< elems（仅形状注解使用；值位置报错）
+        DictLit, ///< pairs（k1,v1,...；0.9.3 字典字面量）
+        SetLit   ///< elems（e1,e2,...；0.9.3 集合字面量，元素限标量）
     };
 
     Kind kind;
@@ -164,10 +167,31 @@ struct Await : Expr {
         : Expr(Kind::Await, r), operand(std::move(e)) {}
 };
 
+/// 元组字面量 (a, b, c)：值位置 = 异构定长不可变元组（0.9.6）；形状注解
+/// Tensor[T, (…)] 中的括号组不产此节点。
 struct TupleLit : Expr {
     std::vector<ExprPtr> elems;
     explicit TupleLit(SourceRange r, std::vector<ExprPtr> es)
         : Expr(Kind::TupleLit, r), elems(std::move(es)) {}
+};
+
+/// 字典字面量 {"a": 1, "b": 2}；空 {} 的类型由赋值注解推断。
+struct DictLit : Expr {
+    std::vector<std::pair<ExprPtr, ExprPtr>> pairs;
+    /// 检查器判为空集合时置位（注解 Set[T] 上下文的空 {}）——编译器据此
+    /// 编为 NewSet(0)，而非空 Dict（单一事实源，禁止检查/执行语义分叉）。
+    mutable bool checkedAsSet = false;
+    explicit DictLit(SourceRange r,
+                     std::vector<std::pair<ExprPtr, ExprPtr>> ps)
+        : Expr(Kind::DictLit, r), pairs(std::move(ps)) {}
+};
+
+/// 集合字面量 {1, 2, 3}（0.9.3）：无冒号花括号；元素限标量，插入序去重
+/// （语义与 Dict 键一致：数值跨类型同键、NaN 拒绝、迭代序 = 首插序）。
+struct SetLit : Expr {
+    std::vector<ExprPtr> elems;
+    explicit SetLit(SourceRange r, std::vector<ExprPtr> es)
+        : Expr(Kind::SetLit, r), elems(std::move(es)) {}
 };
 
 // ============================================================================
@@ -191,7 +215,9 @@ struct Stmt {
         Pass,
         Assert, ///< cond, msg?
         Try,    ///< body, handlerBody（panic 恢复路径，文档第四章）
+        Defer,  ///< body（函数级确定性清理钩子，return 前 LIFO 展开）
         Import, ///< module, isFrom, names
+        Capability, ///< 域名列表（0.9.7 能力声明，仅模块顶层合法）
         FuncDef ///< 见下
     };
 
@@ -230,6 +256,7 @@ struct FuncDef : Stmt {
     StmtList body;
     std::vector<Decorator> decorators;
     bool isAsync = false;              ///< async def（文档第八章并发原语）
+    bool isVariadic = false;           ///< 参数表尾 `...`（仅 @extern 合法，Sema 把关）
     std::string docstring;             ///< 首语句字符串（解码后文本）
     SourceRange docRange;              ///< docstring 在源文件中的区间（含引号）
     std::vector<ContractClause> contracts;
@@ -326,13 +353,54 @@ struct Try : Stmt {
     Try(SourceRange r, StmtList b) : Stmt(Kind::Try, r), body(std::move(b)) {}
 };
 
+/// defer：函数级确定性清理钩子（Go 风格）。仅允许出现在函数体顶层；
+/// return（显式与函数尾隐式）按 LIFO 内联展开执行词法上位于该 return
+/// 之前的 defer 块。panic 传播不经过 return 点，故不触发 defer——
+/// 资源清理在 panic 路径请用 try/except（确定性红线：展开点静态可枚举）。
+struct Defer : Stmt {
+    StmtList body;
+    Defer(SourceRange r, StmtList b) : Stmt(Kind::Defer, r), body(std::move(b)) {}
+};
+
 struct Import : Stmt {
-    std::string module;
-    bool isFrom = false;          ///< true: from m import a, b；false: import m
-    std::vector<std::string> names; ///< 仅 isFrom 时使用
-    Import(SourceRange r, std::string m, bool f, std::vector<std::string> ns)
-        : Stmt(Kind::Import, r), module(std::move(m)), isFrom(f),
-          names(std::move(ns)) {}
+    std::vector<std::string> path; ///< 点分路径段：import a.b → ["a","b"]（0.9.6 包/子模块）
+    bool isFrom = false;           ///< true: from a.b import x as y；false: import a.b [as c]
+    /// from 导入项；alias 非空表示 "name as alias"。
+    struct Item {
+        std::string name;
+        std::string alias;
+    };
+    std::vector<Item> items;      ///< 仅 isFrom 时使用
+    std::string alias;            ///< 仅非 from：import a.b as c 的 c（可空）
+
+    Import(SourceRange r, std::vector<std::string> p, bool f,
+           std::vector<Item> ns, std::string al = {})
+        : Stmt(Kind::Import, r), path(std::move(p)), isFrom(f),
+          items(std::move(ns)), alias(std::move(al)) {}
+
+    /// 全限定模块名（点分连接）——加载/注册表/字节码符号统一以此为准。
+    std::string module() const {
+        std::string out;
+        for (size_t i = 0; i < path.size(); ++i) {
+            if (i) out += '.';
+            out += path[i];
+        }
+        return out;
+    }
+};
+
+/// 能力声明（0.9.7）：`capability io, net`——模块顶层软关键字语句。
+/// 语义是"本模块声明使用这些能力域"：静态门禁（TypeChecker E5004）与
+/// 运行时门禁（Program.capMask / SG_CAPS）共用这里的声明集。
+struct Capability : Stmt {
+    struct Item {
+        std::string name;  ///< 域规范名（io/net/env/proc/time/signal/ffi）
+        SourceRange range; ///< 域名记号位置（未知域名诊断定位）
+    };
+    std::vector<Item> caps;
+
+    Capability(SourceRange r, std::vector<Item> cs)
+        : Stmt(Kind::Capability, r), caps(std::move(cs)) {}
 };
 
 /// 模块 = 一个 .sg 文件的顶层语句序列。

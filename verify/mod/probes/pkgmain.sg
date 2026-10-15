@@ -1,0 +1,7 @@
+# pkgmain.sg —— @internal 包内可见性正向探针（pkgx.y 调 pkgx.x）
+# 预期输出：15
+import pkgx.y
+
+def main() -> int:
+    print(y.use_internal(5))
+    return 0

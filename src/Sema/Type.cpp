@@ -45,8 +45,9 @@ bool isConvertible(const TypePtr& from, const TypePtr& to) {
 
     // 结构类型：同种别 + 参数逐一可转换（Tensor 另有形状规则）。
     static const Type::Kind kStructural[] = {
-        Type::Kind::List, Type::Kind::Dict, Type::Kind::Result,
-        Type::Kind::Option, Type::Kind::Tensor};
+        Type::Kind::List, Type::Kind::Dict, Type::Kind::Set,
+        Type::Kind::Tuple, Type::Kind::Result, Type::Kind::Option,
+        Type::Kind::Tensor};
     for (Type::Kind k : kStructural) {
         if (from->kind != k || to->kind != k) continue;
         if (from->params.size() != to->params.size()) return false;
@@ -107,6 +108,20 @@ std::string typeToString(const TypePtr& t) {
     case Type::Kind::Dict:
         return "Dict[" + typeToString(t->params[0]) + ", " +
                typeToString(t->params[1]) + "]";
+    case Type::Kind::Set:
+        return "Set[" + typeToString(t->params[0]) + "]";
+    case Type::Kind::Tuple: {
+        // 元组类型串 = 源码字面量形态（空 ()；单元素无尾逗号——类型串仅
+        // 诊断用，与值 repr 的 "(1,)" 形态无对齐要求）。
+        std::string s = "(";
+        for (size_t i = 0; i < t->params.size(); ++i) {
+            if (i) s += ", ";
+            s += typeToString(t->params[i]);
+        }
+        return s + ")";
+    }
+    case Type::Kind::Json:
+        return "Json";
     case Type::Kind::Option:
         return "Option[" + typeToString(t->params[0]) + "]";
     case Type::Kind::Result:

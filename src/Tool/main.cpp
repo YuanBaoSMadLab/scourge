@@ -199,7 +199,8 @@ void printOutputDiff(const std::vector<std::string>& oldL,
     }
 }
 
-int cmdRunWatch(const fs::path& inPath, bool useCache) {
+int cmdRunWatch(const fs::path& inPath, bool useCache,
+                const std::vector<std::string>& scriptArgs) {
     auto snapshot = [](const std::vector<fs::path>& ps) {
         std::map<fs::path, fs::file_time_type> m;
         for (const auto& p : ps) {
@@ -210,7 +211,7 @@ int cmdRunWatch(const fs::path& inPath, bool useCache) {
         return m;
     };
 
-    RunOutcome r = runOnce(inPath, useCache, /*captureOut=*/true);
+    RunOutcome r = runOnce(inPath, useCache, /*captureOut=*/true, scriptArgs);
     if (!r.log.empty()) std::cerr << r.log; // 失败诊断走 stderr（不混入输出流）
     if (r.modulePaths.empty()) {
         std::cerr << "watch 中止：无法确定监视目标（模块加载失败）\n";
@@ -239,7 +240,7 @@ int cmdRunWatch(const fs::path& inPath, bool useCache) {
 
         std::cout << "\n[watch] 检测到变更，重跑 " << inPath.string() << "\n"
                   << std::flush;
-        r = runOnce(inPath, useCache, /*captureOut=*/true);
+        r = runOnce(inPath, useCache, /*captureOut=*/true, scriptArgs);
         if (!r.log.empty()) std::cerr << r.log;
         printOutputDiff(last, splitLines(r.output));
         last = splitLines(r.output);
@@ -253,27 +254,31 @@ int cmdRun(const std::vector<std::string>& args) {
     bool useCache = true;
     bool watch = false;
     std::string inFile;
+    std::vector<std::string> scriptArgs; // <file> 之后的透传参数（args() 消费）
+    bool fileSeen = false;
     for (const auto& a : args) {
-        if (a == "--no-cache")
+        if (!fileSeen && a == "--no-cache")
             useCache = false;
-        else if (a == "--watch")
+        else if (!fileSeen && a == "--watch")
             watch = true;
+        else if (!fileSeen)
+            inFile = a, fileSeen = true;
         else
-            inFile = a;
+            scriptArgs.push_back(a); // 文件名后的一切原样透传（可含 -- 开头）
     }
-    if (inFile.empty() || args.size() > 3) {
-        std::cerr << "用法: scourge run [--no-cache] [--watch] <file.sg>\n";
+    if (inFile.empty() || args.size() > 3 + scriptArgs.size()) {
+        std::cerr << "用法: scourge run [--no-cache] [--watch] <file.sg> [args...]\n";
         return 2;
     }
 
     fs::path inPath(inFile);
     if (!watch) {
-        RunOutcome r = runOnce(inPath, useCache, /*captureOut=*/false);
+        RunOutcome r = runOnce(inPath, useCache, /*captureOut=*/false, scriptArgs);
         // 失败诊断走 stderr——stdout 只承载程序输出（与 MCP 通道纪律一致）。
         if (!r.log.empty()) std::cerr << r.log;
         return r.exitCode;
     }
-    return cmdRunWatch(inPath, useCache);
+    return cmdRunWatch(inPath, useCache, scriptArgs);
 }
 
 int cmdBuild(const std::vector<std::string>& args) {

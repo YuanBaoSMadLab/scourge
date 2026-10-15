@@ -31,9 +31,11 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
             auto& f = static_cast<FuncDef&>(*m.body[i]);
 
             // 装饰器白名单（设计文档第二章：扩展仅经装饰器引入）。
-            static const char* kKnown[] = {"jit", "pure", "hardware", "irq",
-                                           "realtime", "no_runtime", "extern"};
+            static const char* kKnown[] = {"jit",  "pure",    "hardware", "irq",
+                                           "realtime", "no_runtime", "extern",
+                                           "private", "internal"};
             bool pure = false;
+            bool sawPriv = false, sawInter = false;
             for (const auto& d : f.decorators) {
                 bool known = false;
                 for (const char* k : kKnown) known |= (d.name == k);
@@ -41,10 +43,28 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                     diag_.error(Errc::E1007_UnsupportedFeature, file_, d.range,
                                 "未知装饰器 '@" + d.name +
                                     "'（允许：@jit @pure @hardware @irq "
-                                    "@realtime @no_runtime @extern）");
+                                    "@realtime @no_runtime @extern @private "
+                                    "@internal）");
                     continue;
                 }
                 if (d.name == "pure") pure = true;
+                // 可见性双标冲突即拒绝（0.9.6 L 节）。
+                if (d.name == "private") {
+                    if (sawPriv || sawInter)
+                        diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                    d.range,
+                                    "可见性装饰器重复：@private 与 @internal "
+                                    "至多标注其一");
+                    sawPriv = true;
+                }
+                if (d.name == "internal") {
+                    if (sawPriv || sawInter)
+                        diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                    d.range,
+                                    "可见性装饰器重复：@private 与 @internal "
+                                    "至多标注其一");
+                    sawInter = true;
+                }
                 if (d.name == "extern") {
                     if (d.args.size() != 1 ||
                         d.args[0]->kind != Expr::Kind::StrLit) {
@@ -75,6 +95,10 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
             sig.isPure = pure;
             sig.def = &f;
             sig.requiredArgs = 0;
+            // 可见性（0.9.6 L 节）：@private 仅本模块；@internal 仅本包。
+            sig.vis = sawPriv   ? Vis::Private
+                      : sawInter ? Vis::Internal
+                                 : Vis::Public;
             bool sawDefault = false;
             for (const auto& p : f.params) {
                 if (!p.type) {
@@ -89,7 +113,19 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                 sig.params.push_back(t);
                 // 缺省值边界 int→float 提升（Q3：与函数体注解赋值同规则）。
                 if (p.defaultValue) {
+                    // Dict/Set 上下文偏好：缺省值容器字面量对齐参数注解。
+                    if (p.defaultValue->kind == Expr::Kind::DictLit &&
+                        t->kind == Type::Kind::Dict && t->params.size() >= 2)
+                        dictTarget_ = t.get();
+                    if (p.defaultValue->kind == Expr::Kind::DictLit &&
+                        t->kind == Type::Kind::Set && t->params.size() >= 1)
+                        setTarget_ = t.get();
+                    if (p.defaultValue->kind == Expr::Kind::SetLit &&
+                        t->kind == Type::Kind::Set && t->params.size() >= 1)
+                        setTarget_ = t.get();
                     TypePtr dv = checkExpr(*p.defaultValue);
+                    dictTarget_ = nullptr;
+                    setTarget_ = nullptr;
                     if (dv->kind == Type::Kind::Int &&
                         t->kind == Type::Kind::Float)
                         promoteF64_.insert(p.defaultValue.get());
@@ -116,6 +152,9 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
             for (const auto& d : f.decorators) isExtern |= (d.name == "extern");
             if (isExtern) {
                 sig.isExtern = true;
+                sig.isVariadic = f.isVariadic;
+                // FFI 门禁记账（0.9.7）：@extern 即外部代码边界，恒需 ffi。
+                capUses_.push_back({f.name, Cap::Ffi, f.nameRange});
                 if (!f.retType)
                     diag_.error(Errc::E2002_CannotInfer, file_, f.nameRange,
                                 "@extern 函数返回类型必须显式注解");
@@ -139,6 +178,12 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                     diag_.error(Errc::E1007_UnsupportedFeature, file_,
                                 f.nameRange,
                                 "@extern 函数参数不支持缺省值");
+                // 变参（O 节 FFI 宽类型域）：... 形态已由解析器收口
+                //（末位、非首参），此处仅裁决 @extern 资格。
+            } else if (f.isVariadic) {
+                diag_.error(Errc::E1007_UnsupportedFeature, file_, f.nameRange,
+                            "变参标记 ... 仅允许用于 @extern 函数声明"
+                            "（C ABI 变参调用，本语言函数定参）");
             }
             for (const auto& c : f.contracts)
                 sig.contracts.push_back({c.kind, c.expr.get()});
@@ -148,10 +193,99 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
         }
         case Stmt::Kind::Import: {
             auto& im = static_cast<const Import&>(s);
-            if (imports_.count(im.module)) {
+            const std::string full = im.module();
+            // 绑定名 → Module 类型；Type::Module::name 存真实全限定名，
+            // 成员访问经 checkAttr 按其查 registry——别名由此天然解耦。
+            auto declareModule = [&](const std::string& bind,
+                                     const std::string& qual) {
                 auto mod = std::make_shared<Type>(Type::Kind::Module);
-                mod->name = im.module;
-                scope_.declare(im.module, VarSym{mod, s.range});
+                mod->name = qual;
+                if (!scope_.declare(bind, VarSym{mod, s.range}))
+                    diag_.error(Errc::E2007_DuplicateDefinition, file_,
+                                s.range,
+                                "顶层名 '" + bind +
+                                    "' 重复定义（import 绑定与既有名冲突；"
+                                    "可用 as 别名或全限定形式）");
+            };
+            if (!im.isFrom) {
+                if (imports_.count(full)) {
+                    if (im.alias.empty()) {
+                        // import a.b：绑定首段（Python 式 a.b.f()）+ 宽容绑定
+                        // 末段（AI 幻觉写法 b.f() 亦可编译）；单段即现状。
+                        declareModule(im.path[0], full);
+                        if (im.path.size() > 1)
+                            declareModule(im.path.back(), full);
+                    } else {
+                        // import a.b as c：仅别名绑定（Python 语义）。
+                        declareModule(im.alias, full);
+                    }
+                }
+            } else {
+                // from <mod> import x [as y]：按 函数 → 全局 → 子模块 序解析。
+                auto rit = imports_.find(full);
+                const ModuleSymbols* ms =
+                    rit == imports_.end() ? nullptr : rit->second.get();
+                for (const auto& item : im.items) {
+                    const std::string& bind =
+                        item.alias.empty() ? item.name : item.alias;
+                    if (ms) {
+                        if (auto f = ms->funcs.find(item.name);
+                            f != ms->funcs.end()) {
+                            if (!checkVis(f->second.vis, ms->name, item.name,
+                                          s.range))
+                                continue;
+                            // 先查重再绑定：from 名与本地 def/既有导入冲突
+                            // 即 E2007（冲突时不污染 localFuncs_）。
+                            if (scope_.find(bind)) {
+                                diag_.error(Errc::E2007_DuplicateDefinition,
+                                            file_, s.range,
+                                            "顶层名 '" + bind +
+                                                "' 重复定义（from 导入与"
+                                                "既有名冲突；请用 as 别名）");
+                                continue;
+                            }
+                            // FuncSig 复制进 localFuncs_：checkCall 的 Name
+                            // 分支自动获得签名/缺省参数/@pure/retPending。
+                            FuncSig cp = f->second.copy();
+                            cp.name = bind;
+                            localFuncs_[bind] = std::move(cp);
+                            std::vector<TypePtr> ps = f->second.params;
+                            ps.push_back(f->second.ret);
+                            scope_.declare(
+                                bind,
+                                VarSym{
+                                    std::make_shared<Type>(Type::Kind::Function,
+                                                           ps),
+                                    s.range});
+                            continue;
+                        }
+                        if (auto g = ms->globals.find(item.name);
+                            g != ms->globals.end()) {
+                            // 模块级全局无装饰器挂点，恒 public；函数级
+                            // @private/@internal 见 funcs 分支（0.9.6 L 节）。
+                            if (scope_.find(bind)) {
+                                diag_.error(Errc::E2007_DuplicateDefinition,
+                                            file_, s.range,
+                                            "顶层名 '" + bind +
+                                                "' 重复定义（from 导入与"
+                                                "既有名冲突；请用 as 别名）");
+                                continue;
+                            }
+                            scope_.declare(bind, VarSym{g->second, s.range});
+                            continue;
+                        }
+                    }
+                    // 子模块：registry 中存在 "mod.item" 全名（加载器已把
+                    // from-import 的子模块候选保证入图）。
+                    std::string sub = full + "." + item.name;
+                    if (imports_.count(sub)) {
+                        declareModule(bind, sub);
+                        continue;
+                    }
+                    diag_.error(Errc::E5003_MissingExport, file_, s.range,
+                                "模块 '" + full + "' 没有可导出的成员 '" +
+                                    item.name + "'");
+                }
             }
             // 模块缺失/循环由 driver 层报告（E5001/E5002）。
             break;
@@ -182,7 +316,32 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                                 " = <初值>");
                 break;
             }
+            // Dict/Set 上下文偏好（单发旗标，同 asListLit_）：注解为
+            // Dict[K,V]/Set[T] 时字面量键/值/元素统一对齐注解（checkDictLit /
+            // checkSetLit 消费，检查完清空）。dictAnn/setAnn 必须存活到
+            // checkExpr 之后——旗标是裸指针，若把 resolveTypeExpr 的返回值塞
+            // 进 if 作用域，语句结束即析构，消费块读悬垂 Type（非确定性
+            // AV/栈溢出的根源）。
+            TypePtr dictAnn;
+            if (a.value->kind == Expr::Kind::DictLit && a.ann) {
+                dictAnn = resolveTypeExpr(*a.ann);
+                if (dictAnn->kind == Type::Kind::Dict &&
+                    dictAnn->params.size() >= 2)
+                    dictTarget_ = dictAnn.get();
+                if (dictAnn->kind == Type::Kind::Set &&
+                    dictAnn->params.size() >= 1)
+                    setTarget_ = dictAnn.get();
+            }
+            TypePtr setAnn;
+            if (a.value->kind == Expr::Kind::SetLit && a.ann) {
+                setAnn = resolveTypeExpr(*a.ann);
+                if (setAnn->kind == Type::Kind::Set &&
+                    setAnn->params.size() >= 1)
+                    setTarget_ = setAnn.get();
+            }
             TypePtr vt = checkExpr(*a.value);
+            dictTarget_ = nullptr;
+            setTarget_ = nullptr;
             TypePtr declared;
             if (a.ann) {
                 declared = resolveTypeExpr(*a.ann);
@@ -216,14 +375,24 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
             if (i == 0 && es.expr && es.expr->kind == Expr::Kind::StrLit)
                 break; // 模块 docstring
             diag_.error(Errc::E1007_UnsupportedFeature, file_, s.range,
-                        "模块顶层仅允许 def / import / 赋值（保证 .sgi 可静态"
-                        "生成；docstring 除外）");
+                        "模块顶层仅允许 def / import / 赋值 / capability"
+                        "（保证 .sgi 可静态生成；docstring 除外）");
+            break;
+        }
+        case Stmt::Kind::Capability: {
+            // 能力声明（0.9.7）：模块顶层并集收集；域名合法性已由解析器
+            // 查表保证（未知域名 E1005），此处只记账。
+            auto& cp = static_cast<const Capability&>(s);
+            for (const auto& it : cp.caps) {
+                Cap cap;
+                if (capFromName(it.name, cap)) declaredCaps_ |= capBit(cap);
+            }
             break;
         }
         default:
             diag_.error(Errc::E1007_UnsupportedFeature, file_, s.range,
-                        "模块顶层仅允许 def / import / 赋值（保证 .sgi 可静态"
-                        "生成；docstring 除外）");
+                        "模块顶层仅允许 def / import / 赋值 / capability"
+                        "（保证 .sgi 可静态生成；docstring 除外）");
         }
     }
 }
@@ -234,8 +403,11 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
 
 ModuleSymbols TypeChecker::check(Module& m) {
     file_ = m.file;
+    curMod_ = m.name; // 可见性判定基准（0.9.6 L 节）
     ModuleSymbols out;
     out.name = m.name;
+    declaredCaps_ = 0; // 每模块重置：声明/使用都是模块局部的
+    capUses_.clear();
 
     scope_.push(); // 模块作用域
     collectTopLevel(m, out);
@@ -243,6 +415,20 @@ ModuleSymbols TypeChecker::check(Module& m) {
     for (auto& stmt : m.body) {
         if (stmt->kind == Stmt::Kind::FuncDef)
             checkFunction(static_cast<FuncDef&>(*stmt), out);
+    }
+
+    // 能力静态门禁（0.9.7）：使用集 ⊄ 声明集 → 每个未声明域一条 E5004，
+    // 定位首个使用点。此处是双模共用的主门禁；VM/AOT 的运行时查位只是
+    // 纵深防御（正常程序到不了）。
+    uint64_t reportedDoms = 0;
+    for (const auto& u : capUses_) {
+        uint64_t bit = capBit(u.cap);
+        if ((bit & declaredCaps_) || (bit & reportedDoms)) continue;
+        reportedDoms |= bit; // 同域多使用点只报首个（域级门禁）
+        std::string dom(capName(u.cap));
+        diag_.error(Errc::E5004_CapabilityNotGranted, file_, u.range,
+                    "'" + u.what + "' 需要能力 '" + dom +
+                        "'——在模块首部添加 capability " + dom);
     }
     return out;
 }
@@ -257,6 +443,10 @@ void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols& out) {
     loopDepth_ = 0;
     const bool prevAsync = inAsyncFn_;
     inAsyncFn_ = f.isAsync;
+    const bool prevInFunc = inFunc_;
+    inFunc_ = true; // defer 仅函数体顶层合法（模块顶层无退出点）
+    const bool prevPure = inPureFn_;
+    inPureFn_ = it->second.isPure; // K 专项：@pure 函数体启用纯度强制
     for (size_t i = 0; i < f.params.size(); ++i) {
         if (!scope_.declare(f.params[i].name,
                             VarSym{it->second.params[i], f.params[i].range})) {
@@ -314,6 +504,8 @@ void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols& out) {
     pendingReturns_.clear();
     scope_.pop();
     inAsyncFn_ = prevAsync;
+    inFunc_ = prevInFunc;
+    inPureFn_ = prevPure;
 }
 
 void TypeChecker::checkContractDefs(const FuncDef& f) {
@@ -379,6 +571,13 @@ void TypeChecker::checkStmtList(const StmtList& list) {
     for (const auto& s : list) checkStmt(*s);
 }
 
+void TypeChecker::checkNested(const StmtList& list) {
+    // 嵌套块（if/while/for/try 体）：深度 +1 供 defer 顶层限制判定。
+    ++blockDepth_;
+    checkStmtList(list);
+    --blockDepth_;
+}
+
 void TypeChecker::checkStmt(const Stmt& s) {
     switch (s.kind) {
     case Stmt::Kind::Assign: {
@@ -396,7 +595,65 @@ void TypeChecker::checkStmt(const Stmt& s) {
                             " = <初值>");
             break;
         }
+        // List 上下文偏好（单发旗标）：注解为 List[...] 或重赋值既有 List
+        // 变量时，数值列表字面量按 List[T] 推断而非默认 Tensor（0.9.3：
+        // List 数值元素；checkListLit 消费旗标，检查完立即清空）。
+        if (a.value->kind == Expr::Kind::ListLit &&
+            a.target->kind == Expr::Kind::Name) {
+            auto& n0 = static_cast<const Name&>(*a.target);
+            bool listCtx = a.ann && a.ann->kind == TypeExpr::Kind::Named &&
+                           a.ann->name == "List";
+            if (!listCtx) {
+                if (const VarSym* pre = scope_.find(n0.name))
+                    listCtx = pre->type->kind == Type::Kind::List;
+            }
+            if (listCtx) asListLit_ = a.value.get();
+        }
+        // Dict/Set 上下文偏好（单发旗标，同 asListLit_）：注解为
+        // Dict[K,V]/Set[T] 或既有 Dict/Set 变量重赋值时，字面量键/值/元素
+        // 统一对齐目标（checkDictLit / checkSetLit 消费，检查完清空）。
+        // dictAnn/setAnn 存活到 checkExpr 之后，理由同上。
+        TypePtr dictAnn;
+        if (a.value->kind == Expr::Kind::DictLit) {
+            if (a.ann) {
+                dictAnn = resolveTypeExpr(*a.ann);
+                if (dictAnn->kind == Type::Kind::Dict &&
+                    dictAnn->params.size() >= 2)
+                    dictTarget_ = dictAnn.get();
+                if (dictAnn->kind == Type::Kind::Set &&
+                    dictAnn->params.size() >= 1)
+                    setTarget_ = dictAnn.get();
+            } else if (a.target->kind == Expr::Kind::Name) {
+                if (const VarSym* pre = scope_.find(
+                        static_cast<const Name&>(*a.target).name)) {
+                    if (pre->type->kind == Type::Kind::Dict &&
+                        pre->type->params.size() >= 2)
+                        dictTarget_ = pre->type.get();
+                    if (pre->type->kind == Type::Kind::Set &&
+                        pre->type->params.size() >= 1)
+                        setTarget_ = pre->type.get();
+                }
+            }
+        }
+        TypePtr setAnn;
+        if (a.value->kind == Expr::Kind::SetLit) {
+            if (a.ann) {
+                setAnn = resolveTypeExpr(*a.ann);
+                if (setAnn->kind == Type::Kind::Set &&
+                    setAnn->params.size() >= 1)
+                    setTarget_ = setAnn.get();
+            } else if (a.target->kind == Expr::Kind::Name) {
+                if (const VarSym* pre = scope_.find(
+                        static_cast<const Name&>(*a.target).name))
+                    if (pre->type->kind == Type::Kind::Set &&
+                        pre->type->params.size() >= 1)
+                        setTarget_ = pre->type.get();
+            }
+        }
         TypePtr vt = checkExpr(*a.value);
+        asListLit_ = nullptr;
+        dictTarget_ = nullptr;
+        setTarget_ = nullptr;
 
         if (a.target->kind == Expr::Kind::Name) {
             auto& n = static_cast<const Name&>(*a.target);
@@ -450,11 +707,15 @@ void TypeChecker::checkStmt(const Stmt& s) {
             // 下标赋值：t[i, ...] = v
             auto& ix = static_cast<const Index&>(*a.target);
             TypePtr base = checkExpr(*ix.base);
-            for (const auto& idx : ix.indices) {
-                TypePtr it = checkExpr(*idx);
-                if (it->kind != Type::Kind::Int && it->kind != Type::Kind::Err)
-                    fail(Errc::E2001_TypeMismatch, idx->range,
-                         "下标必须是 int，实际为 " + typeToString(it));
+            if (base->kind != Type::Kind::Dict) {
+                // 字典键的类型由下方 Dict 分支检查（键不限于 int）。
+                for (const auto& idx : ix.indices) {
+                    TypePtr it = checkExpr(*idx);
+                    if (it->kind != Type::Kind::Int &&
+                        it->kind != Type::Kind::Err)
+                        fail(Errc::E2001_TypeMismatch, idx->range,
+                             "下标必须是 int，实际为 " + typeToString(it));
+                }
             }
             if (base->kind == Type::Kind::Tensor) {
                 if (ix.indices.size() != base->shape.size()) {
@@ -495,6 +756,10 @@ void TypeChecker::checkStmt(const Stmt& s) {
                          "值类型不匹配：" + typeToString(vt) + " 无法赋给 " +
                              typeToString(base->params[1]));
                 }
+            } else if (base->kind == Type::Kind::Tuple) {
+                // 元组不可变：下标赋值显式拒绝（E2001；与 VM StoreIndex 的
+                // 类型分派一致——检查器拦截后双模均不可达运行时分支）。
+                fail(Errc::E2001_TypeMismatch, ix.base->range, "元组不可变");
             } else if (base->kind != Type::Kind::Err) {
                 fail(Errc::E2001_TypeMismatch, ix.base->range,
                      "该类型不支持下标赋值：" + typeToString(base));
@@ -548,19 +813,19 @@ void TypeChecker::checkStmt(const Stmt& s) {
     case Stmt::Kind::If: {
         auto& st = static_cast<const If&>(s);
         requireBool(checkExpr(*st.cond), st.cond->range, "if 条件");
-        checkStmtList(st.thenBody);
+        checkNested(st.thenBody);
         for (const auto& e : st.elifs) {
             requireBool(checkExpr(*e.cond), e.cond->range, "elif 条件");
-            checkStmtList(e.body);
+            checkNested(e.body);
         }
-        checkStmtList(st.elseBody);
+        checkNested(st.elseBody);
         break;
     }
     case Stmt::Kind::While: {
         auto& st = static_cast<const While&>(s);
         requireBool(checkExpr(*st.cond), st.cond->range, "while 条件");
         ++loopDepth_;
-        checkStmtList(st.body);
+        checkNested(st.body);
         --loopDepth_;
         break;
     }
@@ -570,9 +835,14 @@ void TypeChecker::checkStmt(const Stmt& s) {
         TypePtr elem = tyErr();
         if (it->kind == Type::Kind::Range) elem = tyInt();
         else if (it->kind == Type::Kind::List) elem = it->params[0];
+        else if (it->kind == Type::Kind::Dict)
+            elem = it->params[0]; // 字典遍历键（插入序，与 VM/AOT 一致）
+        else if (it->kind == Type::Kind::Set && it->params.size() >= 1)
+            elem = it->params[0]; // 集合遍历元素（首插序，与 VM/AOT 一致）
         else if (it->kind != Type::Kind::Err)
             fail(Errc::E2001_TypeMismatch, st.iter->range,
-                 "for 只能遍历 range 或 List，实际为 " + typeToString(it));
+                 "for 只能遍历 range、List、dict 或 Set，实际为 " +
+                     typeToString(it));
         // 循环变量声明（Q9，Python 式复用）：与函数层已有同名绑定且类型
         // 相同 → 复用绑定（重绑定语义）；类型不同 → 明确报错。与外层
         // （模块全局/导入名）同名属正常遮蔽，照常声明。
@@ -589,12 +859,16 @@ void TypeChecker::checkStmt(const Stmt& s) {
             scope_.declare(st.var, VarSym{elem, st.varRange});
         }
         ++loopDepth_;
-        checkStmtList(st.body);
+        checkNested(st.body);
         --loopDepth_;
         break;
     }
     case Stmt::Kind::Return: {
         auto& st = static_cast<const Return&>(s);
+        if (inDefer_)
+            diag_.error(Errc::E1007_UnsupportedFeature, file_, s.range,
+                        "defer 块内不允许 return（展开点在 return 之后，"
+                        "跳转语义无定义）");
         TypePtr vt = st.value ? checkExpr(*st.value) : tyNone();
         if (fnRet_->kind == Type::Kind::Unknown) {
             // 返回类型推断中（Q10）：收集待统一；int→float 提升待
@@ -614,7 +888,12 @@ void TypeChecker::checkStmt(const Stmt& s) {
     }
     case Stmt::Kind::Break:
     case Stmt::Kind::Continue:
-        if (loopDepth_ == 0) {
+        if (inDefer_)
+            diag_.error(Errc::E1007_UnsupportedFeature, file_, s.range,
+                        s.kind == Stmt::Kind::Break
+                            ? "defer 块内不允许 break"
+                            : "defer 块内不允许 continue");
+        else if (loopDepth_ == 0) {
             diag_.error(Errc::E2009_BreakOutsideLoop, file_, s.range,
                         s.kind == Stmt::Kind::Break ? "break 不在循环内"
                                                     : "continue 不在循环内");
@@ -625,8 +904,29 @@ void TypeChecker::checkStmt(const Stmt& s) {
     case Stmt::Kind::Try: {
         // panic 恢复路径：两块分别全量检查；类型无约束（文档第四章）。
         auto& st = static_cast<const Try&>(s);
-        checkStmtList(st.body);
-        checkStmtList(st.handlerBody);
+        checkNested(st.body);
+        checkNested(st.handlerBody);
+        break;
+    }
+    case Stmt::Kind::Defer: {
+        // defer 位置三限：函数体内、函数体顶层、不嵌套 defer（展开点
+        // 静态可枚举是双模一致的根基，见 AST Defer 契约注释）。
+        auto& st = static_cast<const Defer&>(s);
+        if (!inFunc_) {
+            diag_.error(Errc::E1007_UnsupportedFeature, file_, s.range,
+                        "defer 只能出现在函数体内（模块顶层无函数退出点）");
+        } else if (blockDepth_ > 0) {
+            diag_.error(Errc::E1007_UnsupportedFeature, file_, s.range,
+                        "defer 只能写在函数体顶层（不能嵌套在 "
+                        "if/while/for/try 内）");
+        } else if (inDefer_) {
+            diag_.error(Errc::E1007_UnsupportedFeature, file_, s.range,
+                        "defer 块内不允许嵌套 defer");
+        }
+        const bool prev = inDefer_;
+        inDefer_ = true;
+        checkNested(st.body);
+        inDefer_ = prev;
         break;
     }
     case Stmt::Kind::Assert: {
@@ -643,6 +943,12 @@ void TypeChecker::checkStmt(const Stmt& s) {
     case Stmt::Kind::Import:
     case Stmt::Kind::FuncDef:
         break; // 顶层已处理
+    case Stmt::Kind::Capability:
+        // 能力声明只属模块顶层（会话/依赖闭包在模块边界合并，块内声明
+        // 无法进入 Program.capMask——门禁语义不成立，直接拒绝）。
+        diag_.error(Errc::E1007_UnsupportedFeature, file_, s.range,
+                    "capability 声明只能写在模块顶层（不能出现在函数/块内）");
+        break;
     }
 }
 
@@ -719,6 +1025,10 @@ TypePtr TypeChecker::checkExprImpl(const Expr& e) {
         return checkIndex(e);
     case Expr::Kind::ListLit:
         return checkListLit(e);
+    case Expr::Kind::DictLit:
+        return checkDictLit(e);
+    case Expr::Kind::SetLit:
+        return checkSetLit(e);
     case Expr::Kind::Await: {
         // await 仅在 async def 内合法（E2010）；类型透传操作数
         // （Task 语义随 P2 并发落地，P0 阶段 await 是类型恒等）。
@@ -730,8 +1040,7 @@ TypePtr TypeChecker::checkExprImpl(const Expr& e) {
         return checkExpr(*aw.operand);
     }
     case Expr::Kind::TupleLit:
-        return fail(Errc::E1007_UnsupportedFeature, e.range,
-                    "元组仅在张量形状注解 Tensor[T, (…)] 中使用");
+        return checkTupleLit(e);
     }
     return tyErr();
 }
@@ -745,7 +1054,14 @@ TypePtr TypeChecker::checkName(const Expr& e) {
         return fail(Errc::E1007_UnsupportedFeature, e.range,
                     "函数 '" + n.name + "' 不能作为值使用（当前仅支持调用）");
 
-    if (TypePtr b = builtinType(n.name)) return b;
+    if (TypePtr b = builtinType(n.name)) {
+        // 能力记录（0.9.7）：需授权内建的每个调用名只记首个使用点，
+        // check 收尾统一按域裁决（E5004）。
+        Cap cap;
+        if (capOfBuiltin(n.name, cap))
+            capUses_.push_back({n.name, cap, n.range});
+        return b;
+    }
 
     std::string msg = "未声明的标识符 '" + n.name + "'";
     if (n.name == "result") msg += "（result 仅在 ensures 契约中可用）";
@@ -766,12 +1082,58 @@ TypePtr TypeChecker::builtinType(const std::string& name) const {
         name == "acos" || name == "atan" || name == "sinh" || name == "cosh" ||
         name == "tanh" || name == "atan2" || name == "floor" ||
         name == "ceil" || name == "round" || name == "trunc" ||
-        name == "random" || name == "seed" || name == "sorted") {
+        name == "random" || name == "seed" || name == "sorted" ||
+        // 0.9.4 IO 子系统：函数式文件/目录/标准输入（与 Compiler/MLIRGen 同表）
+        name == "input" || name == "read_text" || name == "write_text" ||
+        name == "append_text" || name == "exists" || name == "list_dir" ||
+        // 0.9.4 F/G 专项：网络客户端（TCP/UDP/HTTP）与睡眠（同表）
+        name == "net_connect" || name == "net_send" || name == "net_recv" ||
+        name == "net_close" || name == "net_udp_send" ||
+        name == "net_http_get" || name == "sleep" ||
+        name == "net_bind" || name == "net_accept" ||
+        name == "net_set_timeout" ||
+        // 0.9.4 M 专项：标准库广度（统计/倒序/哈希；同表）
+        name == "mean" || name == "var" || name == "std" ||
+        name == "reversed" || name == "sha256" || name == "crc32" ||
+        // 0.9.4 M 专项：JSON（动态 Json 值；同表）
+        name == "json_decode" ||
+        // 0.9.4 H 专项：系统编程（args/env/时间/进程/信号；同表）
+        name == "args" || name == "env" || name == "has_env" ||
+        name == "set_env" || name == "unset_env" || name == "epoch" ||
+        name == "epoch_ms" || name == "localtime" || name == "gmtime" ||
+        name == "system" || name == "spawn_wait" || name == "signal_caught" ||
+        name == "signal_reset" ||
+        // 0.9.6 O 节 FFI 宽类型域：数据地址导出（同表）
+        name == "data_ptr") {
         auto t = std::make_shared<Type>(Type::Kind::Builtin);
         t->name = name;
         return t;
     }
     return nullptr;
+}
+
+/// 元组元素两两可比性（==/!= 语义，与 VM valuesEqual / AOT genTupleEq
+/// 同规则）：数值族互通（按 double 比较）、双 str、None 对任意标量/元组
+/// （异类恒 false）、嵌套元组递归同构。容器元素不可比——AOT 无容器相等
+/// 先例，显式拒绝保持双模覆盖一致。
+static bool tupleElemsComparable(const TypePtr& a, const TypePtr& b) {
+    auto isNum = [](const TypePtr& t) {
+        return t->kind == Type::Kind::Int || t->kind == Type::Kind::Float ||
+               t->kind == Type::Kind::Bool;
+    };
+    if (isNum(a) && isNum(b)) return true;
+    if (a->kind == Type::Kind::Str && b->kind == Type::Kind::Str) return true;
+    if (a->kind == Type::Kind::None && b->kind == Type::Kind::None) return true;
+    if (a->kind == Type::Kind::None || b->kind == Type::Kind::None)
+        return true; // 异类 None：值恒 false（合法可比）
+    if (a->kind == Type::Kind::Tuple && b->kind == Type::Kind::Tuple) {
+        if (a->params.size() != b->params.size()) return false;
+        for (size_t k = 0; k < a->params.size(); ++k)
+            if (!tupleElemsComparable(a->params[k], b->params[k]))
+                return false;
+        return true;
+    }
+    return false;
 }
 
 TypePtr TypeChecker::checkBinary(const Expr& e) {
@@ -801,6 +1163,9 @@ TypePtr TypeChecker::checkBinary(const Expr& e) {
         if (r->kind == Type::Kind::Str && l->kind == Type::Kind::Str)
             return tyBool();
         if (r->kind == Type::Kind::Dict && isConvertible(l, r->params[0]))
+            return tyBool();
+        if (r->kind == Type::Kind::Set && r->params.size() >= 1 &&
+            isConvertible(l, r->params[0]))
             return tyBool();
         return failOp("");
     }
@@ -839,6 +1204,23 @@ TypePtr TypeChecker::checkBinary(const Expr& e) {
         if ((op == "==" || op == "!=") &&
             (l->kind == Type::Kind::None || r->kind == Type::Kind::None))
             return tyBool();
+        // 元组 ==/!=：仅同构元组（长度 + 逐元素可比性），运行时逐位展开。
+        if ((op == "==" || op == "!=") && l->kind == Type::Kind::Tuple &&
+            r->kind == Type::Kind::Tuple) {
+            if (l->params.size() != r->params.size())
+                return fail(Errc::E2001_TypeMismatch, e.range,
+                            "元组比较长度不一致：" + typeToString(l) + " 与 " +
+                                typeToString(r));
+            for (size_t k = 0; k < l->params.size(); ++k) {
+                if (!tupleElemsComparable(l->params[k], r->params[k]))
+                    return fail(Errc::E2001_TypeMismatch, e.range,
+                                "元组第 " + std::to_string(k + 1) +
+                                    " 个元素不可比较：" +
+                                    typeToString(l->params[k]) + " 与 " +
+                                    typeToString(r->params[k]));
+            }
+            return tyBool();
+        }
         return failOp("");
     }
 
@@ -917,6 +1299,22 @@ TypePtr TypeChecker::checkListLit(const Expr& e) {
         }
     }
 
+    if (allNumeric && &e == asListLit_) {
+        // List 注解/重赋值上下文：数值字面量按 List[T] 推断（int/float 混排
+        // 统一为 float，与下方 List 路径及 AOT genListLit 的元素统一一致）。
+        // checkedAsTensor 保持 false——编译器/AOT 均据此走 NewList。
+        TypePtr elem = tyInt();
+        for (auto& t : ts)
+            if (t->kind == Type::Kind::Float) elem = tyFloat();
+        if (elem->kind == Type::Kind::Float) {
+            // int 元素做 float 提升标记（Q3 边界，与 AOT genListLit 按元素
+            // 种类统一对齐）：VM 路径经 promoteF64_ 集合插 IntToFloat。
+            for (size_t i = 0; i < ts.size(); ++i)
+                if (ts[i]->kind == Type::Kind::Int)
+                    promoteF64_.insert(ll.elems[i].get());
+        }
+        return makeType(Type::Kind::List, {elem});
+    }
     if (allNumeric) {
         TypePtr elem = tyInt();
         for (auto& t : ts)
@@ -953,10 +1351,217 @@ TypePtr TypeChecker::checkListLit(const Expr& e) {
     return makeType(Type::Kind::List, {elem});
 }
 
+TypePtr TypeChecker::checkDictLit(const Expr& e) {
+    auto& dl = static_cast<const DictLit&>(e);
+    if (dl.pairs.empty()) {
+        // 空 {} 在 Set[T] 上下文 → 空集合（单一事实源 checkedAsSet，编译器
+        // 据此编 NewSet(0)）；否则按注解推断为字典。返回新建 Set 类型——
+        // 注解表持有，不能共享 setTarget_ 指向的注解本体所有权。
+        if (setTarget_ && setTarget_->params.size() >= 1) {
+            dl.checkedAsSet = true;
+            return makeType(Type::Kind::Set, {setTarget_->params[0]});
+        }
+        return tyUnknown(); // 空字典 {}：类型由注解推断
+    }
+
+    std::vector<TypePtr> ks, vs;
+    for (const auto& p : dl.pairs) {
+        ks.push_back(checkExpr(*p.first));
+        vs.push_back(checkExpr(*p.second));
+    }
+    // 键类型：限标量（int/float/bool/str），跨对统一（int∘float → float）。
+    TypePtr kt = tyErr();
+    for (size_t i = 0; i < ks.size(); ++i) {
+        TypePtr k = ks[i];
+        if (k->kind == Type::Kind::Err) return tyErr(); // 级联抑制
+        if (k->kind != Type::Kind::Int && k->kind != Type::Kind::Float &&
+            k->kind != Type::Kind::Bool && k->kind != Type::Kind::Str)
+            return fail(Errc::E2001_TypeMismatch, dl.pairs[i].first->range,
+                        "字典键必须是 int/float/bool/str，实际为 " +
+                            typeToString(k));
+        if (kt->kind == Type::Kind::Err) {
+            kt = k;
+        } else if (!typeEquals(kt, k)) {
+            if (TypePtr u = unifyNumeric(kt, k)) {
+                kt = u;
+            } else {
+                return fail(Errc::E2001_TypeMismatch, e.range,
+                            "字典键类型不一致：" + typeToString(kt) + " 与 " +
+                                typeToString(k));
+            }
+        }
+    }
+    // 值类型：跨对统一（int∘float → float；容器值需类型一致）。
+    TypePtr vt = tyErr();
+    for (size_t i = 0; i < vs.size(); ++i) {
+        TypePtr v = vs[i];
+        if (v->kind == Type::Kind::Err) return tyErr();
+        if (vt->kind == Type::Kind::Err) {
+            vt = v;
+        } else if (!typeEquals(vt, v)) {
+            if (TypePtr u = unifyNumeric(vt, v)) {
+                vt = u;
+            } else {
+                return fail(Errc::E2001_TypeMismatch, e.range,
+                            "字典值类型不一致：" + typeToString(vt) + " 与 " +
+                                typeToString(v));
+            }
+        }
+    }
+    // Dict 上下文偏好（单发旗标消费）：赋值/缺省值目标为 Dict[K,V] 时
+    // 键/值统一对齐注解——字面量自推断 Dict{float,int} 与变量注解
+    // Dict{float,float} 槽位语义脱节是双模漂移源；对齐后字面量注解 =
+    // 变量注解（读取侧按变量注解位还原），被提升的 int 键/值打 Q3 标记。
+    if (dictTarget_) {
+        const Type& tg = *dictTarget_;
+        if (isConvertible(kt, tg.params[0])) {
+            if (tg.params[0]->kind == Type::Kind::Float)
+                for (size_t i = 0; i < ks.size(); ++i)
+                    if (ks[i]->kind == Type::Kind::Int)
+                        promoteF64_.insert(dl.pairs[i].first.get());
+            kt = tg.params[0];
+        }
+        if (isConvertible(vt, tg.params[1])) {
+            if (tg.params[1]->kind == Type::Kind::Float)
+                for (size_t i = 0; i < vs.size(); ++i)
+                    if (vs[i]->kind == Type::Kind::Int)
+                        promoteF64_.insert(dl.pairs[i].second.get());
+            vt = tg.params[1];
+        }
+    }
+    // 统一为 float 的 int 键/值做提升标记（Q3 边界，与 ListLit 同规则；
+    // VM 路径插 IntToFloat，AOT genDictLit 按元素种类统一）。
+    if (kt->kind == Type::Kind::Float)
+        for (size_t i = 0; i < ks.size(); ++i)
+            if (ks[i]->kind == Type::Kind::Int)
+                promoteF64_.insert(dl.pairs[i].first.get());
+    if (vt->kind == Type::Kind::Float)
+        for (size_t i = 0; i < vs.size(); ++i)
+            if (vs[i]->kind == Type::Kind::Int)
+                promoteF64_.insert(dl.pairs[i].second.get());
+    return makeType(Type::Kind::Dict, {kt, vt});
+}
+
+TypePtr TypeChecker::checkSetLit(const Expr& e) {
+    auto& sl = static_cast<const SetLit&>(e);
+    if (sl.elems.empty()) return tyUnknown(); // 防御：解析器不产空 SetLit
+
+    std::vector<TypePtr> ts;
+    for (const auto& el : sl.elems) ts.push_back(checkExpr(*el));
+    // 元素类型：限标量（int/float/bool/str），跨元素统一（int∘float → float；
+    // 语义与 Dict 键一致：数值跨类型同键去重，故元素类型必须可统一）。
+    TypePtr et = tyErr();
+    for (size_t i = 0; i < ts.size(); ++i) {
+        TypePtr t = ts[i];
+        if (t->kind == Type::Kind::Err) return tyErr(); // 级联抑制
+        if (t->kind != Type::Kind::Int && t->kind != Type::Kind::Float &&
+            t->kind != Type::Kind::Bool && t->kind != Type::Kind::Str)
+            return fail(Errc::E2001_TypeMismatch, sl.elems[i]->range,
+                        "集合元素必须是 int/float/bool/str，实际为 " +
+                            typeToString(t));
+        if (et->kind == Type::Kind::Err) {
+            et = t;
+        } else if (!typeEquals(et, t)) {
+            if (TypePtr u = unifyNumeric(et, t)) {
+                et = u;
+            } else {
+                return fail(Errc::E2001_TypeMismatch, e.range,
+                            "集合元素类型不一致：" + typeToString(et) + " 与 " +
+                                typeToString(t));
+            }
+        }
+    }
+    // Set 上下文偏好（单发旗标消费）：赋值/缺省值目标为 Set[T] 时元素统一
+    // 对齐注解——对齐后字面量注解 = 变量注解，被提升的 int 元素打 Q3 标记。
+    if (setTarget_ && setTarget_->params.size() >= 1 &&
+        isConvertible(et, setTarget_->params[0])) {
+        if (setTarget_->params[0]->kind == Type::Kind::Float)
+            for (size_t i = 0; i < ts.size(); ++i)
+                if (ts[i]->kind == Type::Kind::Int)
+                    promoteF64_.insert(sl.elems[i].get());
+        et = setTarget_->params[0];
+    }
+    // 统一为 float 的 int 元素做提升标记（Q3 边界，与 Dict 键同规则；
+    // VM 路径插 IntToFloat，AOT genSetLit 按元素种类统一）。
+    if (et->kind == Type::Kind::Float)
+        for (size_t i = 0; i < ts.size(); ++i)
+            if (ts[i]->kind == Type::Kind::Int)
+                promoteF64_.insert(sl.elems[i].get());
+    return makeType(Type::Kind::Set, {et});
+}
+
+TypePtr TypeChecker::checkTupleLit(const Expr& e) {
+    auto& tl = static_cast<const TupleLit&>(e);
+    // 异构定长不可变：逐元素检查，元素白名单 = int/float/bool/str/None/
+    // 嵌套元组。容器与 Result 元素显式拒绝——AOT 位槽 ABI 下 Tensor 的
+    // tInt/tRank 元数据经位槽编解码会静默丢失，Result/Dict 的打印本就
+    // AOT unsupported（拒绝即文档，与 0.9.3 Set 元素白名单同哲学）。
+    std::vector<TypePtr> ts;
+    bool hasErr = false;
+    for (const auto& el : tl.elems) {
+        TypePtr t = checkExpr(*el);
+        switch (t->kind) {
+        case Type::Kind::Int:
+        case Type::Kind::Float:
+        case Type::Kind::Bool:
+        case Type::Kind::Str:
+        case Type::Kind::None:
+        case Type::Kind::Tuple:
+            break;
+        case Type::Kind::Err:
+            hasErr = true; // 级联抑制：先收集完剩余元素诊断再整体报 Err
+            continue;
+        default:
+            fail(Errc::E1007_UnsupportedFeature, el->range,
+                 "元组元素类型不支持 " + typeToString(t) +
+                     "（仅限 int/float/bool/str/None 与嵌套元组）");
+            hasErr = true;
+            continue;
+        }
+        ts.push_back(std::move(t));
+    }
+    if (hasErr) return tyErr();
+    return makeType(Type::Kind::Tuple, std::move(ts));
+}
+
 TypePtr TypeChecker::checkIndex(const Expr& e) {
     auto& ix = static_cast<const Index&>(e);
     TypePtr base = checkExpr(*ix.base);
     if (base->kind == Type::Kind::Err) return tyErr();
+    if (base->kind == Type::Kind::Dict) {
+        // 字典下标 = 键（K 类型，可 int→float 放宽）；其余容器仍限 int 下标。
+        if (ix.indices.size() != 1)
+            return fail(Errc::E2004_ShapeMismatch, e.range,
+                        "dict 只支持单下标");
+        TypePtr it = checkExpr(*ix.indices[0]);
+        if (it->kind != Type::Kind::Err &&
+            !isConvertible(it, base->params[0]))
+            return fail(Errc::E2001_TypeMismatch, ix.indices[0]->range,
+                        "字典键类型不匹配：需要 " +
+                            typeToString(base->params[0]) + "，实际为 " +
+                            typeToString(it));
+        return base->params[1];
+    }
+    if (base->kind == Type::Kind::Set)
+        return fail(Errc::E2001_TypeMismatch, e.range,
+                    "Set 不支持下标（集合无序；成员判定用 'in'，遍历用 for）");
+    if (base->kind == Type::Kind::Tuple) {
+        // 元组定长：下标限编译期整数字面量，越界静态拒绝（运行期无任何
+        // panic 路径——VM normIndex / AOT list_get_i 的越界分支均不可达）。
+        if (ix.indices.size() != 1)
+            return fail(Errc::E2004_ShapeMismatch, e.range, "元组只支持单下标");
+        const Expr& ie = *ix.indices[0];
+        if (ie.kind != Expr::Kind::IntLit)
+            return fail(Errc::E2001_TypeMismatch, ie.range,
+                        "元组下标必须是编译期整数字面量");
+        const int64_t i = static_cast<const IntLit&>(ie).value;
+        const int64_t n = static_cast<int64_t>(base->params.size());
+        if (i >= n)
+            return fail(Errc::E2004_ShapeMismatch, e.range,
+                        "元组下标越界：长度 " + std::to_string(n) + "，实际 " +
+                            std::to_string(i));
+        return base->params[static_cast<size_t>(i)];
+    }
     for (const auto& idx : ix.indices) {
         TypePtr it = checkExpr(*idx);
         if (it->kind != Type::Kind::Int && it->kind != Type::Kind::Err)
@@ -985,7 +1590,6 @@ TypePtr TypeChecker::checkIndex(const Expr& e) {
         return base->params[0];
     }
     if (base->kind == Type::Kind::Str) return tyStr();
-    if (base->kind == Type::Kind::Dict) return base->params[1];
     return fail(Errc::E2001_TypeMismatch, ix.base->range,
                 "该类型不支持下标访问：" + typeToString(base));
 }
@@ -1005,18 +1609,93 @@ TypePtr TypeChecker::checkAttr(const Expr& e) {
                         at.name + "'");
     }
 
-    // 模块成员访问：foo.func / foo.CONST
+    // str 成员方法（0.9.4）：纯函数签名表（唯一事实源）；实现分派在
+    // VM callValueMethod 与 AOT lang.str_*（kLowerings 降级），panic 消息
+    // 三方逐字一致。upper/lower 仅 ASCII；下标/查找按 UTF-8 字节。
+    if (base->kind == Type::Kind::Str) {
+        if (at.name == "upper" || at.name == "lower" || at.name == "trim" ||
+            at.name == "trim_start" || at.name == "trim_end")
+            return makeFunction({}, tyStr());
+        if (at.name == "split")
+            return makeFunction({tyStr()},
+                                makeType(Type::Kind::List, {tyStr()}));
+        if (at.name == "join")
+            return makeFunction({makeType(Type::Kind::List, {tyStr()})},
+                                tyStr());
+        if (at.name == "replace")
+            return makeFunction({tyStr(), tyStr()}, tyStr());
+        if (at.name == "find" || at.name == "index")
+            return makeFunction({tyStr()}, tyInt());
+        if (at.name == "contains" || at.name == "startswith" ||
+            at.name == "endswith")
+            return makeFunction({tyStr()}, tyBool());
+    }
+
+    // List 成员方法（0.9.4）：contains/index/count，实参 = 元素类型
+    // （int 键遇 float 列表经 isConvertible 放行，VM/AOT 各自提升 f64，
+    // 与 'in' 运算符同一唯一放宽）。
+    if (base->kind == Type::Kind::List && !base->params.empty()) {
+        TypePtr elem = base->params[0];
+        if (at.name == "contains") return makeFunction({elem}, tyBool());
+        if (at.name == "index" || at.name == "count")
+            return makeFunction({elem}, tyInt());
+    }
+
+    // Json 成员方法（0.9.4 M 专项）：动态 JSON 值的只读取值面。全部纯
+    // 函数；at(i) 数组下标越界 panic、get(k) 对象缺键返回 null（两分：
+    // 下标越界是编程错误，缺键是数据常态）。
+    if (base->kind == Type::Kind::Json) {
+        TypePtr retJson = makeType(Type::Kind::Json);
+        if (at.name == "is_null" || at.name == "is_bool" ||
+            at.name == "is_int" || at.name == "is_float" ||
+            at.name == "is_str" || at.name == "is_list" ||
+            at.name == "is_obj")
+            return makeFunction({}, tyBool());
+        if (at.name == "as_int") return makeFunction({}, tyInt());
+        if (at.name == "as_float") return makeFunction({}, tyFloat());
+        if (at.name == "as_bool") return makeFunction({}, tyBool());
+        if (at.name == "as_str") return makeFunction({}, tyStr());
+        if (at.name == "at") return makeFunction({tyInt()}, retJson);
+        if (at.name == "get") return makeFunction({tyStr()}, retJson);
+        if (at.name == "len") return makeFunction({}, tyInt());
+        if (at.name == "keys")
+            return makeFunction({},
+                                makeType(Type::Kind::List, {tyStr()}));
+        if (at.name == "dump") return makeFunction({}, tyStr());
+    }
+
+    // 模块成员访问：foo.func / foo.CONST / 包路径中间段 a.b（0.9.6）。
     if (base->kind == Type::Kind::Module) {
         auto it = imports_.find(base->name);
         if (it != imports_.end()) {
             const ModuleSymbols& ms = *it->second;
             if (auto f = ms.funcs.find(at.name); f != ms.funcs.end()) {
+                if (!checkVis(f->second.vis, ms.name, at.name, e.range))
+                    return tyErr();
                 std::vector<TypePtr> ps = f->second.params;
                 ps.push_back(f->second.ret);
                 return std::make_shared<Type>(Type::Kind::Function, ps);
             }
-            if (auto g = ms.globals.find(at.name); g != ms.globals.end())
+            if (auto g = ms.globals.find(at.name); g != ms.globals.end()) {
+                // 模块级全局无装饰器挂点，恒 public（0.9.6 L 节）。
                 return g->second;
+            }
+        }
+        // 宽容路径重写（0.9.6）：import a.b 绑定首段 a → 真名 a.b，规范
+        // 书写 a.b.CONST 的中间段 b 与真名尾段重合——重合段透传同一
+        // Module 类型。与 qualifiedModuleName 同序（重写优先于下钻）。
+        std::string suffix = '.' + at.name;
+        if (base->name.size() > suffix.size() &&
+            base->name.compare(base->name.size() - suffix.size(),
+                               suffix.size(), suffix) == 0)
+            return base;
+        // 子模块链：base.name 与成员名拼接的全名在 registry 中存在即返回
+        // Module 类型（下一段访问继续进入本分支逐级解析，支撑 a.b.c()）。
+        std::string sub = base->name + "." + at.name;
+        if (imports_.count(sub)) {
+            auto mod = std::make_shared<Type>(Type::Kind::Module);
+            mod->name = sub;
+            return mod;
         }
         return fail(Errc::E2003_UnknownName, e.range,
                     "模块 '" + base->name + "' 没有成员 '" + at.name + "'");
@@ -1036,8 +1715,14 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
         // （函数名单独出现才是头等值使用，由 checkName 报 E1007。）
         if (!scope_.find(n.name)) {
             TypePtr b = builtinType(n.name);
-            if (b && b->kind == Type::Kind::Builtin)
+            if (b && b->kind == Type::Kind::Builtin) {
+                // 能力记录（0.9.7）：调用形态的内建走此分支（不经 checkName），
+                // 漏记会使 E5004 静态门禁失效（只剩运行时兜底）。
+                Cap cap;
+                if (capOfBuiltin(n.name, cap))
+                    capUses_.push_back({n.name, cap, n.range});
                 return checkBuiltinCall(n.name, c);
+            }
             if (auto f = localFuncs_.find(n.name); f != localFuncs_.end())
                 callee = makeFunction(f->second.params, f->second.ret);
         }
@@ -1061,9 +1746,10 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
             calleeSig = &f->second;
     } else if (c.callee->kind == Expr::Kind::Attr) {
         auto& at = static_cast<const Attr&>(*c.callee);
-        if (at.base->kind == Expr::Kind::Name) {
-            auto& mn = static_cast<const Name&>(*at.base);
-            if (auto it = imports_.find(mn.name); it != imports_.end()) {
+        // 0.9.6：base 支持包路径链（a.b.f()）——折叠为全限定模块名再查表。
+        std::string qm = qualifiedModuleName(*at.base);
+        if (!qm.empty()) {
+            if (auto it = imports_.find(qm); it != imports_.end()) {
                 if (auto f = it->second->funcs.find(at.name);
                     f != it->second->funcs.end())
                     calleeSig = &f->second;
@@ -1071,6 +1757,18 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
         }
     }
     if (calleeSig) required = calleeSig->requiredArgs;
+    // K 专项：@pure 函数只能调用 @pure 函数（本模块与导入同规则；
+    // @extern 及未标注者默认非纯，一律拒绝）。
+    if (inPureFn_ && calleeSig && !calleeSig->isPure) {
+        std::string nm;
+        if (c.callee->kind == Expr::Kind::Name)
+            nm = static_cast<const Name&>(*c.callee).name;
+        else if (c.callee->kind == Expr::Kind::Attr)
+            nm = static_cast<const Attr&>(*c.callee).name;
+        return fail(Errc::E1007_UnsupportedFeature, c.callee->range,
+                    "@pure 函数内禁止调用非纯函数 '" + nm +
+                        "'（被调函数未标注 @pure）");
+    }
     if (calleeSig && calleeSig->retPending) {
         // Q10 边界：被调函数返回类型推断未完成（本模块内递归 / 前向引用）。
         // 推断期无类型事实源，静态规则要求显式注解（与 Rust 同理）。
@@ -1083,7 +1781,18 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
                     "函数 '" + nm +
                         "' 的返回类型为自动推断且尚未完成（递归 / 前向引用无法自动推断）；请为其显式注解返回类型");
     }
-    if (c.args.size() < required || c.args.size() > nParams) {
+    // 变参 @extern（O 节 FFI 宽类型域）：实参数下限 = 命名参数个数
+    //（extern 无缺省值），上限 20 与 VM 变参调用桩栈槽容量（16+4）对齐——
+    // 编译期拦截，避免双模运行期栈越界分歧。
+    const bool varCallee = calleeSig && calleeSig->isVariadic;
+    if (varCallee) {
+        if (c.args.size() < required || c.args.size() > 20) {
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "变参调用实参数不匹配：至少 " +
+                            std::to_string(required) + " 个（命名参数），至多 20 个，实际 " +
+                            std::to_string(c.args.size()));
+        }
+    } else if (c.args.size() < required || c.args.size() > nParams) {
         std::string hint = required == nParams
                                ? std::to_string(nParams)
                                : std::to_string(required) + "–" +
@@ -1095,6 +1804,15 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
     // 实参类型检查只遍历调用点提供的实参（Q2：缺失尾部实参由默认值补位）。
     for (size_t i = 0; i < c.args.size(); ++i) {
         TypePtr at = checkExpr(*c.args[i]);
+        if (varCallee && i >= nParams) {
+            // 变参额外实参：C 变参只收标量，逐个限域（无提升语义）。
+            if (!(at->kind == Type::Kind::Int || at->kind == Type::Kind::Float ||
+                  at->kind == Type::Kind::Bool || at->kind == Type::Kind::Str))
+                fail(Errc::E2001_TypeMismatch, c.args[i]->range,
+                     "变参额外实参仅支持 int/float/bool/str，实际 " +
+                         typeToString(at));
+            continue;
+        }
         if (at->kind == Type::Kind::Int &&
             callee->params[i]->kind == Type::Kind::Float)
             promoteF64_.insert(c.args[i].get()); // Q3 边界提升（实参）
@@ -1113,9 +1831,9 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
             verifyRequiresAtCall(f->second, e);
     } else if (c.callee->kind == Expr::Kind::Attr) {
         auto& at = static_cast<const Attr&>(*c.callee);
-        if (at.base->kind == Expr::Kind::Name) {
-            auto& mn = static_cast<const Name&>(*at.base);
-            if (auto it = imports_.find(mn.name); it != imports_.end()) {
+        std::string qm = qualifiedModuleName(*at.base);
+        if (!qm.empty()) {
+            if (auto it = imports_.find(qm); it != imports_.end()) {
                 if (auto f = it->second->funcs.find(at.name);
                     f != it->second->funcs.end())
                     verifyRequiresAtCall(f->second, e);
@@ -1128,6 +1846,29 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
 
 TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
     const Expr& e = c; // 诊断区间用整个调用表达式
+    // K 专项：@pure 函数内的内建纯度门。白名单制——数学/转换/排序类
+    // 内建为纯；一切涉及 I/O、时间、随机、环境、网络、进程的内建（含
+    // 后续并行线新增者，未列入白名单即非纯）在 @pure 函数体内拒绝。
+    if (inPureFn_) {
+        static const std::unordered_set<std::string> kPureBuiltins = {
+            "str",   "len",  "sum",      "range", "ok",     "err",
+            "abs",   "sqrt", "exp",      "log",   "max",    "min",
+            "transpose", "reshape",
+            "sin",   "cos",  "tan",      "asin",  "acos",   "atan",
+            "sinh",  "cosh", "tanh",     "atan2", "floor",  "ceil",
+            "round", "trunc", "sorted",
+            // 0.9.4 M 专项：统计/倒序/哈希（全部为纯函数）
+            "mean", "var", "std", "reversed", "sha256", "crc32",
+            // 0.9.4 M 专项：JSON 解码（纯函数，不触碰外部状态）
+            "json_decode",
+            // 0.9.6 O 节：地址导出为纯读取（解引用才是非纯边界）
+            "data_ptr"};
+        if (!kPureBuiltins.count(bn)) {
+            return fail(Errc::E1007_UnsupportedFeature, e.range,
+                        "@pure 函数内禁止调用非纯内建 '" + bn +
+                            "'（纯度白名单：数学/转换/排序类）");
+        }
+    }
     if (bn == "print") {
         for (const auto& a : c.args) checkExpr(*a); // 张量执行已进入字节码（P1）
         return tyNone();
@@ -1139,7 +1880,8 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
         TypePtr t = checkExpr(*c.args[0]);
         if (t->kind == Type::Kind::Int || t->kind == Type::Kind::Float ||
             t->kind == Type::Kind::Bool || t->kind == Type::Kind::Str ||
-            t->kind == Type::Kind::Tensor || t->kind == Type::Kind::Err)
+            t->kind == Type::Kind::Tensor || t->kind == Type::Kind::Tuple ||
+            t->kind == Type::Kind::Err)
             return tyStr();
         fail(Errc::E2001_TypeMismatch, c.args[0]->range,
              "str() 不支持 " + typeToString(t));
@@ -1151,7 +1893,8 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
                         "len() 恰好需要 1 个参数");
         TypePtr t = checkExpr(*c.args[0]);
         if (t->kind == Type::Kind::List || t->kind == Type::Kind::Dict ||
-            t->kind == Type::Kind::Str || t->kind == Type::Kind::Err)
+            t->kind == Type::Kind::Set || t->kind == Type::Kind::Str ||
+            t->kind == Type::Kind::Tuple || t->kind == Type::Kind::Err)
             return tyInt();
         fail(Errc::E2001_TypeMismatch, c.args[0]->range,
              "len() 不支持 " + typeToString(t));
@@ -1174,6 +1917,24 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
             return fail(Errc::E2001_TypeMismatch, e.range,
                         "now() 不需要参数");
         return tyFloat();
+    }
+    if (bn == "data_ptr") {
+        // O 节 FFI 宽类型域：数据地址导出。仅连续原生缓冲（张量/str）——
+        // List 元素为 tagged 值非连续数组，透传地址无 C 数组语义，明确拒绝。
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "data_ptr() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind == Type::Kind::Tensor &&
+            (t->params[0]->kind == Type::Kind::Int ||
+             t->params[0]->kind == Type::Kind::Float))
+            return tyInt();
+        if (t->kind == Type::Kind::Str) return tyInt();
+        fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+             "data_ptr() 仅支持 Tensor[int]/Tensor[float]/str"
+             "（List 元素为 tagged 值，非连续原生数组，禁止透传指针），得到 " +
+                 typeToString(t));
+        return tyErr();
     }
     if (bn == "ok") {
         if (c.args.size() != 1)
@@ -1290,6 +2051,311 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
             return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
                         "sorted() 仅支持列表，实际为 " + typeToString(t));
         return t;
+    }
+    // ---- IO 内建（0.9.4）：函数式文件/目录/标准输入。路径一律 str（窄字节
+    // 串）；失败即 panic（可被 try/except 捕获），无 Result 化——调用方取舍。
+    if (bn == "input") {
+        if (!c.args.empty())
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "input() 不需要参数");
+        return tyStr();
+    }
+    if (bn == "read_text" || bn == "exists" || bn == "list_dir") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind == Type::Kind::Err) return tyErr();
+        if (t->kind != Type::Kind::Str)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        bn + "() 路径参数必须是 str，实际为 " +
+                            typeToString(t));
+        if (bn == "exists") return tyBool();
+        if (bn == "list_dir") return makeType(Type::Kind::List, {tyStr()});
+        return tyStr(); // read_text
+    }
+    if (bn == "write_text" || bn == "append_text") {
+        if (c.args.size() != 2)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 2 个参数");
+        for (size_t k = 0; k < 2; ++k) {
+            TypePtr t = checkExpr(*c.args[k]);
+            if (t->kind == Type::Kind::Err) return tyErr();
+            if (t->kind != Type::Kind::Str)
+                return fail(Errc::E2001_TypeMismatch, c.args[k]->range,
+                            bn + "() 参数必须是 str，实际为 " +
+                                typeToString(t));
+        }
+        return tyInt(); // 写入字节数
+    }
+    // ---- 网络/睡眠内建（0.9.4 F/G 专项）：客户端最小闭环。句柄是不透明
+    // int（1 起始表下标）；失败即 panic（与 IO 同哲学），无 Result 化。
+    if (bn == "net_connect") {
+        if (c.args.size() != 2)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "net_connect() 恰好需要 2 个参数");
+        TypePtr h = checkExpr(*c.args[0]);
+        TypePtr p = checkExpr(*c.args[1]);
+        if (h->kind != Type::Kind::Str && h->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "net_connect() 主机参数必须是 str，实际为 " +
+                            typeToString(h));
+        if (p->kind != Type::Kind::Int && p->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[1]->range,
+                        "net_connect() 端口参数必须是 int，实际为 " +
+                            typeToString(p));
+        return tyInt();
+    }
+    if (bn == "net_send" || bn == "net_recv") {
+        if (c.args.size() != 2)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 2 个参数");
+        TypePtr h = checkExpr(*c.args[0]);
+        TypePtr x = checkExpr(*c.args[1]);
+        if (h->kind != Type::Kind::Int && h->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        bn + "() 句柄参数必须是 int，实际为 " +
+                            typeToString(h));
+        const char* what = bn == "net_send" ? "数据参数" : "上限参数";
+        Type::Kind want =
+            bn == "net_send" ? Type::Kind::Str : Type::Kind::Int;
+        if (x->kind != want && x->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[1]->range,
+                        bn + "() " + what + "类型不符，实际为 " +
+                            typeToString(x));
+        return bn == "net_send" ? tyInt() : tyStr();
+    }
+    if (bn == "net_close" || bn == "sleep") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Int && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        bn + "() 参数必须是 int，实际为 " +
+                            typeToString(t));
+        return tyNone();
+    }
+    if (bn == "net_udp_send") {
+        if (c.args.size() != 3)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "net_udp_send() 恰好需要 3 个参数");
+        const char* whats[3] = {"主机参数", "端口参数", "数据参数"};
+        Type::Kind wants[3] = {Type::Kind::Str, Type::Kind::Int,
+                               Type::Kind::Str};
+        for (size_t k = 0; k < 3; ++k) {
+            TypePtr t = checkExpr(*c.args[k]);
+            if (t->kind != wants[k] && t->kind != Type::Kind::Err)
+                return fail(Errc::E2001_TypeMismatch, c.args[k]->range,
+                            "net_udp_send() " + std::string(whats[k]) +
+                                "类型不符，实际为 " + typeToString(t));
+        }
+        return tyInt();
+    }
+    if (bn == "net_http_get") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "net_http_get() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Str && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "net_http_get() URL参数必须是 str，实际为 " +
+                            typeToString(t));
+        return tyStr();
+    }
+    // TCP 服务端：bind（bind+listen 一步）→ accept（阻塞，返回连接句柄）。
+    // 超时：set_timeout 同时作用于收/发（ms<=0 显式拒绝——0 语义平台分歧，
+    // 拒绝即文档）。
+    if (bn == "net_bind") {
+        if (c.args.size() != 2)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "net_bind() 恰好需要 2 个参数");
+        TypePtr h = checkExpr(*c.args[0]);
+        TypePtr p = checkExpr(*c.args[1]);
+        if (h->kind != Type::Kind::Str && h->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "net_bind() 主机参数必须是 str，实际为 " +
+                            typeToString(h));
+        if (p->kind != Type::Kind::Int && p->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[1]->range,
+                        "net_bind() 端口参数必须是 int，实际为 " +
+                            typeToString(p));
+        return tyInt();
+    }
+    if (bn == "net_accept") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "net_accept() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Int && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "net_accept() 句柄参数必须是 int，实际为 " +
+                            typeToString(t));
+        return tyInt();
+    }
+    if (bn == "net_set_timeout") {
+        if (c.args.size() != 2)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "net_set_timeout() 恰好需要 2 个参数");
+        for (size_t k = 0; k < 2; ++k) {
+            TypePtr t = checkExpr(*c.args[k]);
+            if (t->kind != Type::Kind::Int && t->kind != Type::Kind::Err)
+                return fail(Errc::E2001_TypeMismatch, c.args[k]->range,
+                            "net_set_timeout() 参数必须是 int，实际为 " +
+                                typeToString(t));
+        }
+        return tyNone();
+    }
+    // ---- M 专项：标准库广度（统计/倒序/哈希） ----
+    // mean/var/std：张量与数值列表（int/float 元素），恒返回 f64（总体方差）。
+    if (bn == "mean" || bn == "var" || bn == "std") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind == Type::Kind::Err) return tyErr();
+        if (t->kind == Type::Kind::Tensor) return tyFloat();
+        if (t->kind == Type::Kind::List && !t->params.empty()) {
+            TypePtr el = t->params[0];
+            if (el->kind == Type::Kind::Int || el->kind == Type::Kind::Float)
+                return tyFloat();
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        bn + "() 仅支持数值列表（int/float 元素），实际 List[" +
+                            typeToString(el) + "]");
+        }
+        return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                    bn + "() 仅支持张量或数值列表，实际为 " +
+                        typeToString(t));
+    }
+    // reversed：List[T] → List[T]（倒序新列表）；str → str（字节倒序）。
+    if (bn == "reversed") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "reversed() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind == Type::Kind::Err) return tyErr();
+        if (t->kind == Type::Kind::List || t->kind == Type::Kind::Str)
+            return t;
+        return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                    "reversed() 仅支持列表或字符串，实际为 " +
+                        typeToString(t));
+    }
+    // sha256：str → 64 位小写 hex；crc32：str → 非负 int（CRC-32/ISO-HDLC）。
+    if (bn == "sha256" || bn == "crc32") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Str && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        bn + "() 参数必须是 str，实际为 " +
+                            typeToString(t));
+        return bn == "sha256" ? tyStr() : tyInt();
+    }
+    // json_decode：str → Json（动态 JSON 值；解析失败运行时 panic，
+    // 与 BuilderRTJson.hpp 的 sg_json_decode 逐字一致）。
+    if (bn == "json_decode") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "json_decode() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Str && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "json_decode() 参数必须是 str，实际为 " +
+                            typeToString(t));
+        return makeType(Type::Kind::Json);
+    }
+    // ---- 系统编程内建（0.9.4 H 专项）：args/env/时间日期/进程/信号 ----
+    if (bn == "args") {
+        if (!c.args.empty())
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "args() 不需要参数");
+        return makeType(Type::Kind::List, {tyStr()});
+    }
+    if (bn == "env" || bn == "has_env" || bn == "unset_env") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Str && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        bn + "() 名称参数必须是 str，实际为 " +
+                            typeToString(t));
+        if (bn == "env") return tyStr();
+        if (bn == "has_env") return tyBool();
+        return tyNone();
+    }
+    if (bn == "set_env") {
+        if (c.args.size() != 2)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "set_env() 恰好需要 2 个参数");
+        for (size_t k = 0; k < 2; ++k) {
+            TypePtr t = checkExpr(*c.args[k]);
+            if (t->kind != Type::Kind::Str && t->kind != Type::Kind::Err)
+                return fail(Errc::E2001_TypeMismatch, c.args[k]->range,
+                            std::string(k == 0 ? "set_env() 名称参数"
+                                               : "set_env() 值参数") +
+                                "必须是 str，实际为 " + typeToString(t));
+        }
+        return tyBool();
+    }
+    if (bn == "epoch" || bn == "epoch_ms") {
+        if (!c.args.empty())
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 不需要参数");
+        return tyInt();
+    }
+    if (bn == "localtime" || bn == "gmtime") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        bn + "() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Int && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        bn + "() 时间参数必须是 int，实际为 " +
+                            typeToString(t));
+        return makeType(Type::Kind::List, {tyInt()});
+    }
+    if (bn == "system") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "system() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Str && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "system() 命令参数必须是 str，实际为 " +
+                            typeToString(t));
+        return tyInt();
+    }
+    if (bn == "spawn_wait") {
+        if (c.args.size() != 2)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "spawn_wait() 恰好需要 2 个参数");
+        TypePtr p = checkExpr(*c.args[0]);
+        TypePtr l = checkExpr(*c.args[1]);
+        if (p->kind != Type::Kind::Str && p->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "spawn_wait() 路径参数必须是 str，实际为 " +
+                            typeToString(p));
+        bool isStrList = l->kind == Type::Kind::List && !l->params.empty() &&
+                         l->params[0]->kind == Type::Kind::Str;
+        if (!isStrList && l->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[1]->range,
+                        "spawn_wait() 参数列表必须是 List[str]，实际为 " +
+                            typeToString(l));
+        return tyInt();
+    }
+    if (bn == "signal_caught") {
+        if (!c.args.empty())
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "signal_caught() 不需要参数");
+        return tyBool();
+    }
+    if (bn == "signal_reset") {
+        if (!c.args.empty())
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "signal_reset() 不需要参数");
+        return tyNone();
     }
     // max/min：张量归约 → 元素类型标量。
     if (bn == "max" || bn == "min") {
@@ -1505,6 +2571,14 @@ TypePtr TypeChecker::resolveTypeExpr(const TypeExpr& te) {
         return makeTensor(elem, shape);
     }
 
+    // 元组类型注解 (T1, T2, ...)：params 即各元素类型（0.9.6）。
+    if (te.kind == TypeExpr::Kind::Tuple) {
+        std::vector<TypePtr> ps;
+        ps.reserve(te.params.size());
+        for (const auto& p : te.params) ps.push_back(resolveTypeExpr(*p));
+        return makeType(Type::Kind::Tuple, std::move(ps));
+    }
+
     const std::string& n = te.name;
     auto noParams = [&](TypePtr t) -> TypePtr {
         if (!te.params.empty()) {
@@ -1519,6 +2593,7 @@ TypePtr TypeChecker::resolveTypeExpr(const TypeExpr& te) {
     if (n == "str") return noParams(tyStr());
     if (n == "bytes") return noParams(makeType(Type::Kind::Bytes));
     if (n == "None") return noParams(tyNone());
+    if (n == "Json") return noParams(makeType(Type::Kind::Json));
 
     if (n == "List") {
         if (te.params.size() != 1)
@@ -1532,6 +2607,12 @@ TypePtr TypeChecker::resolveTypeExpr(const TypeExpr& te) {
                         "Dict 需要恰好 2 个类型参数（键, 值）");
         return makeType(Type::Kind::Dict, {resolveTypeExpr(*te.params[0]),
                                            resolveTypeExpr(*te.params[1])});
+    }
+    if (n == "Set") {
+        if (te.params.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, te.range,
+                        "Set 需要恰好 1 个元素类型参数");
+        return makeType(Type::Kind::Set, {resolveTypeExpr(*te.params[0])});
     }
     if (n == "Result") {
         if (te.params.size() != 2)
@@ -1581,6 +2662,65 @@ void TypeChecker::noteSimilarName(const std::string& name) {
             return; // 只提示一个最优候选，保持确定性
         }
     }
+}
+
+// ============================================================================
+// 跨模块（0.9.6 L 节：点分路径/别名/可见性）
+// ============================================================================
+
+std::string TypeChecker::qualifiedModuleName(const Expr& base) const {
+    // 最内层书写名（首段或别名）→ scope_ 中 Module 类型的真实全限定名
+    // （Type::Module::name 由 Import case 按真实模块名填充，别名天然解耦）。
+    const Expr* leaf = &base;
+    std::vector<std::string> trail; // Attr 链成员段（逆序：外层先收）
+    while (leaf->kind == Expr::Kind::Attr) {
+        trail.push_back(static_cast<const Attr&>(*leaf).name);
+        leaf = static_cast<const Attr&>(*leaf).base.get();
+    }
+    if (leaf->kind != Expr::Kind::Name) return {};
+    const VarSym* sym =
+        scope_.find(static_cast<const Name&>(*leaf).name);
+    if (!sym || !sym->type || sym->type->kind != Type::Kind::Module)
+        return {};
+    std::string cur = sym->type->name;
+    // 逐段消化书写链（按书写序）：宽容首段绑定（import a.b → a 即 a.b）
+    // 使规范形式 a.b.f() 的中间段与真名尾段重合——重合段按路径重写跳过，
+    // 其余段下钻子模块（对应全名须在 registry 存在）。重写优先于下钻，
+    // 与 checkAttr 的成员解析同序，两路对同一链解析结果一致。
+    for (size_t k = trail.size(); k-- > 0;) {
+        const std::string& seg = trail[k];
+        std::string suffix = '.' + seg;
+        if (cur.size() > suffix.size() &&
+            cur.compare(cur.size() - suffix.size(), suffix.size(), suffix) ==
+                0)
+            continue;
+        cur += suffix;
+        if (!imports_.count(cur)) return {};
+    }
+    return cur;
+}
+
+bool TypeChecker::checkVis(Vis v, const std::string& defModule,
+                           const std::string& member, const SourceRange& r) {
+    if (v == Vis::Public) return true;
+    if (v == Vis::Private) {
+        if (curMod_ == defModule) return true;
+        diag_.error(Errc::E5003_MissingExport, file_, r,
+                    "'" + defModule + "." + member +
+                        "' 标注为 @private，仅定义模块内部可见");
+        return false;
+    }
+    // internal：本包 = 模块名首段相同的家族；无点顶层模块无包 → 等价 private。
+    size_t cd = curMod_.find('.'), dd = defModule.find('.');
+    std::string curPkg =
+        cd == std::string::npos ? "" : curMod_.substr(0, cd);
+    std::string defPkg =
+        dd == std::string::npos ? "" : defModule.substr(0, dd);
+    if (!curPkg.empty() && curPkg == defPkg) return true;
+    diag_.error(Errc::E5003_MissingExport, file_, r,
+                "'" + defModule + "." + member + "' 标注为 @internal，仅包 '" +
+                    (defPkg.empty() ? defModule : defPkg) + "' 内可见");
+    return false;
 }
 
 } // namespace scourge

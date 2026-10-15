@@ -33,12 +33,14 @@ struct Token {
 /// 关键字全集（闭合集合，新增必须过 RFC 流程——设计文档十二章第 10 条）。
 /// try/except：文档第四章——仅用于不可恢复条件（panic 语义）。
 /// async/await：文档第八章——并发原语（Python 原生形态；Task 语义 P2 落地）。
+/// defer：函数级确定性清理钩子（0.9.5；仅函数体顶层，return 前 LIFO 展开）。
+/// as：import 别名（0.9.6 L 节）；本语言 except 只有裸形式，无 except-as 冲突。
 inline bool isKeyword(std::string_view s) {
     static const char* kKeywords[] = {
         "def", "return", "if", "elif", "else", "while", "for", "in",
-        "break", "continue", "pass", "import", "from",
+        "break", "continue", "pass", "import", "from", "as",
         "and", "or", "not", "True", "False", "None", "assert",
-        "try", "except", "async", "await",
+        "try", "except", "async", "await", "defer",
     };
     for (const char* k : kKeywords)
         if (s == k) return true;

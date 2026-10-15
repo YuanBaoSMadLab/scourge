@@ -1,0 +1,6 @@
+# badinternal.sg —— 包外访问 @internal（预期 E5003：调用方无包首段）
+import pkgx.x
+
+def main() -> int:
+    print(x.helper(1))
+    return 0

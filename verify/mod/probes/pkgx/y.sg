@@ -1,0 +1,5 @@
+# pkgx/y.sg —— 同包调用 @internal（应通过：模块首段同为 pkgx）
+import pkgx.x
+
+def use_internal(n: int) -> int:
+    return x.helper(n)

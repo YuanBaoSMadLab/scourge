@@ -1,0 +1,5 @@
+# a/b/c.sg —— 子模块 a.b.c（from-import 子模块与链式下钻探针目标）
+NAME = "sub-c"
+
+def tag() -> str:
+    return "tag:" + NAME

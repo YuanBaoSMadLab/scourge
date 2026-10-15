@@ -32,6 +32,10 @@ struct Type {
         None,
         List,    ///< params[0] = 元素
         Dict,    ///< params[0] = 键, params[1] = 值
+        Set,     ///< params[0] = 元素（0.9.3；元素限标量，语义同 Dict 键）
+        Tuple,   ///< params = 各元素类型（0.9.6；异构定长不可变，元素限标量/嵌套）
+        Json,    ///< 动态 JSON 值（0.9.4 M 专项）：null/bool/int/float/str/
+                 ///< array/object 七形态，json_decode 产生，成员方法取值
         Tensor,  ///< params[0] = 元素；shape 为形状（kDyn = 动态维）
         Result,  ///< params[0] = OK 类型, params[1] = Err 类型
         Option,  ///< params[0] = 内层

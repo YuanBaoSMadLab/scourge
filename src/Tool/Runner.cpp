@@ -14,6 +14,7 @@
 #include "scourge/BC/Compiler.hpp"
 #include "scourge/BC/Serialize.hpp"
 #include "scourge/BC/VM.hpp"
+#include "scourge/Common/Capability.hpp"
 #include "scourge/Common/Version.hpp"
 #include "scourge/Tool/Session.hpp"
 
@@ -35,7 +36,8 @@ bool readBinaryFile(const std::filesystem::path& p, std::string& out) {
 } // namespace
 
 RunOutcome runOnce(const std::filesystem::path& inPath, bool useCache,
-                   bool captureOut) {
+                   bool captureOut,
+                   const std::vector<std::string>& scriptArgs) {
     RunOutcome outcome;
     Session session;
     std::string entry = inPath.stem().string();
@@ -122,6 +124,12 @@ RunOutcome runOnce(const std::filesystem::path& inPath, bool useCache,
             }
         }
         program = compiler.take();
+        // 能力授予集（0.9.7）：依赖闭包全部模块声明的并集。缓存路径无需
+        // 重算——v7 起掩码随 SG-BC 持久化，命中即含。
+        for (const auto& name : order) {
+            const Module* m = session.loadedModule(name);
+            if (m) program.capMask |= capMaskOf(*m);
+        }
 
         // 写缓存（加速项而非正确性依赖：写入失败静默跳过）。
         bc::CacheMeta meta;
@@ -138,6 +146,7 @@ RunOutcome runOnce(const std::filesystem::path& inPath, bool useCache,
     bc::VMOptions vo;
     if (captureOut)
         vo.out = [&outcome](const std::string& s) { outcome.output += s; };
+    vo.args = scriptArgs; // args() 内建数据源（0.9.4 H 专项）
     bc::VM vm(std::move(program), vo);
     if (!vm.run(order, entry)) {
         const bc::Panic& p = vm.lastPanic();

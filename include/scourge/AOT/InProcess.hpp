@@ -8,6 +8,7 @@
 // ============================================================================
 #pragma once
 
+#include <cstdint>
 #include <string>
 
 namespace scourge {
@@ -18,9 +19,11 @@ namespace aot {
 /// gpuMode（CUDA 第 1 层）：GPU 覆盖集 op 不做 affine/linalg 内联降级，
 /// 改由 LangToLLVM 换发 @sg_gpu_* 运行时调用（.mlir 输入两种模式逐字节
 /// 相同——GPU 决策完全发生在本管线内部）。
+/// capMask：程序能力授予掩码（Capability.hpp 位布局）——LangToLLVM 以
+/// @sg_caps 全局常量注入 main.obj（rt.c 侧 extern 读取）。
 bool convertToLLVMInProcess(const std::string& mlirText,
                             const std::string& llPath, std::string& diag,
-                            bool gpuMode = false);
+                            bool gpuMode = false, uint64_t capMask = 0);
 
 } // namespace aot
 } // namespace scourge

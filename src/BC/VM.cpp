@@ -16,6 +16,13 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <unordered_set>
+
+#include "scourge/Common/Capability.hpp"
 
 namespace scourge {
 namespace bc {
@@ -79,6 +86,49 @@ bool valuesEqual(const Value& l, const Value& r) {
         for (size_t k = 0; k < l.list->size(); ++k)
             if (!valuesEqual((*l.list)[k], (*r.list)[k])) return false;
         return true;
+    }
+    case Value::Kind::Tuple: {
+        // 与 List 同构比较（元素可异构；数值族跨类型相等由递归处理）。
+        if (l.list.get() == r.list.get()) return true;
+        if (!l.list || !r.list || l.list->size() != r.list->size()) return false;
+        for (size_t k = 0; k < l.list->size(); ++k)
+            if (!valuesEqual((*l.list)[k], (*r.list)[k])) return false;
+        return true;
+    }
+    case Value::Kind::Json: {
+        // 结构递归相等（0.9.4 M 专项）：形态、标量值、数组元素、对象成员
+        // （键集与值，忽略插入序）逐项一致。
+        if (l.json.get() == r.json.get()) return true;
+        if (!l.json || !r.json || l.json->jk != r.json->jk) return false;
+        const JsonData& a = *l.json;
+        const JsonData& b = *r.json;
+        switch (a.jk) {
+        case JsonData::JK::Null: return true;
+        case JsonData::JK::Bool: return a.b == b.b;
+        case JsonData::JK::Int: return a.i == b.i;
+        case JsonData::JK::Float: return a.f == b.f;
+        case JsonData::JK::Str: return a.s == b.s;
+        case JsonData::JK::Arr: {
+            size_t na = a.arr ? a.arr->size() : 0;
+            size_t nb = b.arr ? b.arr->size() : 0;
+            if (na != nb) return false;
+            for (size_t k = 0; k < na; ++k)
+                if (!valuesEqual((*a.arr)[k], (*b.arr)[k])) return false;
+            return true;
+        }
+        case JsonData::JK::Obj: {
+            size_t na = a.obj ? a.obj->entries.size() : 0;
+            size_t nb = b.obj ? b.obj->entries.size() : 0;
+            if (na != nb) return false;
+            for (const auto& e : a.obj->entries) {
+                uint32_t f = b.obj->find(e.key);
+                if (f == DictData::kEmpty) return false;
+                if (!valuesEqual(e.val, b.obj->entries[f].val)) return false;
+            }
+            return true;
+        }
+        }
+        return false;
     }
     case Value::Kind::Result: {
         if (l.isOk != r.isOk) return false;
@@ -199,9 +249,57 @@ std::string toString(const Value& v, bool repr) {
         out += "]";
         return out;
     }
+    case Value::Kind::Dict: {
+        // Python 风格 repr：{"a": 1, 2.5: "x"}；键为 str 时带引号转义。
+        std::string out = "{";
+        if (v.dict) {
+            bool first = true;
+            for (const auto& e : v.dict->entries) {
+                if (!first) out += ", ";
+                first = false;
+                out += toString(e.key, true);
+                out += ": ";
+                out += toString(e.val, true);
+            }
+        }
+        out += "}";
+        return out;
+    }
+    case Value::Kind::Set: {
+        // Python 风格 repr：{1, 2, 3}；元素为 str 时带引号转义；迭代序 =
+        // 首插序（与 for 一致，确定性）。
+        std::string out = "{";
+        if (v.set) {
+            bool first = true;
+            for (const auto& e : v.set->entries) {
+                if (!first) out += ", ";
+                first = false;
+                out += toString(e, true);
+            }
+        }
+        out += "}";
+        return out;
+    }
+    case Value::Kind::Tuple: {
+        // Python 风格 repr：(1, "a", (2,))——括号包裹、", " 连接、元素一律
+        // repr（str 带引号转义）、单元素尾逗号、空 ()。
+        std::string out = "(";
+        if (v.list) {
+            for (size_t k = 0; k < v.list->size(); ++k) {
+                if (k) out += ", ";
+                out += toString((*v.list)[k], true);
+            }
+            if (v.list->size() == 1) out += ',';
+        }
+        out += ")";
+        return out;
+    }
+    case Value::Kind::Json:
+        // 紧凑 JSON 文本（与 dump()/AOT sg_print_json 逐字一致；JSON 本身
+        // 的字符串引号/转义即 repr 形态，repr 参数不改变输出）。
+        return jsonDump(v);
     case Value::Kind::Range:
-        return "range(0, " + std::to_string(v.i) + ")";
-    case Value::Kind::Result: {
+        return "range(0, " + std::to_string(v.i) + ")";    case Value::Kind::Result: {
         if (v.isOk) {
             Value p = v;
             p.kind = v.payloadKind;
@@ -228,6 +326,104 @@ std::string displayName(const FuncBC& f) {
 }
 
 } // namespace
+
+// ----------------------------------------------------------------------------
+// 字典（DictData）：插入序哈希表。键哈希/相等与 valuesEqual 语义一致
+// （数值键统一按 double 位哈希，int 1 与 float 1.0 同键；str 用 FNV-1a）。
+// ----------------------------------------------------------------------------
+
+static uint64_t dictMix64(uint64_t x) {
+    x += 0x9E3779B97F4A7C15ull;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+    return x ^ (x >> 31);
+}
+
+static uint64_t dictHashKey(const Value& k) {
+    switch (k.kind) {
+    case Value::Kind::Int:
+    case Value::Kind::Float:
+    case Value::Kind::Bool: {
+        double d = asDouble(k);
+        if (d == 0.0) d = 0.0; // -0.0 与 0.0 同键
+        uint64_t bits = 0;
+        std::memcpy(&bits, &d, sizeof(bits));
+        return dictMix64(bits);
+    }
+    case Value::Kind::Str: {
+        uint64_t h = 14695981039346656037ull;
+        for (unsigned char c : k.s) {
+            h ^= c;
+            h *= 1099511628211ull;
+        }
+        return dictMix64(h);
+    }
+    default:
+        return dictMix64(0); // 检查器已限标量键；None 等兜底同桶链
+    }
+}
+
+uint32_t DictData::find(const Value& key) const {
+    uint64_t h = dictHashKey(key);
+    for (uint32_t e = buckets[h % buckets.size()]; e != kEmpty;
+         e = entries[e].next)
+        if (valuesEqual(entries[e].key, key)) return e;
+    return kEmpty;
+}
+
+bool DictData::set(const Value& key, const Value& val) {
+    if (uint32_t e = find(key); e != kEmpty) {
+        entries[e].val = val;
+        return false;
+    }
+    if ((entries.size() + 1) * 4 > buckets.size() * 3) { // 装载因子 > 3/4 扩容
+        buckets.assign(buckets.size() * 2, kEmpty);
+        for (size_t k = 0; k < entries.size(); ++k) {
+            uint64_t h = dictHashKey(entries[k].key);
+            entries[k].next = buckets[h % buckets.size()];
+            buckets[h % buckets.size()] = static_cast<uint32_t>(k);
+        }
+    }
+    uint64_t h = dictHashKey(key);
+    Entry e;
+    e.key = key;
+    e.val = val;
+    e.next = buckets[h % buckets.size()];
+    buckets[h % buckets.size()] = static_cast<uint32_t>(entries.size());
+    entries.push_back(std::move(e));
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// 集合（SetData）：仅键的插入序哈希表。链表结构与 DictData 同构，哈希/
+// 相等复用字典键路径（dictHashKey/valuesEqual），元素语义与 Dict 键一致。
+// ----------------------------------------------------------------------------
+
+uint32_t SetData::find(const Value& key) const {
+    uint64_t h = dictHashKey(key);
+    for (uint32_t e = buckets[h % buckets.size()]; e != kEmpty;
+         e = links[e])
+        if (valuesEqual(entries[e], key)) return e;
+    return kEmpty;
+}
+
+bool SetData::add(const Value& key) {
+    if (find(key) != kEmpty) return false;
+    if ((entries.size() + 1) * 4 > buckets.size() * 3) { // 装载因子 > 3/4 扩容
+        buckets.assign(buckets.size() * 2, kEmpty);
+        for (size_t k = 0; k < entries.size(); ++k) {
+            uint64_t h = dictHashKey(entries[k]);
+            links[k] = buckets[h % buckets.size()];
+            buckets[h % buckets.size()] = static_cast<uint32_t>(k);
+        }
+    }
+    uint64_t h = dictHashKey(key);
+    uint32_t idx = static_cast<uint32_t>(entries.size());
+    links.push_back(buckets[h % buckets.size()]);
+    buckets[h % buckets.size()] = idx;
+    entries.push_back(key);
+    return true;
+}
 
 // ----------------------------------------------------------------------------
 // Program 查询
@@ -366,6 +562,9 @@ void VM::callFunc(int fidx, uint32_t argc) {
     // @extern（H 专项）：动态库调用，实参从调用栈弹出（实现分块 VMExtern.cpp）。
     if (fn.isExtern) {
         if (frames_.empty()) panicHere("VM 内部错误：extern 函数无调用帧");
+        // FFI 运行时门禁（0.9.7）：同 doBuiltin 纵深防御，消息同 AOT。
+        if (!(program_.capMask & capBit(Cap::Ffi)))
+            panicHere(capPanicMsg(Cap::Ffi, fn.name));
         doExtern(fn, argc);
         return;
     }
@@ -420,6 +619,14 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
     for (uint32_t k = argc; k-- > 0;) a[k] = pop();
 
     const std::string& n = fn.builtinName;
+    // 能力运行时门禁（0.9.7）：静态检查（E5004）已挡住正常程序，此处是
+    // 纵深防御——SG-BC 缓存被篡改/手搓字节码时，环境交互内建仍不可绕过。
+    // 消息与 AOT sg_cap_check 逐字一致（Common/Capability.hpp 单点生成）。
+    {
+        Cap cap;
+        if (capOfBuiltin(n, cap) && !(program_.capMask & capBit(cap)))
+            panicHere(capPanicMsg(cap, n));
+    }
     auto need = [&](uint32_t want) {
         if (a.size() != want)
             panicHere("内建 " + n + "() 需要 " + std::to_string(want) +
@@ -449,6 +656,14 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
         need(1);
         if (a[0].kind == Value::Kind::List && a[0].list)
             push(Value::makeInt(static_cast<int64_t>(a[0].list->size())));
+        else if (a[0].kind == Value::Kind::Tuple && a[0].list)
+            push(Value::makeInt(static_cast<int64_t>(a[0].list->size())));
+        else if (a[0].kind == Value::Kind::Dict && a[0].dict)
+            push(Value::makeInt(
+                static_cast<int64_t>(a[0].dict->entries.size())));
+        else if (a[0].kind == Value::Kind::Set && a[0].set)
+            push(Value::makeInt(
+                static_cast<int64_t>(a[0].set->entries.size())));
         else if (a[0].kind == Value::Kind::Str)
             push(Value::makeInt(static_cast<int64_t>(a[0].s.size())));
         else
@@ -569,6 +784,41 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
                 best = wantMax ? (x > best ? x : best) : (x < best ? x : best);
             push(Value::makeFloat(best));
         }
+        return;
+    }
+    // data_ptr（O 节 FFI 宽类型域）：取连续原生缓冲首地址（int 承载）。
+    // 仅 Tensor[int]/Tensor[float]/str——List 元素是 tagged 值非连续数组，
+    // Sema 已拦；此处白名单再拦属防御。存活期契约：张量地址仅在对象
+    // 存活期内有效（跨 extern 调用必须把张量保存在变量中——内联链式
+    // 使用时 Value 弹栈即析构，双模同此风险，靠文档约定而非实现兜底）；
+    // str 地址由 intern 池兜底为进程期稳定（见下方 Str 分支）。
+    // 空张量显式 panic：VM 空 vector::data() 可能为 nullptr 而 AOT 恒分配，
+    // 是天然双模分歧点，必须在此收敛。
+    if (n == "data_ptr") {
+        need(1);
+        if (a[0].kind == Value::Kind::Tensor && a[0].tensor) {
+            const TensorData& t = *a[0].tensor;
+            if (t.size() == 0) panicHere("data_ptr() 不支持空张量");
+            const void* p = t.isInt ? static_cast<const void*>(t.i64.data())
+                                    : static_cast<const void*>(t.f64.data());
+            push(Value::makeInt(
+                static_cast<int64_t>(reinterpret_cast<intptr_t>(p))));
+            return;
+        }
+        if (a[0].kind == Value::Kind::Str) {
+            // str 的 SSO 副本随弹栈 Value 析构即悬空（短串缓冲在 Value
+            // 内部，strlen 读到 0/AV），地址必须指向进程期稳定副本——
+            // 静态 intern 池深拷贝持有，同内容返回同地址；AOT 侧 str 为
+            // 全局常量（llvm.ptrtoint），天然进程期存活。双模契约：
+            // str 地址只读透传；池上限显式 panic 而非静默泄漏。
+            static std::unordered_set<std::string> pool;
+            if (pool.size() >= 4096)
+                panicHere("data_ptr() 字符串地址池已满（上限 4096）");
+            push(Value::makeInt(static_cast<int64_t>(reinterpret_cast<intptr_t>(
+                pool.insert(a[0].s).first->c_str()))));
+            return;
+        }
+        panicHere("data_ptr() 仅支持 Tensor[int]/Tensor[float]/str");
         return;
     }
     // transpose：二维转置 (m, n) → (n, m)。
@@ -751,6 +1001,114 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
         push(Value::makeList(std::move(out)));
         return;
     }
+    // ---- IO 内建（0.9.4）：函数式文件/目录/标准输入。与 AOT sg_* 运行时的
+    // 约定逐字对齐：路径窄字节串；文本一律二进制模式（禁 CRT 文本转换，
+    // 否则 CRLF 差异破坏双模逐字节一致）；失败 panic 消息与 sg_* 逐字一致。
+    if (n == "input") {
+        if (!a.empty()) panicHere("input() 不需要参数");
+        // fgetc 逐字节到 '\n'（与 sg_input 同构）；去行尾 '\r'（二进制
+        // 重定向时出现，文本模式 stdin 已由 CRT 转换）。
+        std::string line;
+        int c, got = 0;
+        while ((c = std::fgetc(stdin)) != EOF) {
+            got = 1;
+            if (c == '\n') break;
+            line.push_back(static_cast<char>(c));
+        }
+        if (!got) panicHere("input() 输入流已结束");
+        while (!line.empty() && line.back() == '\r') line.pop_back();
+        push(Value::makeStr(std::move(line)));
+        return;
+    }
+    if (n == "read_text") {
+        need(1);
+        if (a[0].kind != Value::Kind::Str)
+            panicHere("read_text() 路径参数必须是 str");
+        std::ifstream f(a[0].s, std::ios::binary);
+        if (!f) panicHere("read_text() 无法打开文件: " + a[0].s);
+        std::string content((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+        if (f.bad()) panicHere("read_text() 无法读取文件: " + a[0].s);
+        push(Value::makeStr(std::move(content)));
+        return;
+    }
+    if (n == "write_text" || n == "append_text") {
+        need(2);
+        if (a[0].kind != Value::Kind::Str || a[1].kind != Value::Kind::Str)
+            panicHere(n + "() 参数必须是 str");
+        std::ios::openmode mode = std::ios::binary | std::ios::trunc;
+        if (n == "append_text") mode = std::ios::binary | std::ios::app;
+        std::ofstream f(a[0].s, mode);
+        if (!f) panicHere(n + "() 无法打开文件: " + a[0].s);
+        f.write(a[1].s.data(), static_cast<std::streamsize>(a[1].s.size()));
+        f.flush();
+        if (!f) panicHere(n + "() 写入失败: " + a[0].s);
+        push(Value::makeInt(static_cast<int64_t>(a[1].s.size())));
+        return;
+    }
+    if (n == "exists") {
+        need(1);
+        if (a[0].kind != Value::Kind::Str)
+            panicHere("exists() 路径参数必须是 str");
+        std::error_code ec;
+        push(Value::makeBool(std::filesystem::exists(a[0].s, ec)));
+        return;
+    }
+    if (n == "list_dir") {
+        need(1);
+        if (a[0].kind != Value::Kind::Str)
+            panicHere("list_dir() 路径参数必须是 str");
+        std::error_code ec;
+        std::filesystem::directory_iterator it(a[0].s, ec);
+        if (ec) panicHere("list_dir() 无法打开目录: " + a[0].s);
+        auto out = std::make_shared<std::vector<Value>>();
+        for (; it != std::filesystem::directory_iterator(); it.increment(ec)) {
+            if (ec) panicHere("list_dir() 无法读取目录: " + a[0].s);
+            // 与 sg_list_dir 对齐：跳过 "." ".."（MSVC iterator 本就不产生，
+            // 显式过滤防实现漂移）；按字节序排序（枚举顺序不可依赖——
+            // 双模确定性红线）。
+            std::string name = it->path().filename().string();
+            if (name == "." || name == "..") continue;
+            out->push_back(Value::makeStr(std::move(name)));
+        }
+        std::sort(out->begin(), out->end(),
+                  [](const Value& l, const Value& r) { return l.s < r.s; });
+        push(Value::makeList(std::move(out)));
+        return;
+    }
+    // ---- 网络/睡眠（F/G 专项）：前缀分派到 VMNet.cpp 分块 ----
+    if (n.rfind("net_", 0) == 0 || n == "sleep") {
+        netBuiltin(n, a);
+        return;
+    }
+    // ---- 系统编程（H 专项）：白名单分派到 VMSys.cpp 分块 ----
+    static const char* const kSysBuiltins[] = {
+        "args", "env", "has_env", "set_env", "unset_env", "epoch", "epoch_ms",
+        "localtime", "gmtime", "system", "spawn_wait", "signal_caught",
+        "signal_reset"};
+    for (const char* s : kSysBuiltins) {
+        if (n == s) {
+            sysBuiltin(n, a);
+            return;
+        }
+    }
+    // ---- 标准库广度（M 专项）：白名单分派到 VMStd.cpp 分块 ----
+    static const char* const kStdBuiltins[] = {
+        "mean", "var", "std", "reversed", "sha256", "crc32"};
+    for (const char* s : kStdBuiltins) {
+        if (n == s) {
+            stdBuiltin(n, a);
+            return;
+        }
+    }
+    // ---- JSON（M 专项）：白名单分派到 VMJson.cpp 分块 ----
+    static const char* const kJsonBuiltins[] = {"json_decode"};
+    for (const char* s : kJsonBuiltins) {
+        if (n == s) {
+            jsonBuiltin(n, a);
+            return;
+        }
+    }
     panicHere("VM 内部错误：未知内建 '" + n + "'");
 }
 
@@ -902,7 +1260,10 @@ void VM::dispatch(Instr in) {
             }
             return;
         }
-        panicHere("VM 内部错误：未知方法");
+        // 0.9.4 str / List 成员方法：实现分块在 VMMethod.cpp（Result 三方法
+        // 仍走上方直接分支，历史路径不动）。
+        callValueMethod(static_cast<Method>(in.a), self, args);
+        return;
     }
 
     case Op::Return:
@@ -930,6 +1291,53 @@ void VM::dispatch(Instr in) {
         vec->resize(in.a);
         for (size_t k = in.a; k-- > 0;) (*vec)[k] = pop();
         push(Value::makeList(std::move(vec)));
+        return;
+    }
+
+    case Op::NewDict: {
+        // 栈序 k1,v1,k2,v2,...（自顶向下成对弹出）→ 按源顺序插入（迭代序
+        // = 插入序，确定性）；重复键后写覆盖先写（与 AOT dict_new 一致）。
+        if (f.stack.size() < static_cast<size_t>(in.a) * 2)
+            panicHere("VM 内部错误：NewDict 栈下溢");
+        std::vector<std::pair<Value, Value>> ps(in.a);
+        for (size_t k = in.a; k-- > 0;) {
+            Value v = pop();
+            Value key = pop();
+            if (key.kind == Value::Kind::Float && std::isnan(key.f))
+                panicHere("字典键不能为 NaN");
+            ps[k] = {std::move(key), std::move(v)};
+        }
+        auto d = std::make_shared<DictData>();
+        for (auto& p : ps) d->set(p.first, p.second);
+        push(Value::makeDict(std::move(d)));
+        return;
+    }
+
+    case Op::NewSet: {
+        // 栈序 e1,e2,...（自顶向下弹出）→ 按源顺序插入去重（迭代序 =
+        // 首插序，确定性）；元素语义 = Dict 键：数值跨类型同键、NaN 拒绝。
+        if (f.stack.size() < in.a) panicHere("VM 内部错误：NewSet 栈下溢");
+        std::vector<Value> es(in.a);
+        for (size_t k = in.a; k-- > 0;) {
+            Value el = pop();
+            if (el.kind == Value::Kind::Float && std::isnan(el.f))
+                panicHere("集合元素不能为 NaN");
+            es[k] = std::move(el);
+        }
+        auto s = std::make_shared<SetData>();
+        for (auto& e : es) s->add(e);
+        push(Value::makeSet(std::move(s)));
+        return;
+    }
+
+    case Op::NewTuple: {
+        // 栈序 e1,e2,...（自顶向下弹出）→ 按源序装入（异构定长，无统一
+        // 提升与去重；元素语义由检查器白名单保证）。
+        if (f.stack.size() < in.a) panicHere("VM 内部错误：NewTuple 栈下溢");
+        auto vec = std::make_shared<std::vector<Value>>();
+        vec->resize(in.a);
+        for (size_t k = in.a; k-- > 0;) (*vec)[k] = pop();
+        push(Value::makeTuple(std::move(vec)));
         return;
     }
 
@@ -970,6 +1378,27 @@ void VM::dispatch(Instr in) {
             push(tensorIndexRead(base, idxs));
             return;
         }
+        case Value::Kind::Dict: {
+            if (n != 1) panicHere("VM 内部错误：Dict 下标数量不符");
+            if (!base.dict) panicHere("VM 内部错误：空字典对象");
+            const Value& key = idxs[0];
+            if (key.kind == Value::Kind::Float && std::isnan(key.f))
+                panicHere("字典键不能为 NaN");
+            uint32_t e = base.dict->find(key);
+            if (e == DictData::kEmpty) panicHere("字典键不存在");
+            push(base.dict->entries[e].val);
+            return;
+        }
+        case Value::Kind::Tuple: {
+            // 检查器已强制：单下标 + 编译期整数字面量 + 静态越界——
+            // 此处 n != 1 与负下标归一均不可达（防御兜底）。
+            if (n != 1) panicHere("VM 内部错误：Tuple 下标数量不符");
+            if (!base.list) panicHere("VM 内部错误：空元组对象");
+            int64_t len = static_cast<int64_t>(base.list->size());
+            int64_t i = normIndex(toInt(idxs[0]), len, "元组");
+            push((*base.list)[static_cast<size_t>(i)]);
+            return;
+        }
         default:
             panicHere("该类型不支持下标读取");
         }
@@ -989,9 +1418,18 @@ void VM::dispatch(Instr in) {
             tensorIndexStore(base, idxs, val);
             return;
         }
+        if (base.kind == Value::Kind::Dict) {
+            if (n != 1) panicHere("VM 内部错误：Dict 下标数量不符");
+            if (!base.dict) panicHere("VM 内部错误：空字典对象");
+            const Value& key = idxs[0];
+            if (key.kind == Value::Kind::Float && std::isnan(key.f))
+                panicHere("字典键不能为 NaN");
+            base.dict->set(key, std::move(val));
+            return;
+        }
         if (n != 1) panicHere("VM 内部错误：下标数量不符");
         if (base.kind != Value::Kind::List || !base.list)
-            panicHere("下标赋值仅支持 list 与 tensor");
+            panicHere("下标赋值仅支持 list、dict 与 tensor");
         int64_t len = static_cast<int64_t>(base.list->size());
         int64_t i = normIndex(toInt(idxs[0]), len, "列表");
         (*base.list)[static_cast<size_t>(i)] = std::move(val);
@@ -1060,7 +1498,31 @@ void VM::dispatch(Instr in) {
             }
             return;
         }
-        panicHere("for 迭代源仅支持 range 与 list");
+        if (src.kind == Value::Kind::Dict) {
+            if (!src.dict) panicHere("VM 内部错误：空字典对象");
+            // 按插入序遍历键；迭代中新增键同样访问（追加式确定性）。
+            if (c < static_cast<int64_t>(src.dict->entries.size())) {
+                f.locals[in.b] = Value::makeInt(c + 1);
+                push(src.dict->entries[static_cast<size_t>(c)].key);
+                push(Value::makeBool(true));
+            } else {
+                push(Value::makeBool(false));
+            }
+            return;
+        }
+        if (src.kind == Value::Kind::Set) {
+            if (!src.set) panicHere("VM 内部错误：空集合对象");
+            // 按首插序遍历元素（语义与 Dict 键迭代一致）。
+            if (c < static_cast<int64_t>(src.set->entries.size())) {
+                f.locals[in.b] = Value::makeInt(c + 1);
+                push(src.set->entries[static_cast<size_t>(c)]);
+                push(Value::makeBool(true));
+            } else {
+                push(Value::makeBool(false));
+            }
+            return;
+        }
+        panicHere("for 迭代源仅支持 range、list、dict 与 Set");
     }
 
     case Op::IntToFloat: {
@@ -1240,6 +1702,16 @@ Value VM::doBinOp(Bin op, const Value& l, const Value& r) {
                 if (valuesEqual(l, e)) return Value::makeBool(true);
             return Value::makeBool(false);
         }
+        if (r.kind == Value::Kind::Dict && r.dict) {
+            if (l.kind == Value::Kind::Float && std::isnan(l.f))
+                panicHere("字典键不能为 NaN");
+            return Value::makeBool(r.dict->find(l) != DictData::kEmpty);
+        }
+        if (r.kind == Value::Kind::Set && r.set) {
+            if (l.kind == Value::Kind::Float && std::isnan(l.f))
+                panicHere("集合元素不能为 NaN");
+            return Value::makeBool(r.set->find(l) != SetData::kEmpty);
+        }
         if (r.kind == Value::Kind::Str && l.kind == Value::Kind::Str)
             return Value::makeBool(r.s.find(l.s) != std::string::npos);
         if (r.kind == Value::Kind::Range) {
@@ -1247,7 +1719,7 @@ Value VM::doBinOp(Bin op, const Value& l, const Value& r) {
                 panicHere("'in' range 需要整数成员");
             return Value::makeBool(l.i >= 0 && l.i < r.i);
         }
-        panicHere("'in' 仅支持 list/str/range 右操作数");
+        panicHere("'in' 仅支持 list/str/range/dict/Set 右操作数");
     }
     }
     panicHere("运算符不支持的操作数类型");

@@ -1,8 +1,16 @@
 # Regression: train_linreg / attention_softmax dual-mode byte check (ASCII only)
 # Plus: ovf_* scalar overflow probes — inline-lowered AOT (llvm.*.with.overflow)
 # must produce byte-identical panics to the VM (add/sub/mul/neg + try-catch).
-$exe = "d:\Scourge\build-rel\scourge.exe"
-$dir = "d:\Scourge\build-rel\verify"
+# Env note: drop lowercase proxy duplicates (case-insensitive .NET dict).
+foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
+    $up = $n.ToUpperInvariant()
+    if ([Environment]::GetEnvironmentVariable($n, 'Process') -ne $null -and
+        [Environment]::GetEnvironmentVariable($up, 'Process') -ne $null) {
+        [Environment]::SetEnvironmentVariable($n, $null, 'Process')
+    }
+}
+$exe = "d:\Scourge\build\scourge.exe"
+$dir = "d:\Scourge\build\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $files = @("d:\Scourge\release\examples\train_linreg.sg","d:\Scourge\release\examples\attention_softmax.sg") + (Get-ChildItem "d:\Scourge\verify\ovf_*.sg" | ForEach-Object { $_.FullName }) + (Get-ChildItem "d:\Scourge\verify\dvz_*.sg" | ForEach-Object { $_.FullName })
 $fail = 0

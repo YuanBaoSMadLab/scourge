@@ -74,6 +74,8 @@ def Lang_StrFromI64Op    : Lang_Op<"str_from_i64"> { let arguments = (ins I64:$v
 def Lang_StrFromF64Op    : Lang_Op<"str_from_f64"> { let arguments = (ins F64:$val); let results = (outs Lang_Ptr:$res); }
 def Lang_StrFromBoolOp   : Lang_Op<"str_from_bool"> { let arguments = (ins I1:$val); let results = (outs Lang_Ptr:$res); }
 def Lang_StrFromTensorOp : Lang_Op<"str_from_tensor"> { let arguments = (ins Lang_Ptr:$val); let results = (outs Lang_Ptr:$res); }
+// 0.9.6 元组 repr：带引号转义（repr 模式），实现复用 sg_list_escape 逐字节写出
+def Lang_StrEscapeOp     : Lang_Op<"str_escape"> { let arguments = (ins Lang_Ptr:$str); let results = (outs Lang_Ptr:$res); }
 
 // ============================================================================
 // 数学内建（abs/sqrt/exp/log/now；标量子集）
@@ -108,6 +110,39 @@ def Lang_TruncOp : Lang_Op<"trunc"> { let arguments = (ins F64:$val); let result
 def Lang_RandomOp : Lang_Op<"random"> { let arguments = (ins); let results = (outs F64:$res); }
 def Lang_SeedOp   : Lang_Op<"seed">   { let arguments = (ins I64:$val); let results = (outs); }
 
+// sorted(List) → 新列表：运行时按 SgList etag 泛型稳定升序（0=i64 1=f64
+// 2=str 3=bool；int/float 混合仅 VM 可能，AOT 列表恒同质）。
+def Lang_SortedOp : Lang_Op<"sorted"> { let arguments = (ins Lang_Ptr:$list); let results = (outs Lang_Ptr:$res); }
+
+// ============================================================================
+// IO 内建（0.9.4）：input/read_text/write_text/append_text/exists/list_dir。
+// 路径与内容均为 NUL 结尾窄字节串（ANSI 代码页语义，与 VM 一致）；失败
+// panic 语义下沉 sg_* 运行时（消息与 VM 逐字一致）；exists 纯查询不 panic。
+// ============================================================================
+def Lang_InputOp      : Lang_Op<"input">       { let arguments = (ins); let results = (outs Lang_Ptr:$res); }
+def Lang_ReadTextOp   : Lang_Op<"read_text">   { let arguments = (ins Lang_Ptr:$path); let results = (outs Lang_Ptr:$res); }
+def Lang_WriteTextOp  : Lang_Op<"write_text">  { let arguments = (ins Lang_Ptr:$path, Lang_Ptr:$data); let results = (outs I64:$res); }
+def Lang_AppendTextOp : Lang_Op<"append_text"> { let arguments = (ins Lang_Ptr:$path, Lang_Ptr:$data); let results = (outs I64:$res); }
+def Lang_ExistsOp     : Lang_Op<"exists">      { let arguments = (ins Lang_Ptr:$path); let results = (outs I1:$res); }
+def Lang_ListDirOp    : Lang_Op<"list_dir">    { let arguments = (ins Lang_Ptr:$path); let results = (outs Lang_Ptr:$res); }
+
+// ============================================================================
+// 网络/睡眠内建（0.9.4 F/G 专项）：TCP/UDP 客户端 + HTTP GET + 阻塞睡眠。
+// 句柄为不透明 I64（1 起始表下标，双模各自编号、行为一致）；失败 panic
+// 语义下沉 sg_net_* 运行时（消息与 VM 逐字一致）；仅 http:// 明文。
+// ============================================================================
+def Lang_NetConnectOp : Lang_Op<"net_connect"> { let arguments = (ins Lang_Ptr:$host, I64:$port); let results = (outs I64:$res); }
+def Lang_NetSendOp    : Lang_Op<"net_send">    { let arguments = (ins I64:$sock, Lang_Ptr:$data); let results = (outs I64:$res); }
+def Lang_NetRecvOp    : Lang_Op<"net_recv">    { let arguments = (ins I64:$sock, I64:$maxb); let results = (outs Lang_Ptr:$res); }
+def Lang_NetCloseOp   : Lang_Op<"net_close">   { let arguments = (ins I64:$sock); let results = (outs); }
+def Lang_NetUdpSendOp : Lang_Op<"net_udp_send"> { let arguments = (ins Lang_Ptr:$host, I64:$port, Lang_Ptr:$data); let results = (outs I64:$res); }
+def Lang_NetHttpGetOp : Lang_Op<"net_http_get"> { let arguments = (ins Lang_Ptr:$url); let results = (outs Lang_Ptr:$res); }
+def Lang_SleepOp      : Lang_Op<"sleep">       { let arguments = (ins I64:$ms); let results = (outs); }
+// F/G 迭代 2：TCP 服务端与收发超时。
+def Lang_NetBindOp    : Lang_Op<"net_bind">    { let arguments = (ins Lang_Ptr:$host, I64:$port); let results = (outs I64:$res); }
+def Lang_NetAcceptOp  : Lang_Op<"net_accept">  { let arguments = (ins I64:$sock); let results = (outs I64:$res); }
+def Lang_NetSetTimeoutOp : Lang_Op<"net_set_timeout"> { let arguments = (ins I64:$sock, I64:$ms); let results = (outs); }
+
 // ============================================================================
 // 系统编程内建（0.9.4 H 专项）：命令行参数/环境变量/时间日期/进程/信号。
 // panic 语义下沉 sg_* 运行时（消息与 VMSys.cpp 逐字一致，双模差分由 verify
@@ -134,15 +169,14 @@ def Lang_SignalResetOp : Lang_Op<"signal_reset"> { let arguments = (ins); let re
 // （i64/f64/i1/!llvm.ptr），返回可选（str 返回由降级层经 sg_extern_wrap_str
 // 深拷贝）。解析失败/符号缺失 panic 语义下沉 sg_extern_resolve（消息与
 // VMExtern.cpp 逐字一致）；dll/sym 为 NUL 结尾窄串直传。
+// variadic（0.9.6 O 节）：调用方是 ... 变参声明——降级层据此为间接 call
+// 挂 var_callee_type，LLVM 后端按 MS x64 varargs 发射（浮点位模式进
+// GP 位置槽 + xmm 位置槽 + AL），与 VM 位置式装载双模一致。
 // ============================================================================
 def Lang_ExternCallOp : Lang_Op<"extern_call"> {
-    let arguments = (ins Variadic<AnyType>:$args);
+    let arguments = (ins Variadic<AnyType>:$args, UnitAttr:$variadic);
     let results = (outs Optional<AnyType>:$res);
 }
-
-// sorted(List) → 新列表：运行时按 SgList etag 泛型稳定升序（0=i64 1=f64
-// 2=str 3=bool；int/float 混合仅 VM 可能，AOT 列表恒同质）。
-def Lang_SortedOp : Lang_Op<"sorted"> { let arguments = (ins Lang_Ptr:$list); let results = (outs Lang_Ptr:$res); }
 
 // ============================================================================
 // 打印（print 参数逐个分派 + 空格/换行收尾，与 VM print 语义一致）
@@ -186,6 +220,14 @@ def Lang_TensorTransposeOp : Lang_Op<"tensor_transpose"> { let arguments = (ins 
 def Lang_TensorReshapeOp  : Lang_Op<"tensor_reshape"> { let arguments = (ins Lang_Ptr:$tensor, I64:$ndim, Lang_Ptr:$dims); let results = (outs Lang_Ptr:$res); }
 
 // ============================================================================
+// data_ptr（0.9.6 O 节 FFI 宽类型域）：张量路径取连续原生缓冲首地址。
+// str 路径不走此 op——MLIRGen 对 str 就地发射 llvm.ptrtoint（全局常量
+// 进程期存活，与 VM intern 池同契约：地址只读透传）。空张量 panic 在
+// 运行时 sg_data_ptr（消息与 VM doBuiltin 逐字一致）。
+// ============================================================================
+def Lang_DataPtrOp        : Lang_Op<"data_ptr"> { let arguments = (ins Lang_Ptr:$tensor); let results = (outs I64:$res); }
+
+// ============================================================================
 // Result（错误即值；SgResult 堆句柄为 !llvm.ptr）
 // 载荷按位编码：i64 原值 / f64 位型 memcpy / bool 0-1 / str 指针。
 // unwrap(缺省)：ok 取载荷、失败态取缺省（与 VM CallMethod 语义逐字一致）。
@@ -216,3 +258,82 @@ def Lang_ListGetIOp  : Lang_Op<"list_get_i"> { let arguments = (ins Lang_Ptr:$li
 def Lang_ListGetFOp  : Lang_Op<"list_get_f"> { let arguments = (ins Lang_Ptr:$list, I64:$idx); let results = (outs F64:$res); }
 def Lang_ListGetBOp  : Lang_Op<"list_get_b"> { let arguments = (ins Lang_Ptr:$list, I64:$idx); let results = (outs I1:$res); }
 def Lang_ListGetSOp  : Lang_Op<"list_get_s"> { let arguments = (ins Lang_Ptr:$list, I64:$idx); let results = (outs Lang_Ptr:$res); }
+def Lang_ListInIOp   : Lang_Op<"list_in_i"> { let arguments = (ins Lang_Ptr:$list, I64:$key); let results = (outs I1:$res); }
+def Lang_ListInFOp   : Lang_Op<"list_in_f"> { let arguments = (ins Lang_Ptr:$list, F64:$key); let results = (outs I1:$res); }
+def Lang_ListInBOp   : Lang_Op<"list_in_b"> { let arguments = (ins Lang_Ptr:$list, I1:$key); let results = (outs I1:$res); }
+def Lang_ListInSOp   : Lang_Op<"list_in_s"> { let arguments = (ins Lang_Ptr:$list, Lang_Ptr:$key); let results = (outs I1:$res); }
+
+// ============================================================================
+// Dict（SgDict 堆句柄；插入序迭代。键/值 ABI 统一 64 位槽：int 直通、
+// float bitcast、bool zext、str/句柄 ptrtoint。ktag/vtag 0=i64 1=f64 2=str
+// 3=bool 4=句柄。get 缺键 / set·new NaN 键 panic 挂上下文）
+// ============================================================================
+def Lang_DictNewOp   : Lang_Op<"dict_new"> { let arguments = (ins I32:$ktag, I32:$vtag, I64:$count, Lang_Ptr:$keys, Lang_Ptr:$vals); let results = (outs Lang_Ptr:$res); }
+def Lang_DictLenOp   : Lang_Op<"dict_len"> { let arguments = (ins Lang_Ptr:$d); let results = (outs I64:$res); }
+def Lang_DictGetOp   : Lang_Op<"dict_get"> { let arguments = (ins Lang_Ptr:$d, I64:$key); let results = (outs I64:$res); }
+def Lang_DictSetOp   : Lang_Op<"dict_set"> { let arguments = (ins Lang_Ptr:$d, I64:$key, I64:$val); let results = (outs); }
+def Lang_DictInOp    : Lang_Op<"dict_in"> { let arguments = (ins Lang_Ptr:$d, I64:$key); let results = (outs I1:$res); }
+def Lang_DictKeyAtOp : Lang_Op<"dict_key_at"> { let arguments = (ins Lang_Ptr:$d, I64:$idx); let results = (outs I64:$res); }
+
+// ============================================================================
+// Set（v0.9.3；复用 SgDict 堆句柄，v 槽恒 0、vtag=4 哨兵。语义 = Dict 键：
+// 数值跨类型同键、NaN 拒绝、插入序去重。tag 0=i64 1=f64 2=str 3=bool 4=句柄。
+// in / new NaN 元素 panic 挂上下文）
+// ============================================================================
+def Lang_SetNewOp    : Lang_Op<"set_new"> { let arguments = (ins I32:$tag, I64:$count, Lang_Ptr:$elems); let results = (outs Lang_Ptr:$res); }
+def Lang_SetLenOp    : Lang_Op<"set_len"> { let arguments = (ins Lang_Ptr:$s); let results = (outs I64:$res); }
+def Lang_SetInOp     : Lang_Op<"set_in"> { let arguments = (ins Lang_Ptr:$s, I64:$key); let results = (outs I1:$res); }
+def Lang_SetElemAtOp : Lang_Op<"set_elem_at"> { let arguments = (ins Lang_Ptr:$s, I64:$idx); let results = (outs I64:$res); }
+
+// ============================================================================
+// str / List 成员方法（0.9.4；纯函数。panic 消息与 VM callValueMethod 逐字
+// 一致；upper/lower 仅 ASCII，下标/查找按 UTF-8 字节；List 键 ABI = dict
+// 键 64 位槽：tag 0=i64 1=f64 2=str 3=bool）
+// contains 不设新 op：str 复用 str_contains，List 复用 list_in_*。
+// ============================================================================
+def Lang_StrUpperOp      : Lang_Op<"str_upper"> { let arguments = (ins Lang_Ptr:$str); let results = (outs Lang_Ptr:$res); }
+def Lang_StrLowerOp      : Lang_Op<"str_lower"> { let arguments = (ins Lang_Ptr:$str); let results = (outs Lang_Ptr:$res); }
+def Lang_StrTrimOp       : Lang_Op<"str_trim"> { let arguments = (ins Lang_Ptr:$str); let results = (outs Lang_Ptr:$res); }
+def Lang_StrTrimStartOp  : Lang_Op<"str_trim_start"> { let arguments = (ins Lang_Ptr:$str); let results = (outs Lang_Ptr:$res); }
+def Lang_StrTrimEndOp    : Lang_Op<"str_trim_end"> { let arguments = (ins Lang_Ptr:$str); let results = (outs Lang_Ptr:$res); }
+def Lang_StrSplitOp      : Lang_Op<"str_split"> { let arguments = (ins Lang_Ptr:$str, Lang_Ptr:$sep); let results = (outs Lang_Ptr:$res); }
+def Lang_StrJoinOp       : Lang_Op<"str_join"> { let arguments = (ins Lang_Ptr:$sep, Lang_Ptr:$parts); let results = (outs Lang_Ptr:$res); }
+def Lang_StrReplaceOp    : Lang_Op<"str_replace"> { let arguments = (ins Lang_Ptr:$str, Lang_Ptr:$old, Lang_Ptr:$repl); let results = (outs Lang_Ptr:$res); }
+def Lang_StrFindOp       : Lang_Op<"str_find"> { let arguments = (ins Lang_Ptr:$hay, Lang_Ptr:$needle); let results = (outs I64:$res); }
+def Lang_StrIndexOp      : Lang_Op<"str_index"> { let arguments = (ins Lang_Ptr:$hay, Lang_Ptr:$needle); let results = (outs I64:$res); }
+def Lang_StrStartsWithOp : Lang_Op<"str_startswith"> { let arguments = (ins Lang_Ptr:$str, Lang_Ptr:$pre); let results = (outs I32:$res); }
+def Lang_StrEndsWithOp   : Lang_Op<"str_endswith"> { let arguments = (ins Lang_Ptr:$str, Lang_Ptr:$suf); let results = (outs I32:$res); }
+def Lang_ListIndexOp     : Lang_Op<"list_index"> { let arguments = (ins Lang_Ptr:$list, I32:$tag, I64:$key); let results = (outs I64:$res); }
+def Lang_ListCountOp     : Lang_Op<"list_count"> { let arguments = (ins Lang_Ptr:$list, I32:$tag, I64:$key); let results = (outs I64:$res); }
+
+// list repr 格式化与打印（0.9.4）：与 VM toString(list, repr=true) 逐字一致
+// （"[" + 元素 ", " 连接 + "]"；str 带引号转义；bool True/False；浮点最短
+// 往返补 ".0"），print(List) 与 len 同为 AOT 基础设施。
+def Lang_ListFormatOp : Lang_Op<"list_format"> { let arguments = (ins Lang_Ptr:$list); let results = (outs Lang_Ptr:$res); }
+def Lang_PrintListOp  : Lang_Op<"print_list"> { let arguments = (ins Lang_Ptr:$val); let results = (outs); }
+
+// 标准库广度（0.9.4 M 专项）：统计（总体方差 ÷N，恒 f64）/ 倒序 / 哈希。
+// 张量与列表各一套统计入口（运行时结构不同）；空序列 panic 双模一致。
+def Lang_TensorMeanOp : Lang_Op<"tensor_mean"> { let arguments = (ins Lang_Ptr:$t); let results = (outs F64:$res); }
+def Lang_TensorVarOp  : Lang_Op<"tensor_var">  { let arguments = (ins Lang_Ptr:$t); let results = (outs F64:$res); }
+def Lang_TensorStdOp  : Lang_Op<"tensor_std">  { let arguments = (ins Lang_Ptr:$t); let results = (outs F64:$res); }
+def Lang_ListMeanOp   : Lang_Op<"list_mean">   { let arguments = (ins Lang_Ptr:$l); let results = (outs F64:$res); }
+def Lang_ListVarOp    : Lang_Op<"list_var">    { let arguments = (ins Lang_Ptr:$l); let results = (outs F64:$res); }
+def Lang_ListStdOp    : Lang_Op<"list_std">    { let arguments = (ins Lang_Ptr:$l); let results = (outs F64:$res); }
+def Lang_ListReversedOp : Lang_Op<"list_reversed"> { let arguments = (ins Lang_Ptr:$l); let results = (outs Lang_Ptr:$res); }
+def Lang_StrReversedOp  : Lang_Op<"str_reversed">  { let arguments = (ins Lang_Ptr:$s); let results = (outs Lang_Ptr:$res); }
+def Lang_Sha256Op : Lang_Op<"sha256"> { let arguments = (ins Lang_Ptr:$s); let results = (outs Lang_Ptr:$res); }
+def Lang_Crc32Op  : Lang_Op<"crc32">  { let arguments = (ins Lang_Ptr:$s); let results = (outs I64:$res); }
+// ---- JSON（0.9.4 M 专项：动态 Json 值；tag 序 0=null 1=bool 2=int 3=float 4=str 5=arr 6=obj） ----
+def Lang_JsonDecodeOp  : Lang_Op<"json_decode">   { let arguments = (ins Lang_Ptr:$s); let results = (outs Lang_Ptr:$res); }
+def Lang_JsonIsOp      : Lang_Op<"json_is">       { let arguments = (ins Lang_Ptr:$j, I32:$tag); let results = (outs I1:$res); }
+def Lang_JsonAsIntOp   : Lang_Op<"json_as_int">   { let arguments = (ins Lang_Ptr:$j); let results = (outs I64:$res); }
+def Lang_JsonAsFloatOp : Lang_Op<"json_as_float"> { let arguments = (ins Lang_Ptr:$j); let results = (outs F64:$res); }
+def Lang_JsonAsBoolOp  : Lang_Op<"json_as_bool">  { let arguments = (ins Lang_Ptr:$j); let results = (outs I1:$res); }
+def Lang_JsonAsStrOp   : Lang_Op<"json_as_str">   { let arguments = (ins Lang_Ptr:$j); let results = (outs Lang_Ptr:$res); }
+def Lang_JsonGetIdxOp  : Lang_Op<"json_get_idx">  { let arguments = (ins Lang_Ptr:$j, I64:$idx); let results = (outs Lang_Ptr:$res); }
+def Lang_JsonGetKeyOp  : Lang_Op<"json_get_key">  { let arguments = (ins Lang_Ptr:$j, Lang_Ptr:$k); let results = (outs Lang_Ptr:$res); }
+def Lang_JsonLenOp     : Lang_Op<"json_len">      { let arguments = (ins Lang_Ptr:$j); let results = (outs I64:$res); }
+def Lang_JsonKeysOp    : Lang_Op<"json_keys">     { let arguments = (ins Lang_Ptr:$j); let results = (outs Lang_Ptr:$res); }
+def Lang_JsonDumpOp    : Lang_Op<"json_dump">     { let arguments = (ins Lang_Ptr:$j); let results = (outs Lang_Ptr:$res); }
+def Lang_PrintJsonOp   : Lang_Op<"print_json">    { let arguments = (ins Lang_Ptr:$val); let results = (outs); }

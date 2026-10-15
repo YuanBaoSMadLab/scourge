@@ -62,7 +62,7 @@ namespace aot {
 
 bool convertToLLVMInProcess(const std::string& mlirText,
                             const std::string& llPath, std::string& diag,
-                            bool gpuMode) {
+                            bool gpuMode, uint64_t capMask) {
     mlir::DialectRegistry registry;
     registry.insert<mlir::BuiltinDialect, mlir::func::FuncDialect,
                     mlir::arith::ArithDialect, mlir::cf::ControlFlowDialect,
@@ -116,7 +116,7 @@ bool convertToLLVMInProcess(const std::string& mlirText,
     mlir::PassManager pm(&ctx);
     pm.addPass(scourge::aot::createLangToAffinePass(gpuMode));
     pm.addPass(scourge::aot::createLangToLinalgPass(gpuMode));
-    pm.addPass(scourge::aot::createLangToLLVMPass(gpuMode));
+    pm.addPass(scourge::aot::createLangToLLVMPass(gpuMode, capMask));
     pm.addPass(mlir::createConvertLinalgToLoopsPass());
     pm.addPass(mlir::createLowerAffinePass());
     pm.addPass(mlir::createSCFToControlFlowPass());

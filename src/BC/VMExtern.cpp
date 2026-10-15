@@ -6,8 +6,19 @@
 //  装入固定布局 frame，经通用 x64 机器码 thunk 按 MS x64 ABI 调用外部函数，
 //  返回值按 FuncBC.externRet 读回压栈。语义契约（与 AOT BuilderRTSys.hpp /
 //  LangToLLVM 逐字一致，双模差分由 verify 探针锁定）：
-//    * 参数分配：浮点走 xmm 序列（前 4 个），其余走整型寄存器序
-//      rcx/rdx/r8/r9（前 4 个）；寄存器用尽按参数位置入栈（MS x64 规则）；
+//    * 参数分配：定参被调方——浮点走 xmm 序列（前 4 个），其余走整型
+//      寄存器序 rcx/rdx/r8/r9（前 4 个）；寄存器用尽按参数位置入栈
+//      （MS x64 规则）；
+//    * 变参（0.9.6 O 节宽类型域）：MS x64 varargs 与定参读取规则不同——
+//      被调方 va_arg 按参数位置读 GP 影子槽（浮点位模式的权威副本，
+//      UCRT printf 族即此路径），xmm 同样按参数位置承载浮点值。实测
+//      裁决证据（clang -S variadic_truth.c）：printf("i=%d f=%.2f",42,3.5)
+//      发射 movq %xmm0,%r8（位模式→位置 2 的 GP 槽）+ movaps %xmm0,%xmm2
+//      （值→位置 2 的 xmm 槽）。故变参装载按参数位置单流占槽：浮点
+//      双放 gpr[p] 位模式 + fpr[p] 值，第 5+ 参数入栈槽（浮点同为
+//      位模式）；alCount = 最高占用 xmm 槽序数 + 1（ABI 要求被调方按
+//      AL 保存 xmm[0..AL-1]，覆盖必须完整）——thunk 无条件装载 AL，
+//      定参被调方不读 AL，写之无害；
 //    * int 传 i64（32 位形参读低 32 位兼容）、float 仅 double 形参、
 //      bool 传 0/1、str 传 NUL 指针（存活至调用返回）；
 //    * 返回：int 读全 RAX（32 位 int 返回写 EAX 自动零扩展，安全）、
@@ -43,6 +54,7 @@ struct ExternFrame {
     int64_t stack[16];
     int64_t retI;
     double retF;
+    int64_t alCount; ///< 变参调用方义务：AL = 所用 xmm 寄存器数（MS x64）
 };
 
 /// 解析缓存（dll!sym → 函数地址；cap 与 AOT sg_extern_resolve 一致）。
@@ -114,7 +126,15 @@ uint8_t* ensureThunk() {
         e8(static_cast<uint8_t>(0x42 + k * 8));
         e8(static_cast<uint8_t>(0x20 + k * 8));
     }
-    e8(0xFF); e8(0xD0);                                              // call rax
+    // 变参调用方义务（0.9.6 O 节）：AL = 所用 xmm 数。rax 此刻存有目标
+    // 地址，先移入 r11（栈参搬运已结束、r11 空闲），再装 AL、call r11——
+    // 对定参被调方 AL 不被读，无条件装载零分叉。
+    static const uint8_t kAlSetup[] = {
+        0x49, 0x89, 0xC3,          // mov r11,rax
+        0x41, 0x8A, 0x82, 0xD0, 0x00,
+        0x00, 0x00,                // mov al,[r10+0xD0]（disp32：0xD0 超 disp8 有符号上限，disp8 会回绕读错槽）
+        0x41, 0xFF, 0xD3};         // call r11
+    en(kAlSetup, sizeof kAlSetup);
     // r10 是 volatile 寄存器（被调方可任意改写）：call 前把 frame 指针存入
     // [rsp+0xA0]（栈参区末尾之后的空闲槽），call 后取回再写返回值。
     e8(0x4C); e8(0x8B); e8(0x94); e8(0x24); e32(0xA0);               // mov r10,[rsp+0xA0]
@@ -170,49 +190,101 @@ void VM::doExtern(const FuncBC& fn, uint32_t argc) {
     uint8_t* thunk = ensureThunk();
     if (!thunk) panicHere("extern_call() 无法生成调用桩（VirtualAlloc 失败）");
 
-    // ---- frame 装载（MS x64：xmm 与整型寄存器序并行计数，第 5+ 按位置入栈） ----
+    // ---- frame 装载 ----
+    // 定参：xmm 与整型寄存器序并行计数（MS x64 定参规则）。
+    // 变参：全实参按参数位置 p 单流占槽（见文件头契约）——浮点位模式
+    // 进 gpr[p] 是被调方 va_arg 的权威读取来源，xmm 位置槽双放保 ABI
+    // 合规；浮点占 xmm 槽按 p 计入 alCount（最高占用 + 1）。
     ExternFrame fr;
     std::memset(&fr, 0, sizeof fr);
-    int gi = 0, fi = 0, si = 0;
+    int si = 0;
     auto pushStack = [&](int64_t bits) {
         if (si >= 16) panicHere("extern_call() 参数过多（上限 20 个）");
         fr.stack[si++] = bits;
     };
-    for (const Value& v : a) {
-        switch (v.kind) {
-        case Value::Kind::Float: {
-            if (fi < 4) {
-                fr.fpr[fi++] = v.f;
+    if (!fn.isVariadic) {
+        int gi = 0, fi = 0;
+        for (const Value& v : a) {
+            switch (v.kind) {
+            case Value::Kind::Float:
+                if (fi < 4) {
+                    fr.fpr[fi++] = v.f;
+                } else {
+                    int64_t bits;
+                    std::memcpy(&bits, &v.f, 8);
+                    pushStack(bits);
+                }
+                break;
+            case Value::Kind::Int:
+                if (gi < 4)
+                    fr.gpr[gi++] =
+                        reinterpret_cast<void*>(static_cast<intptr_t>(v.i));
+                else
+                    pushStack(v.i);
+                break;
+            case Value::Kind::Bool:
+                if (gi < 4)
+                    fr.gpr[gi++] = reinterpret_cast<void*>(
+                        static_cast<intptr_t>(v.b ? 1 : 0));
+                else
+                    pushStack(v.b ? 1 : 0);
+                break;
+            case Value::Kind::Str:
+                if (gi < 4)
+                    fr.gpr[gi++] = const_cast<char*>(v.s.c_str());
+                else
+                    pushStack(static_cast<int64_t>(
+                        reinterpret_cast<intptr_t>(v.s.c_str())));
+                break;
+            default:
+                panicHere("VM 内部错误：extern 参数类型");
+            }
+        }
+        fr.alCount = fi; // 定参被调方不读 AL，写之无害
+    } else {
+        int p = 0, xmmHigh = 0;
+        for (const Value& v : a) {
+            switch (v.kind) {
+            case Value::Kind::Float: {
+                int64_t bits;
+                std::memcpy(&bits, &v.f, 8);
+                if (p < 4) {
+                    fr.gpr[p] =
+                        reinterpret_cast<void*>(static_cast<intptr_t>(bits));
+                    fr.fpr[p] = v.f;
+                    xmmHigh = p + 1;
+                } else {
+                    pushStack(bits);
+                }
                 break;
             }
-            int64_t bits;
-            std::memcpy(&bits, &v.f, 8);
-            pushStack(bits);
-            break;
+            case Value::Kind::Int:
+                if (p < 4)
+                    fr.gpr[p] =
+                        reinterpret_cast<void*>(static_cast<intptr_t>(v.i));
+                else
+                    pushStack(v.i);
+                break;
+            case Value::Kind::Bool:
+                if (p < 4)
+                    fr.gpr[p] = reinterpret_cast<void*>(
+                        static_cast<intptr_t>(v.b ? 1 : 0));
+                else
+                    pushStack(v.b ? 1 : 0);
+                break;
+            case Value::Kind::Str:
+                if (p < 4)
+                    fr.gpr[p] = const_cast<char*>(v.s.c_str());
+                else
+                    pushStack(static_cast<int64_t>(
+                        reinterpret_cast<intptr_t>(v.s.c_str())));
+                break;
+            default:
+                panicHere("VM 内部错误：extern 参数类型");
+            }
+            ++p;
         }
-        case Value::Kind::Int:
-            if (gi < 4)
-                fr.gpr[gi++] = reinterpret_cast<void*>(static_cast<intptr_t>(v.i));
-            else
-                pushStack(v.i);
-            break;
-        case Value::Kind::Bool:
-            if (gi < 4)
-                fr.gpr[gi++] = reinterpret_cast<void*>(
-                    static_cast<intptr_t>(v.b ? 1 : 0));
-            else
-                pushStack(v.b ? 1 : 0);
-            break;
-        case Value::Kind::Str:
-            if (gi < 4)
-                fr.gpr[gi++] = const_cast<char*>(v.s.c_str());
-            else
-                pushStack(static_cast<int64_t>(
-                    reinterpret_cast<intptr_t>(v.s.c_str())));
-            break;
-        default:
-            panicHere("VM 内部错误：extern 参数类型");
-        }
+        fr.alCount = xmmHigh;
     }
 
     // ---- 调用 + 返回读回 ----

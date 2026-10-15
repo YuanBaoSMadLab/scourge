@@ -193,6 +193,109 @@ unsigned detectHardwareConcurrency() {
     return n == 0 ? 4u : n;
 }
 
+// ----------------------------------------------------------------------------
+// 模块路径解析（0.9.6 L 节：包/子模块 + 最小本地 registry）
+// ----------------------------------------------------------------------------
+
+std::vector<std::string> splitDotted(const std::string& name) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    for (;;) {
+        size_t p = name.find('.', start);
+        if (p == std::string::npos) {
+            out.push_back(name.substr(start));
+            break;
+        }
+        out.push_back(name.substr(start, p - start));
+        start = p + 1;
+    }
+    return out;
+}
+
+std::string joinDotted(const std::vector<std::string>& segs, size_t begin,
+                       size_t end) {
+    std::string out;
+    for (size_t i = begin; i < end && i < segs.size(); ++i) {
+        if (!out.empty()) out += '.';
+        out += segs[i];
+    }
+    return out;
+}
+
+/// 数值感知版本比较：全数字段按整数，否则按字典序；缺段视为 0。
+/// 保证 1.10 > 1.9；仅用于本地包缓存目录择优（无 semver 约束解析）。
+bool verLess(const std::string& a, const std::string& b) {
+    std::vector<std::string> sa = splitDotted(a), sb = splitDotted(b);
+    auto numeric = [](const std::string& s) {
+        return !s.empty() &&
+               s.find_first_not_of("0123456789") == std::string::npos;
+    };
+    for (size_t k = 0; k < std::max(sa.size(), sb.size()); ++k) {
+        std::string x = k < sa.size() ? sa[k] : "0";
+        std::string y = k < sb.size() ? sb[k] : "0";
+        if (numeric(x) && numeric(y)) {
+            long long vx = std::stoll(x), vy = std::stoll(y);
+            if (vx != vy) return vx < vy;
+        } else if (x != y) {
+            return x < y;
+        }
+    }
+    return false;
+}
+
+/// import 模块文件候选解析（按序取第一个存在者）：
+///   1. 相对当前文件目录（包目录 = 子目录，a.b → <dir>/a/b.sg）
+///   2. 相对 CWD
+///   3. 本地包缓存（SCOURGE_PACKAGES，默认 <CWD>/packages/）：
+///      <root>/<pkg>@<ver>/…（ver 取数值感知最大）→ <root>/<pkg>/… 兜底
+/// 找不到返回空路径；tried 非空时收集全部候选供 E5001 诊断列出。
+std::filesystem::path resolveModulePath(
+    const std::filesystem::path& baseDir, const std::vector<std::string>& path,
+    std::vector<std::string>* tried) {
+    auto note = [&](const std::filesystem::path& p) {
+        std::error_code ec;
+        if (tried) tried->push_back(p.string());
+        return !p.empty() && std::filesystem::exists(p, ec);
+    };
+    // 前段为子目录，末段为文件 stem。
+    std::filesystem::path rel;
+    for (size_t i = 0; i + 1 < path.size(); ++i) rel /= path[i];
+    const std::string leaf = path.back() + ".sg";
+
+    std::filesystem::path c1 = baseDir / rel / leaf;
+    if (note(c1)) return c1;
+    std::filesystem::path cwd = std::filesystem::current_path();
+    std::filesystem::path c2 = cwd / rel / leaf;
+    if (!(c2 == c1) && note(c2)) return c2;
+
+    const char* envPkgs = std::getenv("SCOURGE_PACKAGES");
+    std::filesystem::path root =
+        (envPkgs && *envPkgs) ? std::filesystem::path(envPkgs)
+                              : cwd / "packages";
+    std::error_code ec;
+    if (std::filesystem::exists(root, ec)) {
+        const std::string& pkg = path[0];
+        std::filesystem::path sub;
+        for (size_t i = 1; i + 1 < path.size(); ++i) sub /= path[i];
+        std::string best; // 最大版本后缀（不含 @）
+        for (const auto& e : std::filesystem::directory_iterator(root, ec)) {
+            std::error_code ec2;
+            if (!e.is_directory(ec2)) continue;
+            const std::string n = e.path().filename().string();
+            if (n.rfind(pkg + "@", 0) != 0) continue;
+            std::string ver = n.substr(pkg.size() + 1);
+            if (best.empty() || verLess(best, ver)) best = ver;
+        }
+        if (!best.empty()) {
+            std::filesystem::path c3 = root / (pkg + "@" + best) / sub / leaf;
+            if (note(c3)) return c3;
+        }
+        std::filesystem::path c4 = root / pkg / sub / leaf;
+        if (note(c4)) return c4;
+    }
+    return {};
+}
+
 } // namespace
 
 // ----------------------------------------------------------------------------
@@ -240,17 +343,50 @@ bool Session::loadModule(const std::string& name,
     ld.path = path;
     ld.file = file;
 
-    // 解析依赖（相对当前文件目录）。
+    // 解析依赖（相对当前文件目录 → CWD → 本地包缓存；0.9.6 点分路径）。
     loadStack_.push_back(name);
     const std::filesystem::path dir = path.parent_path();
     for (const auto& stmt : ld.mod->body) {
         if (stmt->kind != Stmt::Kind::Import) continue;
         auto& im = static_cast<const Import&>(*stmt);
-        if (std::find(ld.deps.begin(), ld.deps.end(), im.module) ==
-            ld.deps.end()) {
-            ld.deps.push_back(im.module);
+        auto addDep = [&](const std::string& dep) {
+            if (std::find(ld.deps.begin(), ld.deps.end(), dep) ==
+                ld.deps.end()) {
+                ld.deps.push_back(dep);
+            }
+        };
+        std::vector<std::string> tried;
+        std::filesystem::path dep =
+            resolveModulePath(dir, im.path, &tried);
+        if (dep.empty()) {
+            std::string list;
+            for (size_t i = 0; i < tried.size(); ++i) {
+                if (i) list += "；";
+                list += tried[i];
+            }
+            diag_.error(Errc::E5001_ModuleNotFound, kInvalidFile, SourceRange(),
+                        "找不到模块 '" + im.module() + "'（被 '" + name +
+                            "' 导入；尝试过: " + list + "）");
+            loadStack_.pop_back();
+            return false;
         }
-        loadModule(im.module, dir / (im.module + ".sg"));
+        addDep(im.module());
+        loadModule(im.module(), dep);
+
+        // from a import b：b 可能是子模块（a/b.sg）——磁盘探测存在则一并
+        // 入图，保证分层检查时全名 "a.b" 先于使用方进入 registry（Sema 的
+        // 子模块绑定查 imports_，依赖缺失会误报成员不存在）。
+        if (im.isFrom) {
+            for (const auto& item : im.items) {
+                std::vector<std::string> sub = im.path;
+                sub.push_back(item.name);
+                std::filesystem::path sp = resolveModulePath(dir, sub, nullptr);
+                if (sp.empty()) continue;
+                std::string full = joinDotted(sub, 0, sub.size());
+                addDep(full);
+                loadModule(full, sp);
+            }
+        }
     }
     loadStack_.pop_back();
 
@@ -265,8 +401,21 @@ bool Session::load(const std::filesystem::path& entryPath) {
 
 bool Session::importModule(const std::string& name) {
     if (loaded_.count(name)) return true; // 幂等：同轮重复 import
-    return loadModule(name,
-                      std::filesystem::current_path() / (name + ".sg"));
+    // 0.9.6：点分名走统一候选解析（相对 CWD → 本地包缓存）。
+    std::vector<std::string> tried;
+    std::filesystem::path p = resolveModulePath(
+        std::filesystem::current_path(), splitDotted(name), &tried);
+    if (p.empty()) {
+        std::string list;
+        for (size_t i = 0; i < tried.size(); ++i) {
+            if (i) list += "；";
+            list += tried[i];
+        }
+        diag_.error(Errc::E5001_ModuleNotFound, kInvalidFile, SourceRange(),
+                    "找不到模块 '" + name + "'（尝试过: " + list + "）");
+        return false;
+    }
+    return loadModule(name, p);
 }
 
 bool Session::loadAs(const std::string& name,

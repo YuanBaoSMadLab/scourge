@@ -34,7 +34,7 @@ std::string generateSgi(const SourceMgr& src, const Module& m,
     for (const auto& s : m.body) {
         if (s->kind != Stmt::Kind::Import) continue;
         auto& im = static_cast<const Import&>(*s);
-        if (seen.insert(im.module).second) out += "import " + im.module + "\n";
+        if (seen.insert(im.module()).second) out += "import " + im.module() + "\n";
     }
     if (!seen.empty()) out += "\n";
 
@@ -54,6 +54,9 @@ std::string generateSgi(const SourceMgr& src, const Module& m,
             auto it = syms.funcs.find(f.name);
             if (it == syms.funcs.end()) break;
             const FuncSig& sig = it->second;
+            // @private 仅模块内部可见，不属于接口契约面（0.9.6 L 节）；
+            // @internal 保留——依赖方仍需其签名，包内限制由检查器门禁。
+            if (sig.vis == Vis::Private) continue;
 
             // 分隔空行：已处于空行后（import 段/文件头）则不重复。
             bool atBlank = out.size() >= 2 &&
@@ -77,6 +80,8 @@ std::string generateSgi(const SourceMgr& src, const Module& m,
                 if (f.params[i].defaultValue)
                     out += " = <default>"; // 默认值保留语义位置，值以源码为准
             }
+            // 变参标记属于调用约定契约面，.sgi 消费方据此放行额外实参。
+            if (sig.isVariadic) out += ", ...";
             out += ") -> " + typeToString(sig.ret) + ":\n";
 
             if (!f.docstring.empty()) {

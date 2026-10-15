@@ -6,6 +6,7 @@
 
 #include <cstdlib>
 
+#include "scourge/Common/Capability.hpp"
 #include "scourge/Syntax/Lexer.hpp"
 
 namespace scourge {
@@ -197,6 +198,7 @@ StmtPtr Parser::parseStatement() {
             return std::make_unique<Pass>(t.range);
         }
         if (kw == "try") return parseTry();
+        if (kw == "defer") return parseDefer();
         if (kw == "await") { // await 是前缀表达式，不是语句起始
             diag_.error(Errc::E2010_AwaitOutsideAsync, file_, cur().range,
                         "await 只能出现在 async def 函数体内");
@@ -299,6 +301,23 @@ StmtPtr Parser::parseDef(std::vector<Decorator> decorators, bool isAsync) {
     if (!expectPunct("(")) return nullptr;
     if (!atPunct(")")) {
         for (;;) {
+            // 变参标记 ...（O 节 FFI 宽类型域）：循环顶部检查——`a, ...`
+            // 与 `(...)` 首位两种到达路径统一在此收口，后者顺带产出
+            // "至少一个命名参数"的 C ABI 就地报（比"期望参数名"更可懂）。
+            // "仅 @extern 合法"由检查器把关。
+            if (atPunct("...")) {
+                advance();
+                def->isVariadic = true;
+                if (def->params.empty())
+                    diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                cur().range,
+                                "变参标记 ... 前必须至少有一个命名参数"
+                                "（C ABI 要求）");
+                if (!atPunct(")"))
+                    diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                cur().range, "变参标记 ... 必须是参数表最后一项");
+                break;
+            }
             const Token* p = expectKind(TokKind::Ident, "参数名");
             if (!p) return nullptr;
             Param param;
@@ -467,44 +486,95 @@ StmtPtr Parser::parseTry() {
     return st;
 }
 
+StmtPtr Parser::parseDefer() {
+    const Token& kw = advance(); // defer
+    StmtList body = parseBlock();
+    if (body.empty() && hasErrors()) return nullptr;
+    // 仅函数体顶层的限制由检查器判定（Parser 无函数嵌套上下文）。
+    return std::make_unique<Defer>(kw.range, std::move(body));
+}
+
 StmtPtr Parser::parseImport() {
     const Token& kw = advance(); // import / from
-    bool isFrom = kw.text == "from";
 
-    const Token* modTok = expectKind(TokKind::Ident, "模块名");
-    if (!modTok) return nullptr;
-
-    if (atPunct(".")) {
-        diag_.error(Errc::E1007_UnsupportedFeature, file_, cur().range,
-                    "点分模块路径暂不支持；每个 .sg 文件即一个模块");
+    // 点分模块路径（0.9.6）：Ident ("." Ident)*；目录即命名空间，
+    // a.b 解析为 <dir>/a/b.sg。首段必须是 Ident，后续段同。
+    std::vector<std::string> path;
+    const Token* seg = expectKind(TokKind::Ident, "模块名");
+    if (!seg) return nullptr;
+    path.push_back(seg->text);
+    while (matchPunct(".")) {
+        const Token* nxt = expectKind(TokKind::Ident, "模块路径段");
+        if (!nxt) return nullptr;
+        path.push_back(nxt->text);
     }
 
-    std::vector<std::string> names;
-    if (isFrom) {
+    if (!kw.text.empty() && kw.text == "from") {
         if (!expectKeyword("import")) return nullptr;
+        std::vector<Import::Item> items;
         for (;;) {
             const Token* n = expectKind(TokKind::Ident, "导入名");
             if (!n) return nullptr;
-            names.push_back(n->text);
+            Import::Item item{n->text, {}};
             if (matchKeyword("as")) {
-                diag_.error(Errc::E1007_UnsupportedFeature, file_, cur().range,
-                            "import as 别名暂不支持");
-                advance(); // 恢复：跳过别名记号
+                const Token* a = expectKind(TokKind::Ident, "别名");
+                if (!a) return nullptr;
+                item.alias = a->text;
             }
+            items.push_back(std::move(item));
             if (matchPunct(",")) continue;
             break;
         }
+        endOfStatement();
+        return std::make_unique<Import>(kw.range, std::move(path), true,
+                                        std::move(items));
+    }
+
+    // import a.b [as c]：别名绑定 c（Python 语义），首段与末段宽容绑定
+    // 由检查器完成（AI 幻觉写法 b.f() 同样可编译）。
+    std::string alias;
+    if (matchKeyword("as")) {
+        const Token* a = expectKind(TokKind::Ident, "别名");
+        if (!a) return nullptr;
+        alias = a->text;
     }
     endOfStatement();
-    return std::make_unique<Import>(kw.range, modTok->text, isFrom,
-                                    std::move(names));
+    return std::make_unique<Import>(kw.range, std::move(path), false,
+                                    std::vector<Import::Item>{},
+                                    std::move(alias));
 }
 
 // ----------------------------------------------------------------------------
 // 简单语句：赋值 / 增强赋值 / 表达式语句
 // ----------------------------------------------------------------------------
 
+StmtPtr Parser::parseCapability() {
+    const Token& kw = advance(); // capability
+    std::vector<Capability::Item> caps;
+    for (;;) {
+        const Token* n = expectKind(TokKind::Ident, "能力域名");
+        if (!n) return nullptr;
+        Cap cap;
+        if (!capFromName(n->text, cap)) {
+            diag_.error(Errc::E1005_UnexpectedToken, file_, n->range,
+                        "未知能力域名 '" + n->text +
+                            "'（可用：io net env proc time signal ffi）");
+            return nullptr;
+        }
+        caps.push_back({n->text, n->range});
+        if (matchPunct(",")) continue;
+        break;
+    }
+    endOfStatement();
+    return std::make_unique<Capability>(kw.range, std::move(caps));
+}
+
 StmtPtr Parser::parseSimple() {
+    // capability 软关键字：仅当后随域名 Ident 时按能力声明解析；块内出现
+    // 由检查器拒绝（声明只属模块顶层）。软关键字保证既有标识符不破坏。
+    if (at(TokKind::Ident) && cur().text == "capability" &&
+        peekTok(1).kind == TokKind::Ident)
+        return parseCapability();
     // 声明式赋值：x: int = ... / x: int
     if (at(TokKind::Ident) && peekTok(1).kind == TokKind::Punct &&
         peekTok(1).text == ":") {
@@ -849,10 +919,49 @@ ExprPtr Parser::parseAtom() {
             return first;
         }
         if (t.text == "{") {
-            diag_.error(Errc::E1007_UnsupportedFeature, file_, t.range,
-                        "字典/集合字面量被拒绝（无宏/eval 清单；键值结构请用"
-                        "类型注解与类表达）");
-            return nullptr;
+            // 0.9.3 字典/集合字面量：{k: v, ...} 或 {e1, e2, ...}（首元素后
+            // 冒号 = 字典、逗号/收括号 = 集合）；空 {} 恒为字典（类型由注解
+            // 推断，Set 注解上下文由检查器判为空集合）。
+            advance();
+            if (atPunct("}")) {
+                advance();
+                SourceRange r0 = SourceRange::merge(t.range, toks_[pos_ - 1].range);
+                return std::make_unique<DictLit>(r0,
+                                                 std::vector<std::pair<ExprPtr, ExprPtr>>{});
+            }
+            ExprPtr first = parseExpr();
+            if (!first) return nullptr;
+            if (atPunct(":")) { // 字典路径
+                std::vector<std::pair<ExprPtr, ExprPtr>> pairs;
+                for (;;) {
+                    if (!expectPunct(":")) return nullptr;
+                    ExprPtr v = parseExpr();
+                    if (!v) return nullptr;
+                    pairs.emplace_back(std::move(first), std::move(v));
+                    if (matchPunct(",")) {
+                        if (atPunct("}")) break;
+                        first = parseExpr();
+                        if (!first) return nullptr;
+                        continue;
+                    }
+                    break;
+                }
+                if (!expectPunct("}")) return nullptr;
+                SourceRange r = SourceRange::merge(t.range, toks_[pos_ - 1].range);
+                return std::make_unique<DictLit>(r, std::move(pairs));
+            }
+            // 集合路径：{e1, e2, ...}（首元素已解析）
+            std::vector<ExprPtr> elems;
+            elems.push_back(std::move(first));
+            while (matchPunct(",")) {
+                if (atPunct("}")) break;
+                ExprPtr e = parseExpr();
+                if (!e) return nullptr;
+                elems.push_back(std::move(e));
+            }
+            if (!expectPunct("}")) return nullptr;
+            SourceRange r = SourceRange::merge(t.range, toks_[pos_ - 1].range);
+            return std::make_unique<SetLit>(r, std::move(elems));
         }
         if (t.text == "[") {
             advance();
@@ -873,8 +982,6 @@ ExprPtr Parser::parseAtom() {
             SourceRange r = SourceRange::merge(t.range, toks_[pos_ - 1].range);
             return std::make_unique<ListLit>(r, std::move(elems));
         }
-        if (t.text == "{")
-            return fail(t, "集合/字典字面量暂不支持（明确拒绝清单）");
         return fail(t, "意外的记号 " + tokenDesc(t));
     default:
         return fail(t, "意外的记号 " + tokenDesc(t));
@@ -888,6 +995,27 @@ ExprPtr Parser::parseAtom() {
 TypeExprPtr Parser::parseTypeAnnotation() {
     const Token& t = cur();
     std::string name;
+
+    // 元组类型注解 (T1, T2, ...)（0.9.6）：单元素 (int,) 允许尾逗号。
+    if (t.kind == TokKind::Punct && t.text == "(") {
+        advance();
+        auto ty = std::make_unique<TypeExpr>(TypeExpr::Kind::Tuple, t.range);
+        if (!atPunct(")")) {
+            for (;;) {
+                TypeExprPtr el = parseTypeAnnotation();
+                if (!el) return nullptr;
+                ty->params.push_back(std::move(el));
+                if (matchPunct(",")) {
+                    if (atPunct(")")) break; // 尾逗号
+                    continue;
+                }
+                break;
+            }
+        }
+        if (!expectPunct(")")) return nullptr;
+        return ty;
+    }
+
     if (t.kind == TokKind::Ident) {
         advance();
         name = t.text;

@@ -1,0 +1,48 @@
+# probe_io.sg — IO 内建双模探针（0.9.4）：input/read_text/write_text/
+# append_text/exists/list_dir。双模对拍约定：路径相对 CWD；文件系统枚举
+# 顺序不可依赖，list_dir 结果按字节序排序后取 len/首/尾三项锁定行为。
+def main() -> int:
+    p = "probe_io_tmp.txt"
+
+    # 1) 覆盖写：返回字节数；exists 查询（存在/不存在各一）
+    print(write_text(p, "line-one\nline-two"))
+    print(exists(p))
+    print(exists("probe_io_missing.xyz"))
+
+    # 2) 读回：长度与内容
+    s = read_text(p)
+    print(len(s))
+    print(s)
+
+    # 3) 追加：返回字节数；读回确认拼接
+    print(append_text(p, "\nline-three"))
+    s2 = read_text(p)
+    print(len(s2))
+    print(s2)
+
+    # 4) 再覆盖写：验证 trunc 语义
+    print(write_text(p, "reset"))
+    print(read_text(p))
+
+    # 5) 失败 panic 可被 try/except 捕获（消息文本双模逐字一致）
+    try:
+        read_text("probe_io_missing.xyz")
+        print("NOT-CAUGHT")
+    except:
+        print("CAUGHT-OPEN")
+    try:
+        read_text("verify/io/probe_io.sg")
+        print("read-ok")
+    except:
+        print("CAUGHT-UNEXPECTED")
+
+    # 6) list_dir：枚举 CWD（双模同一 CWD 运行），锁定 len/首/尾
+    names = list_dir(".")
+    print(len(names))
+    print(names[0])
+    print(names[len(names) - 1])
+    print(exists(names[0]))
+
+    # 7) stdin：单行注入（见 stdin.txt），去行尾换行
+    print(input())
+    return 0

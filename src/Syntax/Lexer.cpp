@@ -264,7 +264,7 @@ void Lexer::lexIdent() {
 // 操作符（最长匹配优先）
 // ----------------------------------------------------------------------------
 bool Lexer::lexOperator() {
-    static const char* kOps3[] = {"**=", "//=", nullptr};
+    static const char* kOps3[] = {"**=", "//=", "...", nullptr};
     static const char* kOps2[] = {
         "**", "//", "->", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=",
         "%=", "@=", nullptr};

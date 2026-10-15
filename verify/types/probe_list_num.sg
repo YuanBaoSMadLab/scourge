@@ -1,0 +1,22 @@
+# probe_list_num.sg — 0.9.3 List[int]/List[float] 数值元素探针（双模对拍）
+# 预期（run 与 build 输出逐字节一致）：
+#   3 / 3 / 2 / 2.0 / 1 / 2.5 / True / 3 1 2 逐行 / False
+def main() -> int:
+    xs: List[int] = [3, 1, 2]
+    print(len(xs))
+    print(xs[0])
+    fs: List[float] = [2.5, 1]
+    print(fs[0])
+    print(fs[1])
+    # sorted 复用（etag 0/1 运行时路径）
+    t: List[int] = sorted(xs)
+    print(t[0])
+    fu: List[float] = sorted(fs)
+    print(fu[0])
+    # in 成员测试
+    print(3 in xs)
+    print(9 in xs)
+    # for 迭代
+    for v in xs:
+        print(v)
+    return 0

@@ -58,6 +58,7 @@ enum class Errc : uint16_t {
     E5001_ModuleNotFound = 5001,     ///< import 目标模块未找到
     E5002_ImportCycle = 5002,        ///< import 构成循环依赖（DAG 前提被破坏）
     E5003_MissingExport = 5003,      ///< from-import 的成员在目标模块不存在
+    E5004_CapabilityNotGranted = 5004, ///< 使用了未声明能力域的内建/@extern（0.9.7）
 };
 
 /// 输出形如 "E2001" 的稳定字符串。
