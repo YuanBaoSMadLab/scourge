@@ -22,7 +22,7 @@ inline const char kNetRuntimeC[] = R"NT(/* Scourge AOT 运行时 — 网络/睡�
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
-/* POSIX（Linux/macOS/*BSD）兼容层：把 Windows 套接字 API 名映射到 POSIX，
+/* POSIX（Linux/macOS 与 BSD）兼容层：把 Windows 套接字 API 名映射到 POSIX，
  * 单一实现双平台编译——语义差异逐处注释（跨平台支持 0.9.4）。
  * fd 0 边界：POSIX 上 stdin 关闭时 socket() 可返回 0，sg_net_wsinit 会
  * 占住 fd 0 保证 0 恒为空槽哨兵（与 Windows 同一判断式）。 */

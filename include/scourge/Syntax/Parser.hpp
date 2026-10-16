@@ -77,6 +77,13 @@ private:
     ExprPtr parseUnary();
     ExprPtr parsePostfix();
     ExprPtr parseAtom();
+    /// f-string 段序列（FStrPart/FStrExpr 连续游程）→ str()+concat 链；
+    /// 同时是 format() 降糖的合成出口（单一降糖事实源）。
+    ExprPtr buildStrChain(std::vector<ExprPtr> parts, SourceRange range);
+    ExprPtr parseFString();
+    /// format(fmt字面量, ...) → str()+concat 链；非字面量首参原样返回
+    /// （Sema format 分支给定向错误）。
+    ExprPtr maybeDesugarFormat(std::unique_ptr<Call> c);
     ExprPtr parseCallArgs();    ///< '(' 实参列表 ')'
     std::vector<ExprPtr> parseParenElems(); ///< '(' expr, … ')' 通用列表
 

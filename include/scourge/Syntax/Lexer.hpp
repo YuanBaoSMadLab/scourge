@@ -43,9 +43,13 @@ private:
     // ---- 记号切分 -------------------------------------------------------------
     void lexString(char quote);
     void lexTripleString(char quote);
+    void lexFString(char quote, uint32_t begin, bool triple);
     void lexNumber();
     void lexIdent();
     bool lexOperator();         ///< 返回是否匹配到合法操作符
+    /// 转义序列消费（'\\' 已消耗、peek() 为转义字符）；单一事实源：
+    /// lexString / lexFString 共用同一张转义表。
+    void lexEscape(std::string& value);
 
     // ---- 基础设施 -----------------------------------------------------------
     uint32_t pos() const { return pos_; }
@@ -54,6 +58,7 @@ private:
     }
     void error(Errc code, uint32_t begin, std::string msg);
     void push(TokKind kind, uint32_t begin, std::string text);
+    void push(TokKind kind, SourceRange range, std::string text); ///< 显式区间（f-string 段）
 
     FileId file_;
     DiagEngine& diag_;

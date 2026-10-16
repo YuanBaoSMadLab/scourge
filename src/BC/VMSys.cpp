@@ -20,6 +20,7 @@
 // ============================================================================
 #include "scourge/BC/VM.hpp"
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -28,9 +29,21 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#else
+// POSIX 兼容层（跨平台支持 0.9.4）：进程/信号/时间的 POSIX 对应物，
+// 语义契约与 AOT BuilderRTSys.hpp 的 POSIX 分支一致。
+#include <csignal>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+extern char** environ; // posix_spawn 环境（getenv 同源）
+#endif
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <string>
 #include <vector>
@@ -40,8 +53,10 @@ namespace bc {
 
 namespace {
 
+#ifdef _WIN32
 /// 引号规则：空串或含空格/制表符 → 加引号；内嵌引号翻倍（MSVC 解析规则，
-/// 与 BuilderRTSys.hpp 的 sg_spawn_quote 逐字一致）。
+/// 与 BuilderRTSys.hpp 的 sg_spawn_quote 逐字一致）。仅 Windows：POSIX
+/// 走 argv 数组直传（posix_spawn），无引号层。
 void spawnQuote(const std::string& s, std::string& out) {
     bool need = s.empty() || s.find(' ') != std::string::npos ||
                 s.find('\t') != std::string::npos;
@@ -72,6 +87,30 @@ void signalEnsure() {
         done = true;
     }
 }
+#else
+/// 信号 = 原子标志轮询（POSIX：SIGINT 对齐 CTRL_C_EVENT，SIGTERM 对齐
+/// CTRL_BREAK 的终止类信号；注册后默认终止行为被接管，与 Windows 同义）。
+volatile sig_atomic_t g_sigFlag = 0;
+
+void sigHandler(int sig) {
+    (void)sig;
+    g_sigFlag = 1;
+}
+
+void signalEnsure() {
+    static bool done = false;
+    if (!done) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = sigHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0; // 无 SA_RESTART：慢 syscall 返回 EINTR 可感知中断
+        sigaction(SIGINT, &sa, nullptr);
+        sigaction(SIGTERM, &sa, nullptr);
+        done = true;
+    }
+}
+#endif
 
 } // namespace
 
@@ -116,14 +155,23 @@ void VM::sysBuiltin(const std::string& n, std::vector<Value>& a) {
             push(Value::makeBool(false));
             return;
         }
+#ifdef _WIN32
         push(Value::makeBool(_putenv((name + "=" + value).c_str()) == 0));
+#else
+        push(Value::makeBool(setenv(name.c_str(), value.c_str(), 1) == 0));
+#endif
         return;
     }
     if (n == "unset_env") {
         need(1);
         const std::string& name = needStr(0, "名称参数");
-        if (!name.empty() && name.find('=') == std::string::npos)
+        if (!name.empty() && name.find('=') == std::string::npos) {
+#ifdef _WIN32
             _putenv((name + "=").c_str()); /* "name=" 删除该变量 */
+#else
+            unsetenv(name.c_str());
+#endif
+        }
         push(Value::makeNone());
         return;
     }
@@ -132,6 +180,7 @@ void VM::sysBuiltin(const std::string& n, std::vector<Value>& a) {
         return;
     }
     if (n == "epoch_ms") {
+#ifdef _WIN32
         FILETIME ft;
         GetSystemTimeAsFileTime(&ft);
         int64_t t = (static_cast<int64_t>(ft.dwHighDateTime) << 32) |
@@ -139,6 +188,12 @@ void VM::sysBuiltin(const std::string& n, std::vector<Value>& a) {
         /* 1601-01-01 → 1970-01-01 的 100ns 间隔（11644473600 秒） */
         push(Value::makeInt(
             (t - static_cast<int64_t>(11644473600ll) * 10000000ll) / 10000ll));
+#else
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts); /* 墙钟毫秒，与 FILETIME 同语义 */
+        push(Value::makeInt(static_cast<int64_t>(ts.tv_sec) * 1000 +
+                            ts.tv_nsec / 1000000));
+#endif
         return;
     }
     if (n == "localtime" || n == "gmtime") {
@@ -147,8 +202,14 @@ void VM::sysBuiltin(const std::string& n, std::vector<Value>& a) {
             panicHere(n + "() 时间参数必须是 int");
         std::time_t t = static_cast<std::time_t>(a[0].i);
         std::tm tmv;
+#ifdef _WIN32
         int rc = n == "localtime" ? localtime_s(&tmv, &t) : gmtime_s(&tmv, &t);
         if (rc != 0)
+#else
+        std::tm* pr =
+            n == "localtime" ? localtime_r(&t, &tmv) : gmtime_r(&t, &tmv);
+        if (!pr)
+#endif
             panicHere(n == "localtime" ? "localtime() 时间值超出可表示范围"
                                        : "gmtime() 时间值超出可表示范围");
         std::vector<Value> d;
@@ -177,6 +238,7 @@ void VM::sysBuiltin(const std::string& n, std::vector<Value>& a) {
         const std::string& path = needStr(0, "路径参数");
         if (a[1].kind != Value::Kind::List)
             panicHere("spawn_wait() 参数列表必须是 List");
+#ifdef _WIN32
         std::string cmdline;
         spawnQuote(path, cmdline);
         for (const Value& v : *a[1].list) {
@@ -201,16 +263,48 @@ void VM::sysBuiltin(const std::string& n, std::vector<Value>& a) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         push(Value::makeInt(static_cast<int64_t>(code)));
+#else
+        // POSIX：argv 数组直传（posix_spawn，无引号层），退出码契约与
+        // AOT BuilderRTSys.hpp POSIX 分支一致：正常退出 → WEXITSTATUS，
+        // 信号终止 → 128 + 信号号（shell 惯例）。
+        std::vector<char*> argv;
+        argv.reserve(2 + a[1].list->size());
+        argv.push_back(const_cast<char*>(path.c_str()));
+        for (const Value& v : *a[1].list)
+            argv.push_back(const_cast<char*>(v.s.c_str()));
+        argv.push_back(nullptr);
+        pid_t pid = -1;
+        if (posix_spawn(&pid, path.c_str(), nullptr, nullptr, argv.data(),
+                        environ) != 0)
+            panicHere("spawn_wait() 无法启动进程: " + path);
+        int status = 0;
+        if (waitpid(pid, &status, 0) < 0)
+            panicHere("spawn_wait() 等待进程失败");
+        int64_t code = 1;
+        if (WIFEXITED(status))
+            code = WEXITSTATUS(status);
+        else if (WIFSIGNALED(status))
+            code = 128 + WTERMSIG(status);
+        push(Value::makeInt(code));
+#endif
         return;
     }
     if (n == "signal_caught") {
         signalEnsure();
+#ifdef _WIN32
         push(Value::makeBool(InterlockedExchangeAdd(&g_sigFlag, 0) != 0));
+#else
+        push(Value::makeBool(g_sigFlag != 0));
+#endif
         return;
     }
     if (n == "signal_reset") {
         signalEnsure();
+#ifdef _WIN32
         InterlockedExchange(&g_sigFlag, 0);
+#else
+        g_sigFlag = 0;
+#endif
         push(Value::makeNone());
         return;
     }

@@ -29,7 +29,8 @@ inline const char kSysRuntimeC[] = R"NT(/* Scourge AOT 运行时 — 系统编�
 #ifdef _WIN32
 #include <shellapi.h> /* CommandLineToArgvW（链接 -lshell32） */
 #else
-/* POSIX（Linux/macOS/*BSD）：进程/信号/动态库的 POSIX 对应物（跨平台支持）。 */
+/* POSIX（Linux/macOS 与 BSD）：进程/信号/动态库的 POSIX 对应物（跨平台支持）。 */
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>

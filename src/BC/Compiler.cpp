@@ -29,12 +29,14 @@ const char* builtinNames[] = {
     "net_connect", "net_send", "net_recv", "net_close", "net_udp_send",
     "net_http_get", "sleep",
     "net_bind", "net_accept", "net_set_timeout",
+    // 0.9.8 HTTP 服务端（与 MLIRGen builtinNames 同表）
+    "net_http_read_request", "net_http_write_response",
     // 0.9.4 H 专项：系统编程（args/env/时间/进程/信号；同表）
     "args", "env", "has_env", "set_env", "unset_env", "epoch", "epoch_ms",
     "localtime", "gmtime", "system", "spawn_wait", "signal_caught",
     "signal_reset",
     // 0.9.4 M 专项：标准库广度（统计/倒序/哈希；与 MLIRGen builtinNames 同表）
-    "mean", "var", "std", "reversed", "sha256", "crc32",
+    "mean", "var", "std", "median", "reversed", "sha256", "crc32",
     // 0.9.4 M 专项：JSON（动态 Json 值类型）
     "json_decode"};
 

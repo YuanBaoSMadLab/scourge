@@ -835,13 +835,15 @@ void TypeChecker::checkStmt(const Stmt& s) {
         TypePtr elem = tyErr();
         if (it->kind == Type::Kind::Range) elem = tyInt();
         else if (it->kind == Type::Kind::List) elem = it->params[0];
+        else if (it->kind == Type::Kind::Str)
+            elem = tyStr(); // 字节遍历（与 str 下标同域：按字节，非码点感知）
         else if (it->kind == Type::Kind::Dict)
             elem = it->params[0]; // 字典遍历键（插入序，与 VM/AOT 一致）
         else if (it->kind == Type::Kind::Set && it->params.size() >= 1)
             elem = it->params[0]; // 集合遍历元素（首插序，与 VM/AOT 一致）
         else if (it->kind != Type::Kind::Err)
             fail(Errc::E2001_TypeMismatch, st.iter->range,
-                 "for 只能遍历 range、List、dict 或 Set，实际为 " +
+                 "for 只能遍历 range、List、dict、Set 或 str，实际为 " +
                      typeToString(it));
         // 循环变量声明（Q9，Python 式复用）：与函数层已有同名绑定且类型
         // 相同 → 复用绑定（重绑定语义）；类型不同 → 明确报错。与外层
@@ -1092,8 +1094,11 @@ TypePtr TypeChecker::builtinType(const std::string& name) const {
         name == "net_http_get" || name == "sleep" ||
         name == "net_bind" || name == "net_accept" ||
         name == "net_set_timeout" ||
+        // 0.9.8 HTTP 服务端（同表）
+        name == "net_http_read_request" || name == "net_http_write_response" ||
         // 0.9.4 M 专项：标准库广度（统计/倒序/哈希；同表）
         name == "mean" || name == "var" || name == "std" ||
+        name == "median" ||
         name == "reversed" || name == "sha256" || name == "crc32" ||
         // 0.9.4 M 专项：JSON（动态 Json 值；同表）
         name == "json_decode" ||
@@ -1104,7 +1109,10 @@ TypePtr TypeChecker::builtinType(const std::string& name) const {
         name == "system" || name == "spawn_wait" || name == "signal_caught" ||
         name == "signal_reset" ||
         // 0.9.6 O 节 FFI 宽类型域：数据地址导出（同表）
-        name == "data_ptr") {
+        name == "data_ptr" ||
+        // format()：首参字面量时 Parser 已降糖为 str()+concat 链，能到达
+        // 此处的只有非字面量首参/空实参形态（checkBuiltinCall 定向报错）
+        name == "format") {
         auto t = std::make_shared<Type>(Type::Kind::Builtin);
         t->name = name;
         return t;
@@ -1858,7 +1866,9 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
             "sinh",  "cosh", "tanh",     "atan2", "floor",  "ceil",
             "round", "trunc", "sorted",
             // 0.9.4 M 专项：统计/倒序/哈希（全部为纯函数）
-            "mean", "var", "std", "reversed", "sha256", "crc32",
+            "mean", "var", "std", "median", "reversed", "sha256", "crc32",
+            // format()/f-string：降糖为 str()+concat，纯字符串计算
+            "format",
             // 0.9.4 M 专项：JSON 解码（纯函数，不触碰外部状态）
             "json_decode",
             // 0.9.6 O 节：地址导出为纯读取（解引用才是非纯边界）
@@ -1886,6 +1896,15 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
         fail(Errc::E2001_TypeMismatch, c.args[0]->range,
              "str() 不支持 " + typeToString(t));
         return tyErr();
+    }
+    // format()：合法形态（字面量首参）已在 Parser 降糖，能到达这里的都是
+    // 非法形态——给出定向错误而非笼统的未知内建。
+    if (bn == "format") {
+        if (c.args.empty())
+            return fail(Errc::E1007_UnsupportedFeature, e.range,
+                        "format() 首参必须是字符串字面量（编译期展开）");
+        return fail(Errc::E1007_UnsupportedFeature, c.args[0]->range,
+                    "format() 首参必须是字符串字面量（编译期展开）");
     }
     if (bn == "len") {
         if (c.args.size() != 1)
@@ -2208,7 +2227,8 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
     }
     // ---- M 专项：标准库广度（统计/倒序/哈希） ----
     // mean/var/std：张量与数值列表（int/float 元素），恒返回 f64（总体方差）。
-    if (bn == "mean" || bn == "var" || bn == "std") {
+    // median：同输入域，排序取中（偶数取中间两值平均），恒返回 f64。
+    if (bn == "mean" || bn == "var" || bn == "std" || bn == "median") {
         if (c.args.size() != 1)
             return fail(Errc::E2001_TypeMismatch, e.range,
                         bn + "() 恰好需要 1 个参数");
@@ -2264,6 +2284,39 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
                         "json_decode() 参数必须是 str，实际为 " +
                             typeToString(t));
         return makeType(Type::Kind::Json);
+    }
+    // ---- HTTP 服务端内建（0.9.8）：读请求 → Json / 写响应 ----
+    if (bn == "net_http_read_request") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "net_http_read_request() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Int && t->kind != Type::Kind::Err)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "net_http_read_request() 句柄参数必须是 int，实际为 " +
+                            typeToString(t));
+        return makeType(Type::Kind::Json);
+    }
+    if (bn == "net_http_write_response") {
+        if (c.args.size() != 4)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "net_http_write_response() 恰好需要 4 个参数");
+        const char* const names[4] = {"句柄", "状态码", "内容类型", "响应体"};
+        const bool wantInt[4] = {true, true, false, false};
+        for (int k = 0; k < 4; ++k) {
+            TypePtr t = checkExpr(*c.args[k]);
+            bool ok = wantInt[k] ? (t->kind == Type::Kind::Int ||
+                                    t->kind == Type::Kind::Err)
+                                 : (t->kind == Type::Kind::Str ||
+                                    t->kind == Type::Kind::Err);
+            if (!ok)
+                return fail(Errc::E2001_TypeMismatch, c.args[k]->range,
+                            std::string("net_http_write_response() ") +
+                                names[k] + "参数必须是 " +
+                                (wantInt[k] ? "int" : "str") + "，实际为 " +
+                                typeToString(t));
+        }
+        return tyInt();
     }
     // ---- 系统编程内建（0.9.4 H 专项）：args/env/时间日期/进程/信号 ----
     if (bn == "args") {

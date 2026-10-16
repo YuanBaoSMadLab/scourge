@@ -48,9 +48,13 @@ void Lexer::error(Errc code, uint32_t begin, std::string msg) {
 }
 
 void Lexer::push(TokKind kind, uint32_t begin, std::string text) {
+    push(kind, makeRange(begin), std::move(text));
+}
+
+void Lexer::push(TokKind kind, SourceRange range, std::string text) {
     Token t;
     t.kind = kind;
-    t.range = makeRange(begin);
+    t.range = range;
     t.text = std::move(text);
     out_.push_back(std::move(t));
 }
@@ -125,27 +129,165 @@ void Lexer::lexString(char quote) {
                 error(Errc::E1002_UnterminatedString, begin, "字符串未在行尾前闭合");
                 break;
             }
-            char e = advance();
-            switch (e) {
-            case 'n': value += '\n'; break;
-            case 't': value += '\t'; break;
-            case 'r': value += '\r'; break;
-            case '0': value += '\0'; break;
-            case '\\': value += '\\'; break;
-            case '\'': value += '\''; break;
-            case '"': value += '"'; break;
-            default: {
-                uint32_t eb = pos_ - 2;
-                diag_.error(Errc::E1001_IllegalChar, file_, SourceRange(eb, 2),
-                            std::string("非法转义 \\") + e);
-                value += e; // 恢复：按字面字符继续
-            }
-            }
+            lexEscape(value);
         } else {
             value += c;
         }
     }
     push(TokKind::StrLit, begin, std::move(value));
+}
+
+// 转义表单一事实源（lexString / lexFString 共用）。调用前提：'\\' 已消耗、
+// peek() 为转义字符。非法转义报错后按字面字符继续（错误恢复惯例）。
+void Lexer::lexEscape(std::string& value) {
+    char e = advance();
+    switch (e) {
+    case 'n': value += '\n'; break;
+    case 't': value += '\t'; break;
+    case 'r': value += '\r'; break;
+    case '0': value += '\0'; break;
+    case '\\': value += '\\'; break;
+    case '\'': value += '\''; break;
+    case '"': value += '"'; break;
+    default: {
+        uint32_t eb = pos_ - 2;
+        diag_.error(Errc::E1001_IllegalChar, file_, SourceRange(eb, 2),
+                    std::string("非法转义 \\") + e);
+        value += e; // 恢复：按字面字符继续
+    }
+    }
+}
+
+// f-string：f"字面{表达式}字面" / f"""多行{表达式}模板"""。词法器只负责
+// 切分——字面段输出 FStrPart（{{ }} 折叠、转义同普通字符串），表达式输出
+// FStrExpr（range 指向花括号之间的原始源码区间），由 Parser 降糖为
+// str()+concat 链（单一降糖出口）。表达式扫描跳过嵌套字符串、跟踪 {}[]()
+// 深度：顶层的 ':'（格式说明符）与 '!'（转换符）显式拒绝，表达式恒限单行
+// （parseExpressionOnly 的契约子解析器以单行为界）。triple 模式：三连引号
+// 闭合、字面段允许换行（与普通三引号字符串同语义）。
+void Lexer::lexFString(char quote, uint32_t begin, bool triple) {
+    if (triple) { advance(); advance(); } // 再消耗两枚开引号
+    advance(); // 消耗开引号
+    std::string lit;
+    uint32_t litBegin = pos_; // 当前字面段起点（不含 f 前缀与开引号）
+    uint32_t litEnd = litBegin;
+    for (;;) {
+        if (atEnd()) {
+            error(Errc::E1002_UnterminatedString, begin,
+                  triple ? "三引号 f-string 未闭合" : "字符串未在行尾前闭合");
+            break;
+        }
+        if (!triple && peek() == '\n') {
+            error(Errc::E1002_UnterminatedString, begin, "字符串未在行尾前闭合");
+            break;
+        }
+        char c = advance();
+        if (c == quote) {
+            if (!triple) {
+                litEnd = pos_ - 1; // 闭引号已消耗，段区间止于引号前
+                break;
+            }
+            if (peek() == quote && peek(1) == quote) {
+                advance(); advance();
+                litEnd = pos_ - 3; // 三连闭引号已消耗
+                break;
+            }
+            lit += c; // 单引号字符：三引号字面段中普通透传
+            continue;
+        }
+        if (c == '\\') {
+            if (atEnd() || (!triple && peek() == '\n')) {
+                error(Errc::E1002_UnterminatedString, begin, "字符串未在行尾前闭合");
+                break;
+            }
+            lexEscape(lit);
+            continue;
+        }
+        if (c == '{') {
+            if (peek() == '{') {
+                advance();
+                lit += '{';
+                continue;
+            }
+            // 表达式开始：先落已积累的字面段（空段也落，保证 Parser 看到的
+            // 段序列与源码一一对应）
+            push(TokKind::FStrPart, SourceRange(litBegin, pos_ - 1 - litBegin),
+                 std::move(lit));
+            lit.clear();
+            uint32_t exprBegin = pos_;
+            int brace = 0, bracket = 0;
+            bool closed = false;
+            while (!atEnd() && peek() != '\n') {
+                char e = peek();
+                if (e == '"' || e == '\'') { // 嵌套字符串整体跳过（含转义）
+                    char q = advance();
+                    while (!atEnd() && peek() != '\n' && peek() != q) {
+                        if (peek() == '\\') advance();
+                        advance();
+                    }
+                    if (peek() == q) advance();
+                    continue;
+                }
+                if (e == '{') { ++brace; ++bracket; advance(); continue; }
+                if (e == '}') {
+                    if (brace == 0 && bracket == 0) {
+                        uint32_t exprEnd = pos_;
+                        advance(); // 消耗 '}'
+                        if (exprEnd == exprBegin)
+                            diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                        SourceRange(exprBegin, 1),
+                                        "f-string 表达式为空");
+                        else
+                            push(TokKind::FStrExpr,
+                                 SourceRange(exprBegin, exprEnd - exprBegin),
+                                 text_.substr(exprBegin, exprEnd - exprBegin));
+                        closed = true;
+                        break;
+                    }
+                    if (brace > 0) { --brace; --bracket; }
+                    advance();
+                    continue;
+                }
+                if (e == '[' || e == '(') { ++bracket; advance(); continue; }
+                if (e == ']' || e == ')') {
+                    if (bracket > 0) --bracket;
+                    advance();
+                    continue;
+                }
+                if (brace == 0 && bracket == 0 && e == ':') {
+                    diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                SourceRange(pos_, 1),
+                                "f-string 格式说明符（:spec）暂不支持");
+                }
+                if (brace == 0 && bracket == 0 && e == '!' &&
+                    (peek(1) == 'r' || peek(1) == 's') && peek(2) == '}') {
+                    diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                SourceRange(pos_, 2),
+                                "f-string 转换符（!r/!s）暂不支持");
+                }
+                advance();
+            }
+            if (!closed)
+                error(Errc::E1002_UnterminatedString, begin,
+                      "f-string 表达式未闭合（缺 '}'）");
+            litBegin = pos_; // 下一段字面从 '}' 之后起算
+            continue;
+        }
+        if (c == '}') {
+            if (peek() == '}') {
+                advance();
+                lit += '}';
+                continue;
+            }
+            diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                        SourceRange(pos_ - 1, 1),
+                        "f-string 单个 '}' 非法（字面 '}' 请写 '}}'）");
+            continue;
+        }
+        lit += c;
+    }
+    push(TokKind::FStrPart, SourceRange(litBegin, litEnd - litBegin),
+         std::move(lit));
 }
 
 void Lexer::lexTripleString(char quote) {
@@ -242,15 +384,25 @@ void Lexer::lexIdent() {
     while (isalnum(static_cast<unsigned char>(peek())) || peek() == '_') advance();
     std::string word = text_.substr(begin, pos_ - begin);
 
-    // 字符串前缀（f/b/r 等）：明确拒绝，保持字符串语义唯一（设计文档第三章）。
+    // 字符串前缀：f/F 路由到插值降糖（Parser 侧合成 str()+concat 链）；
+    // b/r 及组合前缀（rb 等）明确拒绝，保持字符串语义唯一（设计文档第三章）。
     bool allPrefixChars = !word.empty() && word.size() <= 2;
     for (char c : word)
         if (!strchr("rRfFbB", c)) allPrefixChars = false;
     if (allPrefixChars && (peek() == '"' || peek() == '\'') && word != "_") {
-        diag_.error(Errc::E1007_UnsupportedFeature, file_,
-                    SourceRange(begin, static_cast<uint32_t>(word.size())),
-                    "字符串前缀 " + word + " 暂不支持（明确拒绝清单）");
-        // 继续按普通字符串切词，尽量减少连锁错误。
+        if (word == "f" || word == "F") {
+            // 三引号 f-string（f"""..."""）与单行同语义，仅闭合规则与
+            // 跨行字面段不同（表达式仍限单行）。
+            bool triple = peek() == peek(1) && peek(1) == peek(2) &&
+                          (peek() == '"' || peek() == '\'');
+            lexFString(peek(), begin, triple);
+            return;
+        } else {
+            diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                        SourceRange(begin, static_cast<uint32_t>(word.size())),
+                        "字符串前缀 " + word + " 暂不支持（明确拒绝清单）");
+            // 继续按普通字符串切词，尽量减少连锁错误。
+        }
     }
 
     if (isKeyword(word)) {

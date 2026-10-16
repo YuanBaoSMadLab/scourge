@@ -21,6 +21,8 @@ enum class TokKind : uint8_t {
     IntLit,    ///< 整数字面量（text 为十进制形式）
     FloatLit,  ///< 浮点字面量
     StrLit,    ///< 字符串字面量（text 为转义处理后的值）
+    FStrPart,  ///< f-string 字面量段（text 为转义处理后的值；{{ }} 已折叠）
+    FStrExpr,  ///< f-string 插值表达式（range 指向花括号间的原始源码区间）
     Punct,     ///< 标点/运算符（text 保存操作符本身，如 "+"、"->"）
 };
 

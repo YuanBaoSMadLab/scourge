@@ -286,6 +286,7 @@ int cmdBuild(const std::vector<std::string>& args) {
     std::string inFile;
     bool gpuMode = false;
     bool useCache = true;
+    CrossOpts xo;
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "-o" && i + 1 < args.size()) {
             outFile = args[++i];
@@ -293,21 +294,38 @@ int cmdBuild(const std::vector<std::string>& args) {
             gpuMode = true; /* GPU 覆盖集 op 走 CUDA 动态加载（自动回退 CPU） */
         } else if (args[i] == "--no-cache") {
             useCache = false; /* 跳过 .sgbuild/obj 缓存，单步直编直链 */
+        } else if (args[i] == "--target" && i + 1 < args.size()) {
+            xo.target = args[++i]; /* LLVM triple（跨平台/嵌入式 Linux） */
+        } else if (args[i] == "--sysroot" && i + 1 < args.size()) {
+            xo.sysroot = args[++i]; /* musl 静态 sysroot 目录 */
+        } else if (args[i] == "--cpu" && i + 1 < args.size()) {
+            xo.cpu = args[++i]; /* -mcpu（cortex-a53…） */
+        } else if (args[i] == "--march" && i + 1 < args.size()) {
+            xo.march = args[++i]; /* -march（armv7-a、rv64gc…） */
+        } else if (args[i] == "--static") {
+            xo.staticLink = true; /* 静态链接（交叉 POSIX 必需） */
         } else {
             inFile = args[i];
         }
     }
-    if (inFile.empty() || args.size() > 5) {
-        std::cerr << "用法: scourge build [--gpu] [--no-cache] <file.sg> [-o out.exe]\n";
+    if (inFile.empty() || args.size() > 15) {
+        std::cerr << "用法: scourge build [--gpu] [--no-cache] [--target <triple>] "
+                     "[--sysroot <dir>] [--cpu <c>] [--march <a>] [--static] "
+                     "<file.sg> [-o out]\n";
         return 2;
     }
 
     fs::path inPath(inFile);
     fs::path outPath =
         outFile.empty()
-            ? inPath.parent_path() / (inPath.stem().string() + ".exe")
+            ? inPath.parent_path() /
+                  (inPath.stem().string()
+#ifdef _WIN32
+                   + ".exe"
+#endif
+                   )
             : fs::path(outFile);
-    BuildOutcome r = buildOnce(inPath, outPath, gpuMode, useCache);
+    BuildOutcome r = buildOnce(inPath, outPath, gpuMode, useCache, xo);
     // 失败文本走 stderr——stdout 只承载构建结果报告。
     if (!r.log.empty()) std::cerr << r.log;
     if (r.exitCode == 0)
@@ -341,8 +359,11 @@ int main(int argc, char** argv) {
             << "  check [--json] [-j N] <file.sg>...  全量验证（JSON 诊断可选，N 为并行度）\n"
             << "  interface [--out <f>] <file>        生成 .sgi 接口文件\n"
             << "  run [--no-cache] [--watch] <file>   编译执行（.sgbc 缓存；--watch 保存即重跑）\n"
-            << "  build [--gpu] [--no-cache] <file>  AOT 构建：MLIR → LLVM IR → 原生可执行\n"
-            << "                                      （<stem>.sgbuild/obj 增量缓存）\n"
+            << "  build [--gpu] [--no-cache] [--target <triple>] [--sysroot <dir>]\n"
+            << "        [--cpu <c>] [--march <a>] [--static] <file>\n"
+            << "                                    AOT 构建：MLIR → LLVM IR → 原生可执行\n"
+            << "                                      （<stem>.sgbuild/obj 增量缓存；交叉编译\n"
+            << "                                      目标：*linux-gnu 走 musl 静态 sysroot）\n"
             << "  repl                                会话式求值（REPL；会话内 :help 查看命令）\n"
             << "  test [--json] [--seed N] [--runs N] <file>\n"
             << "                                      测试框架：<stem>.sgt 显式测试 +\n"

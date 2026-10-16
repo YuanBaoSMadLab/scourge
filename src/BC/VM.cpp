@@ -1094,7 +1094,7 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
     }
     // ---- 标准库广度（M 专项）：白名单分派到 VMStd.cpp 分块 ----
     static const char* const kStdBuiltins[] = {
-        "mean", "var", "std", "reversed", "sha256", "crc32"};
+        "mean", "var", "std", "median", "reversed", "sha256", "crc32"};
     for (const char* s : kStdBuiltins) {
         if (n == s) {
             stdBuiltin(n, a);
@@ -1498,6 +1498,18 @@ void VM::dispatch(Instr in) {
             }
             return;
         }
+        if (src.kind == Value::Kind::Str) {
+            // 字节遍历（与 str 下标同域：P1 按字节索引，非码点感知）。
+            if (c < static_cast<int64_t>(src.s.size())) {
+                f.locals[in.b] = Value::makeInt(c + 1);
+                push(Value::makeStr(
+                    std::string(1, src.s[static_cast<size_t>(c)])));
+                push(Value::makeBool(true));
+            } else {
+                push(Value::makeBool(false));
+            }
+            return;
+        }
         if (src.kind == Value::Kind::Dict) {
             if (!src.dict) panicHere("VM 内部错误：空字典对象");
             // 按插入序遍历键；迭代中新增键同样访问（追加式确定性）。
@@ -1522,7 +1534,7 @@ void VM::dispatch(Instr in) {
             }
             return;
         }
-        panicHere("for 迭代源仅支持 range、list、dict 与 Set");
+        panicHere("for 迭代源仅支持 range、list、dict、Set 与 str");
     }
 
     case Op::IntToFloat: {

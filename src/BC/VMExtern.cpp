@@ -40,6 +40,12 @@
 namespace scourge {
 namespace {
 
+// 跨平台（0.9.4）：MS x64 机器码 thunk 仅 Windows 宿主可用——SysV ABI
+// 的寄存器分配/变参寄存器保存区完全不同，属独立工程量级。POSIX 宿主
+// 的 @extern 走 AOT 路径（sg_extern_resolve = dlopen，C ABI 天然匹配）；
+// VM 侧运行时给出明确 panic 而非错误机器码。
+#ifdef _WIN32
+
 // ---------------------------------------------------------------------------
 // frame 布局（thunk 与装载端共用）：
 //   gpr[4]  @0x00  rcx/rdx/r8/r9 整型/指针参数
@@ -150,6 +156,7 @@ uint8_t* ensureThunk() {
 }
 
 using ThunkFn = void (*)(ExternFrame*, void*);
+#endif // _WIN32
 
 } // namespace
 
@@ -161,7 +168,7 @@ namespace bc {
 void VM::doExtern(const FuncBC& fn, uint32_t argc) {
     std::vector<Value> a(argc);
     for (uint32_t k = argc; k-- > 0;) a[k] = pop();
-
+#ifdef _WIN32
     // ---- 解析（缓存 cap 与 AOT 一致；panic 消息逐字一致） ----
     auto& cache = externCache();
     std::string key = fn.externDll + "!" + fn.name;
@@ -309,6 +316,11 @@ void VM::doExtern(const FuncBC& fn, uint32_t argc) {
         push(Value::makeNone());
         break;
     }
+#else
+    (void)fn;
+    panicHere("extern_call() VM 侧调用桩仅支持 Windows 宿主（MS x64 ABI）；"
+              "POSIX 宿主请用 AOT 构建（dlopen 路径原生可用）");
+#endif
 }
 
 } // namespace bc

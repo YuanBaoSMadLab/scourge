@@ -548,6 +548,28 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
                 // 0.9.4：repr 格式与 VM stringify 逐字一致（sg_list_format）
                 emit("\"lang.print_list\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
                 break;
+            case VK::Dict: {
+                // 0.9.7：print(Dict) 与 VM repr 逐字一致（sg_print_dict）。
+                // 容器值槽（tag 4，64 位句柄无类型标签）运行时无法 repr，
+                // 编译期显式拒绝；标量值槽（int/float/str/bool）全覆盖。
+                if (auto it = types_.find(c.args[k].get());
+                    it != types_.end() && it->second->kind == Type::Kind::Dict &&
+                    it->second->params.size() >= 2) {
+                    switch (it->second->params[1]->kind) {
+                    case Type::Kind::List:
+                    case Type::Kind::Dict:
+                    case Type::Kind::Set:
+                    case Type::Kind::Tensor:
+                    case Type::Kind::Result:
+                        unsupported(c.args[k]->range,
+                                    "print 容器值字典（AOT 句柄槽无类型标签）");
+                    default:
+                        break;
+                    }
+                }
+                emit("\"lang.print_dict\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
+                break;
+            }
             case VK::Json:
                 // 0.9.4 M 专项：紧凑 JSON 文本，与 VM stringify(Json) 逐字一致
                 emit("\"lang.print_json\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
@@ -890,6 +912,42 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
              ") : (i64, i64) -> () " + opLoc());
         return Value{VK::None, ""};
     }
+    // ---- 0.9.8 HTTP 服务端：读请求 → Json / 写响应 → 发送字节数 ----
+    if (name == "net_http_read_request") {
+        need(1);
+        Value s = genExpr(*c.args[0]);
+        if (s.vk != VK::Int)
+            unsupported(c.args[0]->range,
+                        "net_http_read_request() 句柄参数必须是 int");
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang.net_http_read_request\"(" + s.ssa +
+             ") : (i64) -> !llvm.ptr " + opLoc());
+        return Value{VK::Json, ssa};
+    }
+    if (name == "net_http_write_response") {
+        need(4);
+        Value s = genExpr(*c.args[0]);
+        Value st = genExpr(*c.args[1]);
+        Value ct = genExpr(*c.args[2]);
+        Value bd = genExpr(*c.args[3]);
+        if (s.vk != VK::Int)
+            unsupported(c.args[0]->range,
+                        "net_http_write_response() 句柄参数必须是 int");
+        if (st.vk != VK::Int)
+            unsupported(c.args[1]->range,
+                        "net_http_write_response() 状态码参数必须是 int");
+        if (ct.vk != VK::Str)
+            unsupported(c.args[2]->range,
+                        "net_http_write_response() 内容类型参数必须是 str");
+        if (bd.vk != VK::Str)
+            unsupported(c.args[3]->range,
+                        "net_http_write_response() 响应体参数必须是 str");
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang.net_http_write_response\"(" + s.ssa + ", " +
+             st.ssa + ", " + ct.ssa + ", " + bd.ssa +
+             ") : (i64, i64, !llvm.ptr, !llvm.ptr) -> i64 " + opLoc());
+        return Value{VK::Int, ssa};
+    }
     // ---- 系统编程内建（0.9.4 H 专项）：args/env/时间日期/进程/信号。
     // panic 的 localtime/gmtime/spawn_wait 挂 opLoc 上下文（与 sg_* 运行时
     // 消息逐字一致）；能力行（0.9.7）也一律挂 opLoc——sg_cap_check 拒绝时
@@ -981,7 +1039,8 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
     }
     // ---- M 专项：标准库广度（统计/倒序/哈希）。统计接受张量/列表
     // （运行时结构不同各一套入口），恒返回 f64；空序列 panic 双模一致。 ----
-    if (name == "mean" || name == "var" || name == "std") {
+    if (name == "mean" || name == "var" || name == "std" ||
+        name == "median") {
         need(1);
         Value v = genExpr(*c.args[0]);
         std::string ssa = fresh();

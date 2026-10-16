@@ -34,7 +34,8 @@ enum class Cap : uint8_t {
                      ///<      list_dir exists input
     Net = 1 << 1,    ///< TCP/UDP/HTTP：net_connect net_send net_recv net_close
                      ///<      net_udp_send net_http_get net_bind net_accept
-                     ///<      net_set_timeout
+                     ///<      net_set_timeout net_http_read_request
+                     ///<      net_http_write_response
     Env = 1 << 2,    ///< 参数与环境变量：args env has_env set_env unset_env
     Proc = 1 << 3,   ///< 进程：system spawn_wait
     Time = 1 << 4,   ///< 挂钟：now epoch epoch_ms localtime gmtime sleep
@@ -82,7 +83,8 @@ inline bool capOfBuiltin(std::string_view n, Cap& out) {
     // net
     if (n == "net_connect" || n == "net_send" || n == "net_recv" ||
         n == "net_close" || n == "net_udp_send" || n == "net_http_get" ||
-        n == "net_bind" || n == "net_accept" || n == "net_set_timeout") {
+        n == "net_bind" || n == "net_accept" || n == "net_set_timeout" ||
+        n == "net_http_read_request" || n == "net_http_write_response") {
         out = Cap::Net; return true;
     }
     // env

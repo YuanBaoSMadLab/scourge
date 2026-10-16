@@ -95,6 +95,8 @@ std::string Parser::tokenDesc(const Token& t) {
     case TokKind::IntLit: return "整数 '" + t.text + "'";
     case TokKind::FloatLit: return "浮点数 '" + t.text + "'";
     case TokKind::StrLit: return "字符串";
+    case TokKind::FStrPart: return "f-string 字面段";
+    case TokKind::FStrExpr: return "f-string 表达式";
     }
     return "未知记号";
 }
@@ -801,6 +803,117 @@ ExprPtr Parser::parseUnary() {
     return base;
 }
 
+// f-string 段游程 → 拼接链。语义契约：
+//   * 字面段恒为 StrLit；表达式恒经 str()（f"{x}" 与 str(x) 同一 AST 形态，
+//     Sema/编译零特判——转换错误沿用 str() 既有形态，双模一致免费）；
+//   * 相邻多个 f-string 字面量（f"a{x}" f"b"）按 Python 语义合并处理；
+//   * 全字面单段折叠为普通字符串字面量（f"abc" ≡ "abc"）。
+ExprPtr Parser::parseFString() {
+    std::vector<ExprPtr> parts;
+    SourceRange range = cur().range;
+    while (cur().kind == TokKind::FStrPart || cur().kind == TokKind::FStrExpr) {
+        Token t = cur();
+        advance();
+        range = SourceRange::merge(range, t.range);
+        if (t.kind == TokKind::FStrPart) {
+            parts.push_back(std::make_unique<StrLit>(t.range, std::move(t.text)));
+            continue;
+        }
+        // FStrExpr：range 指向花括号间原始源码，绝对字节偏移可直接喂给
+        // 契约子表达式解析器（Lexer 区间模式，位置天然映射回源坐标）。
+        ExprPtr e = parseExpressionOnly(src_, file_, diag_, t.range);
+        if (!e) return nullptr; // 子解析器已报错
+        std::vector<ExprPtr> callArgs;
+        callArgs.push_back(std::move(e));
+        parts.push_back(std::make_unique<Call>(
+            t.range, std::make_unique<Name>(t.range, "str"), std::move(callArgs)));
+    }
+    return buildStrChain(std::move(parts), range);
+}
+
+ExprPtr Parser::buildStrChain(std::vector<ExprPtr> parts, SourceRange range) {
+    if (parts.empty())
+        return std::make_unique<StrLit>(range, ""); // 词法保证 ≥1 段；防御空 f""
+    if (parts.size() == 1) return std::move(parts[0]);
+    ExprPtr acc = std::move(parts[0]);
+    for (size_t k = 1; k < parts.size(); ++k) {
+        SourceRange r = SourceRange::merge(acc->range, parts[k]->range);
+        acc = std::make_unique<Binary>(r, "+", std::move(acc), std::move(parts[k]));
+    }
+    return acc;
+}
+
+// format(fmt, x, ...) 编译期展开：{{ }} → 字面 { }，{} → str(实参) 占位，
+// 与 f-string 共用 buildStrChain（单一降糖出口）。占位符数与实参数严格
+// 一致（One Obvious Way：多余实参不静默忽略）。内建为保留字（Sema 中内建
+// 优先于用户函数），无遮蔽歧义。
+ExprPtr Parser::maybeDesugarFormat(std::unique_ptr<Call> c) {
+    if (c->args.empty() || c->callee->kind != Expr::Kind::Name ||
+        static_cast<const Name&>(*c->callee).name != "format" ||
+        c->args[0]->kind != Expr::Kind::StrLit)
+        return c; // 非字面量首参：原样透传，Sema format 分支定向报错
+
+    const StrLit* fmt = static_cast<const StrLit*>(c->args[0].get());
+    const std::string& s = fmt->strValue;
+    std::vector<ExprPtr> parts;
+    std::string lit;
+    size_t i = 0, used = 1; // used = 已消费实参数（含 fmt 自身）
+    auto flushLit = [&] {
+        if (!lit.empty())
+            parts.push_back(std::make_unique<StrLit>(fmt->range, std::move(lit)));
+        else
+            lit.clear();
+    };
+    while (i < s.size()) {
+        char ch = s[i++];
+        if (ch != '{' && ch != '}') {
+            lit += ch;
+            continue;
+        }
+        if (i < s.size() && s[i] == ch) { // {{ / }}
+            lit += ch;
+            ++i;
+            continue;
+        }
+        if (ch == '}') {
+            diag_.error(Errc::E1007_UnsupportedFeature, file_, fmt->range,
+                        "format() 字面量单个 '}' 非法（字面 '}' 请写 '}}'）");
+            return nullptr;
+        }
+        if (i >= s.size()) {
+            diag_.error(Errc::E1007_UnsupportedFeature, file_, fmt->range,
+                        "format() 字面量存在未闭合的 '{'");
+            return nullptr;
+        }
+        if (s[i] != '}') { // 匿名占位恒为 "{}"；非 '}' 说明 '}' 已成对折叠过
+            diag_.error(Errc::E1007_UnsupportedFeature, file_, fmt->range,
+                        "format() 字面量非法占位符（仅支持 '{}'）");
+            return nullptr;
+        }
+        ++i; // 消耗占位符闭括号
+        if (used >= c->args.size()) {
+            diag_.error(Errc::E1007_UnsupportedFeature, file_, c->range,
+                        "format() 占位符多于实参");
+            return nullptr;
+        }
+        flushLit();
+        std::vector<ExprPtr> one;
+        one.push_back(std::move(c->args[used++]));
+        parts.push_back(std::make_unique<Call>(
+            fmt->range, std::make_unique<Name>(fmt->range, "str"),
+            std::move(one)));
+    }
+    flushLit();
+    if (used != c->args.size()) {
+        diag_.error(Errc::E1007_UnsupportedFeature, file_, c->range,
+                    "format() 占位符 " + std::to_string(used - 1) +
+                        " 个与实参 " + std::to_string(c->args.size() - 1) +
+                        " 个不一致");
+        return nullptr;
+    }
+    return buildStrChain(std::move(parts), c->range);
+}
+
 ExprPtr Parser::parsePostfix() {
     ExprPtr e = parseAtom();
     for (;;) {
@@ -829,7 +942,8 @@ ExprPtr Parser::parsePostfix() {
             }
             if (!expectPunct(")")) return nullptr;
             SourceRange r = SourceRange::merge(e->range, toks_[pos_ - 1].range);
-            e = std::make_unique<Call>(r, std::move(e), std::move(args));
+            e = maybeDesugarFormat(std::make_unique<Call>(r, std::move(e),
+                                                          std::move(args)));
             continue;
         }
         if (atPunct("[")) {
@@ -880,6 +994,9 @@ ExprPtr Parser::parseAtom() {
     case TokKind::StrLit:
         advance();
         return std::make_unique<StrLit>(t.range, t.text);
+    case TokKind::FStrPart:
+    case TokKind::FStrExpr:
+        return parseFString();
     case TokKind::Keyword:
         if (t.text == "True" || t.text == "False") {
             advance();

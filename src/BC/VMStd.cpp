@@ -2,18 +2,18 @@
 //  Copyright (c) 2026 Scourge Project. All rights reserved.
 //  Scourge 字节码 VM — 标准库广度内建（M 专项：统计/倒序/哈希）
 // ----------------------------------------------------------------------------
-//  职责边界：只实现 mean/var/std/reversed/sha256/crc32 六内建；doBuiltin
+//  职责边界：只实现 mean/var/std/median/reversed/sha256/crc32 七内建；doBuiltin
 //  白名单分派进来（VM.cpp 尾段一行路由，本文件是唯一实现处）。
 //  语义契约（与 src/Tool/BuilderRTStd.hpp 的 sg_* 逐字一致）：
 //    * mean/var/std 接受张量与数值列表（int/float 元素），恒返回 f64；
 //      空输入 panic；方差为总体方差（÷N）；NaN 按 IEEE 传播不拦截；
 //      求和顺序固定为左→右单遍（双模 IEEE 逐位一致的依据）。
-//    * reversed：列表元素倒序新列表；str 按字节倒序（非 Unicode 码点感知）。
-//    * sha256(str) → 64 位小写 hex（FIPS 180-4，公有领域参考实现）；
-//      crc32(str) → CRC-32/ISO-HDLC（IEEE 802.3，zlib 同款参数），恒非负。
+//    * median 同输入域恒返回 f64；排序取中，NaN 破坏全序显式 panic
+//      （同 sorted 契约：拒绝而非未定义）。
 // ============================================================================
 #include "scourge/BC/VM.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -173,19 +173,49 @@ double seqAvg(const std::vector<int64_t>* iv, const std::vector<double>* fv,
     return std::sqrt(v);
 }
 
+/// 数值序列中位数（排序副本取中：奇取中位、偶取中间两值算术平均）。
+/// 双模一致依据：收集序固定左→右；无 NaN 时排序后的值序列跨实现确定
+/// （值相等元素的相对次序不影响中位数取值），奇偶取法与平均运算 IEEE 一致。
+/// NaN 破坏全序，返回 NAN 由调用方显式 panic（同 sorted 契约：拒绝而非未定义）。
+double seqMedian(const std::vector<int64_t>* iv,
+                 const std::vector<double>* fv) {
+    std::vector<double> xs;
+    xs.reserve(iv ? iv->size() : fv->size());
+    if (iv) {
+        for (int64_t x : *iv) xs.push_back(double(x));
+    } else {
+        for (double x : *fv) xs.push_back(x);
+    }
+    for (double x : xs)
+        if (x != x) return std::nan("");
+    std::sort(xs.begin(), xs.end());
+    size_t n = xs.size();
+    if (n % 2 == 1) return xs[n / 2];
+    return (xs[n / 2 - 1] + xs[n / 2]) / 2.0;
+}
+
 } // namespace
 
 void VM::stdBuiltin(const std::string& n, std::vector<Value>& a) {
-    // ---- mean/var/std：张量与数值列表，恒返回 f64 ----
-    if (n == "mean" || n == "var" || n == "std") {
-        int mode = n == "mean" ? 0 : (n == "var" ? 1 : 2);
+    // ---- mean/var/std/median：张量与数值列表，恒返回 f64 ----
+    if (n == "mean" || n == "var" || n == "std" || n == "median") {
+        int mode = n == "mean"   ? 0
+                   : n == "var"  ? 1
+                                 : (n == "std" ? 2 : 3);
         if (a.size() != 1) panicHere(n + "() 恰好需要 1 个参数");
         const Value& v = a[0];
         if (v.kind == Value::Kind::Tensor && v.tensor) {
             const TensorData& t = *v.tensor;
             if (t.size() == 0) panicHere(n + "() 不支持空序列");
-            double r = seqAvg(t.isInt ? &t.i64 : nullptr,
-                              t.isInt ? nullptr : &t.f64, mode);
+            double r;
+            if (mode == 3) {
+                r = seqMedian(t.isInt ? &t.i64 : nullptr,
+                              t.isInt ? nullptr : &t.f64);
+                if (std::isnan(r)) panicHere("median() 不支持含 NaN 的元素");
+            } else {
+                r = seqAvg(t.isInt ? &t.i64 : nullptr,
+                           t.isInt ? nullptr : &t.f64, mode);
+            }
             push(Value::makeFloat(r));
             return;
         }
@@ -205,12 +235,22 @@ void VM::stdBuiltin(const std::string& n, std::vector<Value>& a) {
                 for (const Value& e : *v.list)
                     xs.push_back(e.kind == Value::Kind::Float ? e.f
                                                               : double(e.i));
-                r = seqAvg(nullptr, &xs, mode);
+                if (mode == 3) {
+                    r = seqMedian(nullptr, &xs);
+                    if (std::isnan(r))
+                        panicHere("median() 不支持含 NaN 的元素");
+                } else {
+                    r = seqAvg(nullptr, &xs, mode);
+                }
             } else {
                 std::vector<int64_t> xs;
                 xs.reserve(v.list->size());
                 for (const Value& e : *v.list) xs.push_back(e.i);
-                r = seqAvg(&xs, nullptr, mode);
+                if (mode == 3) {
+                    r = seqMedian(&xs, nullptr);
+                } else {
+                    r = seqAvg(&xs, nullptr, mode);
+                }
             }
             push(Value::makeFloat(r));
             return;

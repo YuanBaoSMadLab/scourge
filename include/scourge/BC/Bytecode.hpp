@@ -96,6 +96,10 @@ struct Value {
     static Value makeStr(std::string v) {
         Value x; x.kind = Kind::Str; x.s = std::move(v); return x;
     }
+    static Value makeJsonNull() {
+        Value x; x.kind = Kind::Json; x.json = std::make_shared<JsonData>();
+        return x; // jk 默认 Null
+    }
     static Value makeNone() { return Value{}; }
     static Value makeList(std::shared_ptr<std::vector<Value>> v) {
         Value x; x.kind = Kind::List; x.list = std::move(v); return x;

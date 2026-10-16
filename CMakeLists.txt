@@ -33,8 +33,11 @@ if(MSVC)
 else()
     add_compile_options(${SCOURGE_GNU_FLAGS})
     # lld-link 替代 MSVC link.exe（39MB 产物单线程符号解析是增量构建大头；
-    # lld-link 多线程，链接耗时数倍下降）。
-    add_link_options(-fuse-ld=lld)
+    # lld-link 多线程，链接耗时数倍下降）。仅 Windows 宿主强制；Linux 上
+    # 尊重发行版默认链接器（lld 非必装）。
+    if(WIN32)
+        add_link_options(-fuse-ld=lld)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -73,6 +76,9 @@ target_include_directories(scourge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 add_executable(scourge src/Tool/main.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp
     src/Tool/Builder.cpp src/Tool/TestRunner.cpp)
 target_link_libraries(scourge PRIVATE scourge_core)
+# POSIX 运行时（BuilderRTSys.hpp 的 @extern dlopen 路径）需要 dl；
+# CMAKE_DL_LIBS 在 Windows 上为空，无需平台分支。
+target_link_libraries(scourge PRIVATE ${CMAKE_DL_LIBS})
 # VMNet.cpp（F/G 专项网络内建）需要 Winsock。
 if(WIN32)
     target_link_libraries(scourge PRIVATE ws2_32)
@@ -84,7 +90,13 @@ endif()
 # NOTFOUND，压缩路径整体关闭），无第三方压缩符号依赖。clang 链接器仍取自
 # D:\LLVM\bin（仅作最终驱动，与库版本无耦合）。
 if(NOT SCOURGE_LLVM_ROOT)
-    set(SCOURGE_LLVM_ROOT "E:/llvm/build")
+    if(WIN32)
+        set(SCOURGE_LLVM_ROOT "E:/llvm/build")
+    else()
+        # Linux 宿主：常见发行版 LLVM 安装前缀；find_package 的 HINTS 未命中
+        # 时仍会走系统路径搜索。
+        set(SCOURGE_LLVM_ROOT "/usr/lib/llvm")
+    endif()
 endif()
 # LLVMDebugInfoPDB 的链接接口引用 DIASDK::Diaguids（本工程不用 PDB，空接口目标
 # 仅满足配置期存在性检查）。
@@ -132,7 +144,8 @@ set(SCOURGE_LANG_TD "${CMAKE_CURRENT_SOURCE_DIR}/include/scourge/AOT/LangOps.td"
 set(SCOURGE_LANG_GEN "${CMAKE_CURRENT_BINARY_DIR}/lang_gen")
 if(NOT SCOURGE_MLIR_TBLGEN)
     find_program(SCOURGE_MLIR_TBLGEN mlir-tblgen
-        HINTS "${SCOURGE_LLVM_ROOT}/Release/bin" "${SCOURGE_LLVM_ROOT}/bin")
+        HINTS "${SCOURGE_LLVM_ROOT}/Release/bin" "${SCOURGE_LLVM_ROOT}/bin"
+              "/usr/bin")
 endif()
 if(NOT SCOURGE_MLIR_TBLGEN)
     message(FATAL_ERROR "未找到 mlir-tblgen（Lang 方言 ODS 生成需要）："

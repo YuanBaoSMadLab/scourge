@@ -18,6 +18,9 @@
 //  0.9.4 H 专项——旧格式函数无 extern，缺省字段语义安全）。
 //  v6：op 上界覆盖 NewTuple；新增 Tuple 常量（按源序仅编元素，复用
 //  list 字段递归编码，与运行时语义零分叉；0.9.6 元组缺省参数/常量池）。
+//  v8：FuncBC 变参位 kFlagVariadic（O 节 FFI 宽类型域）——不持久化则
+//  .sgbc 命中路径 isVariadic 丢为 false，float 变参退回定参 ABI 读错
+//  GP 影子槽（探针 verify_o_wide 缓存命中分支实锤）；bump 使旧缓存全量失效。
 // ============================================================================
 #include "scourge/BC/Serialize.hpp"
 
@@ -29,13 +32,14 @@ namespace bc {
 namespace {
 
 constexpr char kMagic[4] = {'S', 'G', 'B', 'C'};
-constexpr uint32_t kFormatVersion = 7; // v7：+capMask（0.9.7 能力模型）
+constexpr uint32_t kFormatVersion = 8; // v8：+kFlagVariadic（O 节变参位）
 constexpr uint8_t kOpCount = static_cast<uint8_t>(Op::NewTuple) + 1;
 
 constexpr uint8_t kFlagBuiltin = 1;
 constexpr uint8_t kFlagTopLevel = 2;
 constexpr uint8_t kFlagAsync = 4;
 constexpr uint8_t kFlagExtern = 8;
+constexpr uint8_t kFlagVariadic = 16;
 
 // ----------------------------------------------------------------------------
 // 字节流写端（小端，逐字段显式布局）
@@ -407,6 +411,7 @@ void encodeFunc(Writer& w, const FuncBC& f) {
     if (f.isTopLevel) flags |= kFlagTopLevel;
     if (f.isAsync) flags |= kFlagAsync;
     if (f.isExtern) flags |= kFlagExtern;
+    if (f.isVariadic) flags |= kFlagVariadic;
     w.u8(flags);
     w.str(f.builtinName);
     if (f.isExtern) {
@@ -470,6 +475,7 @@ bool decodeFunc(Reader& r, FuncBC& f) {
     f.isBuiltin = (flags & kFlagBuiltin) != 0;
     f.isTopLevel = (flags & kFlagTopLevel) != 0;
     f.isAsync = (flags & kFlagAsync) != 0;
+    f.isVariadic = (flags & kFlagVariadic) != 0;
     if (!r.str(f.builtinName)) return false;
     if (!(flags & kFlagExtern)) return true;
     f.isExtern = true;

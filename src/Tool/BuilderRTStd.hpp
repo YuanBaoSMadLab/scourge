@@ -10,6 +10,8 @@
 //    * mean/var/std 接受张量与数值列表（etag 0/1），恒返回 f64；
 //      空输入 panic；方差为总体方差（÷N）；NaN 按 IEEE 传播不拦截；
 //      求和顺序固定为左→右单遍（双模 IEEE 逐位一致的依据）。
+//    * median 同输入域恒返回 f64；排序取中（奇取中位、偶取中间两值平均），
+//      NaN 破坏全序显式 panic（同 sorted 契约：拒绝而非未定义）。
 //    * reversed：列表元素倒序新列表（str 元素复制指针，程序生命周期持有）；
 //      str 按字节倒序（非 Unicode 码点感知，文档化）。
 //    * sha256(str) → 64 位小写 hex（公有领域参考实现，FIPS 180-4）；
@@ -116,6 +118,64 @@ double sg_list_var(SgList* l, const char* fn, const char* file,
 double sg_list_std(SgList* l, const char* fn, const char* file,
                    int64_t line) {
     return sg_list_avg(l, 2, fn, file, line);
+}
+
+/* ---- median：排序取中（NaN 破坏全序，显式 panic 拒绝——同 sorted 契约）。
+   双模一致依据：无 NaN 时排序后的值序列跨实现确定（值相等元素次序不影响
+   中位数取值），奇偶取法与平均运算与 VM seqMedian（VMStd.cpp）IEEE 一致。 */
+static int sg_dbl_cmp(const void* a, const void* b) {
+    double x = *(const double*)a, y = *(const double*)b;
+    if (x < y) return -1;
+    if (x > y) return 1;
+    return 0;
+}
+
+static double sg_median_of(double* xs, int64_t n) {
+    qsort(xs, (size_t)n, sizeof(double), sg_dbl_cmp);
+    if (n % 2 == 1) return xs[n / 2];
+    return (xs[n / 2 - 1] + xs[n / 2]) / 2.0;
+}
+
+double sg_tensor_median(SgTensor* t, const char* fn, const char* file,
+                        int64_t line) {
+    sg_tsync(t); /* 设备驻留先回拷（GPU try 失败回退 CPU 时） */
+    int64_t n = sg_tsize(t);
+    if (n == 0) sg_panic(fn, file, line, "median() 不支持空序列");
+    double* xs = (double*)malloc(sizeof(double) * (size_t)n);
+    if (!xs) exit(1);
+    for (int64_t k = 0; k < n; ++k)
+        xs[k] = t->isInt ? (double)t->i64[k] : t->f64[k];
+    for (int64_t k = 0; k < n; ++k) {
+        if (xs[k] != xs[k]) {
+            free(xs);
+            sg_panic(fn, file, line, "median() 不支持含 NaN 的元素");
+        }
+    }
+    double r = sg_median_of(xs, n);
+    free(xs);
+    return r;
+}
+
+double sg_list_median(SgList* l, const char* fn, const char* file,
+                      int64_t line) {
+    if (l->len == 0) sg_panic(fn, file, line, "median() 不支持空序列");
+    if (l->etag != 0 && l->etag != 1)
+        sg_panic(fn, file, line, "median() 仅支持数值列表（int/float 元素）");
+    const int64_t* iv = (const int64_t*)l->data;
+    const double* fv = (const double*)l->data;
+    double* xs = (double*)malloc(sizeof(double) * (size_t)l->len);
+    if (!xs) exit(1);
+    for (int64_t k = 0; k < l->len; ++k)
+        xs[k] = (l->etag == 1) ? fv[k] : (double)iv[k];
+    for (int64_t k = 0; k < l->len; ++k) {
+        if (xs[k] != xs[k]) {
+            free(xs);
+            sg_panic(fn, file, line, "median() 不支持含 NaN 的元素");
+        }
+    }
+    double r = sg_median_of(xs, l->len);
+    free(xs);
+    return r;
 }
 
 /* ---- reversed：列表倒序新列表（元素槽宽 8B：etag 0/1/3 值、2 为指针） ---- */
@@ -281,6 +341,76 @@ int64_t sg_crc32(const char* s) {
     for (const unsigned char* p = (const unsigned char*)s; *p; ++p)
         c = sg_crc32_table[(c ^ *p) & 0xFF] ^ (c >> 8);
     return (int64_t)(c ^ 0xFFFFFFFFu); /* 恒非负，int64 可精确承载 */
+}
+
+/* ==== dict repr 格式化（0.9.7；与 VM toString(dict, repr=true) 逐字一致） ====
+ * "{" + "k: v"（", " 连接，插入序）+ "}"；str 键/值带引号转义（sg_list_escape
+ * 规则，置于本片段之前可见）。tag：0=int 1=f64(位型) 2=str 3=bool；
+ * tag 4 为容器句柄槽（64 位无类型标签）运行时无法 repr——调用方（检查器/
+ * MLIRGen）已在编译期拒绝，此处 panic 为防御分支（同 data_ptr 空张量）。 */
+static size_t sg_slot_len(int32_t tag, uint64_t slot) {
+    switch (tag) {
+    case 1: return 64;
+    case 2: return 2 * strlen((const char*)(size_t)slot) + 10;
+    case 3: return 5;
+    default: return 20;
+    }
+}
+
+static void sg_slot_write(int32_t tag, uint64_t slot, char** w) {
+    char buf[64];
+    switch (tag) {
+    case 1: {
+        double dv;
+        memcpy(&dv, &slot, sizeof dv);
+        snprintf(buf, sizeof buf, "%s", sg_fmt_f64(dv));
+        memcpy(*w, buf, strlen(buf));
+        *w += strlen(buf);
+        return;
+    }
+    case 2:
+        sg_list_escape((const char*)(size_t)slot, w);
+        return;
+    case 3:
+        memcpy(*w, slot ? "True" : "False", slot ? 4 : 5);
+        *w += slot ? 4 : 5;
+        return;
+    default:
+        snprintf(buf, sizeof buf, "%lld", (long long)slot);
+        memcpy(*w, buf, strlen(buf));
+        *w += strlen(buf);
+    }
+}
+
+char* sg_dict_format(SgDict* d) {
+    /* 两遍：先算总长，再填（槽位文本长度上界同 sg_list_format）。 */
+    int64_t n = d->len;
+    size_t total = 2;
+    for (int64_t k = 0; k < n; ++k) {
+        if (k) total += 2; /* ", " */
+        total += sg_slot_len(d->ktag, d->ents[k].k);
+        total += 2; /* ": " */
+        total += sg_slot_len(d->vtag, d->ents[k].v);
+    }
+    char* out = (char*)malloc(total + 1);
+    if (!out) exit(1);
+    char* w = out;
+    *w++ = '{';
+    for (int64_t k = 0; k < n; ++k) {
+        if (k) { *w++ = ','; *w++ = ' '; }
+        sg_slot_write(d->ktag, d->ents[k].k, &w);
+        *w++ = ':'; *w++ = ' ';
+        sg_slot_write(d->vtag, d->ents[k].v, &w);
+    }
+    *w++ = '}';
+    *w = 0;
+    return out;
+}
+
+void sg_print_dict(SgDict* d) {
+    if (d->ktag == 4 || d->vtag == 4)
+        sg_panic("sg_print_dict", "<rt>", 0, "print 容器值字典（防御分支，编译期已拒绝）");
+    fputs(sg_dict_format(d), stdout);
 }
 )RT";
 
