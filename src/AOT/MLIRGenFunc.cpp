@@ -52,6 +52,9 @@ void Gen::startFunction(const std::string& symLine, const std::string& dispName,
             // genTry 发生），入口块一次性 store 的 volatile 开销可忽略。
             emit("llvm.store volatile " + arg + ", " + slot.ptr + " : " + ty +
                  ", !llvm.ptr");
+            // 形参绑定产生第二引用 → 别名登记（调用方累积缓冲据此禁原地扩容）
+            if (params[k].second == VK::Str)
+                emit("\"lang.str_mark\"(" + arg + ") : (!llvm.ptr) -> ()");
         }
     }
 
@@ -256,6 +259,8 @@ void Gen::storeTo(Slot& slot, Value v) {
         emit(ssa + " = arith.sitofp " + v.ssa + " : i64 to f64");
         v = Value{VK::Float, ssa};
     }
+    // str 非独占值存槽 → 别名登记（独占新缓冲免登记；owned 契约见 Detail）
+    if (slot.vk == VK::Str && !v.owned) emitStrMark(v);
     emit(std::string("llvm.store") + vol() + " " + v.ssa + ", " + slot.ptr +
          " : " + mlirTy(slot.vk) + ", !llvm.ptr");
 }
@@ -283,7 +288,10 @@ void Gen::storeGlobal(const GlobalSlot& g, Value v) {
         emit(ssa + " = arith.sitofp " + v.ssa + " : i64 to f64");
         v = Value{VK::Float, ssa};
     }
-    emit("llvm.store " + v.ssa + ", " + p + " : " + mlirTy(g.vk) + ", !llvm.ptr");
+    // str 非独占值存全局槽 → 别名登记（与 storeTo 同一契约）
+    if (g.vk == VK::Str && !v.owned) emitStrMark(v);
+    emit("llvm.store " + v.ssa + ", " + p + " : " + mlirTy(g.vk) +
+         ", !llvm.ptr");
 }
 
 // ============================================================================

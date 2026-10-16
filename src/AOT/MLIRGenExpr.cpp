@@ -259,6 +259,20 @@ Value Gen::genExpr(const Expr& e) {
                 unsupported(ix.range, "该值类型的字典下标读取");
             return dictFromBits(vVK, raw);
         }
+        if (base.vk == VK::Str) {
+            // str 单下标（0.9.7 补齐：检查器早已放行，VM 可用而 AOT 缺）。
+            // 按字节索引（P1 语义），负下标归一 + 越界 panic 消息与 VM
+            // normIndex 逐字一致（sg_str_chr_at 与 for 遍历共用）。
+            if (ix.indices.size() != 1)
+                unsupported(ix.range, "str 只支持单下标");
+            Value iv = genExpr(*ix.indices[0]);
+            if (iv.vk != VK::Int)
+                unsupported(ix.indices[0]->range, "str 下标必须是 int");
+            std::string ssa = fresh();
+            emit(ssa + " = \"lang.str_chr_at\"(" + base.ssa + ", " + iv.ssa +
+                 ") : (!llvm.ptr, i64) -> !llvm.ptr " + opLoc());
+            return Value{VK::Str, ssa};
+        }
         if (base.vk == VK::Tuple) {
             // 元组单下标（0.9.6）：检查器已强制单下标 + 编译期整数字面量 +
             // 静态越界；此处按类型表 base 注解的 params[i] 还原元素。
@@ -656,7 +670,9 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         std::string ssa = fresh();
         emit(ssa + " = \"lang.str_concat\"(" + l.ssa + ", " + r.ssa +
              ") : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr " + opLoc());
-        return Value{VK::Str, ssa};
+        Value v{VK::Str, ssa};
+        v.owned = true; // concat 产出独占新缓冲（sg_str_alloc）
+        return v;
     }
     if (op == "*" &&
         ((l.vk == VK::Str && r.vk == VK::Int) ||
@@ -666,7 +682,9 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
         std::string ssa = fresh();
         emit(ssa + " = \"lang.str_repeat\"(" + s.ssa + ", " + n.ssa +
              ") : (!llvm.ptr, i64) -> !llvm.ptr " + opLoc());
-        return Value{VK::Str, ssa};
+        Value v{VK::Str, ssa};
+        v.owned = true; // repeat 产出独占新缓冲
+        return v;
     }
 
     // ---- 张量运算（@ 与算术广播；语义与 VM tensorBinOp / tensorMatMul 一致） ----

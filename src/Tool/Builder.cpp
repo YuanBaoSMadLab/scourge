@@ -32,15 +32,30 @@
 #include "BuilderRTStr.hpp" // 私有分块头（与本文件同目录，不入 include/）
 #include "BuilderRTStd.hpp" // 标准库广度片段（统计/倒序/哈希；M 专项）
 #include "BuilderRTJson.hpp" // JSON 运行时片段（M 专项，vendored jsmn）
+#include "BuilderRTHttp.hpp" // HTTP 服务端运行时片段（0.9.8，同目录私有头）
 #include "BuilderRTNet.hpp" // 网络/睡眠运行时片段（F/G 专项，同目录私有头）
 #include "BuilderRTSys.hpp" // 系统编程运行时片段（H 专项，同目录私有头）
 #include "scourge/AOT/InProcess.hpp"
 #include "scourge/AOT/MLIRGen.hpp"
 #include "scourge/BC/Serialize.hpp"
 #include "scourge/Common/Capability.hpp"
+#include "scourge/Common/Version.hpp"
 #include "scourge/Tool/Session.hpp"
 
 namespace fs = std::filesystem;
+
+// OS 头（selfTag 取编译器自身路径用）。注意：本文件 L54 起的大段原始字符串
+// 内嵌的是生成给用户程序的 C 运行时源码，其中的 #include 是字符串文本——
+// 编译器自身的 OS 头只能放在这里。
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace scourge {
 
@@ -68,6 +83,12 @@ const char kRuntimeC[] = R"RT(/* Scourge AOT 运行时（scourge build 内嵌生
 __attribute__((constructor)) static void sg_console_init(void) {
     SetConsoleOutputCP(CP_UTF8);
 }
+#else
+/* POSIX（Linux/macOS 与 BSD）：终端与管道原生字节流（UTF-8 环境），无需
+ * 控制台代码页初始化；目录/文件/时钟 API 用 POSIX 对应物（跨平台支持）。 */
+#include <dirent.h>
+#include <time.h>
+#include <unistd.h>
 #endif
 
 /* ---- try/except 蹦床 ----
@@ -205,18 +226,41 @@ double sg_pow_f64(double a, double b, const char* fn, const char* file,
 }
 
 /* ---- 字符串（NUL 结尾 UTF-8；拼接/重复结果 malloc，程序生命周期持有） ---- */
+/* 拼接/重复/复制结果走 arena 顺序 bump 分配：契约本就是"程序生命周期持有"
+ * （运行时零 free），大循环拼接时通用 malloc 的 live set 线性膨胀，free 链
+ * 翻找 + 页错误使单次拼接远贵于 memcpy 本身（实测比 VM 慢 ~7x——VM 侧
+ * 引用计数即时释放、块复用全在缓存）。bump 把分配降回 O(1)、访问顺序化。
+ * 语言无线程语义，静态游标单线程安全；超 1MB 的大块直连 malloc（护栏：
+ * repeat 上限 64MB，避免 arena 内部碎片放大）。 */
+static char* sg_str_alloc(size_t n) {
+    static char* cur = 0;
+    static size_t left = 0;
+    if (n > (size_t)1 << 20) {
+        char* p = (char*)malloc(n);
+        if (!p) exit(1);
+        return p;
+    }
+    if (left < n) {
+        cur = (char*)malloc((size_t)1 << 20);
+        if (!cur) exit(1);
+        left = (size_t)1 << 20;
+    }
+    char* p = cur;
+    cur += n;
+    left -= n;
+    return p;
+}
+
 static char* sg_dup(const char* s) {
     size_t n = strlen(s);
-    char* p = (char*)malloc(n + 1);
-    if (!p) exit(1);
+    char* p = sg_str_alloc(n + 1);
     memcpy(p, s, n + 1);
     return p;
 }
 
 const char* sg_str_concat(const char* a, const char* b) {
     size_t na = strlen(a), nb = strlen(b);
-    char* p = (char*)malloc(na + nb + 1);
-    if (!p) exit(1);
+    char* p = sg_str_alloc(na + nb + 1);
     memcpy(p, a, na);
     memcpy(p + na, b, nb + 1);
     return p;
@@ -229,10 +273,121 @@ const char* sg_str_repeat(const char* s, int64_t n, const char* fn,
     if (n != 0 && (int64_t)strlen(s) > kMaxBytes / n)
         sg_panic(fn, file, line, "字符串重复结果过长（上限 64MB）");
     size_t sl = strlen(s);
-    char* p = (char*)malloc(sl * (size_t)n + 1);
-    if (!p) exit(1);
+    char* p = sg_str_alloc(sl * (size_t)n + 1);
     for (int64_t k = 0; k < n; ++k) memcpy(p + sl * (size_t)k, s, sl);
     p[sl * (size_t)n] = 0;
+    return p;
+}
+
+/* ---- str 别名登记与自拼接原地扩容（循环拼接 O(n²) live set 治理） ----
+ * 契约（编译器 MLIRGen 侧同步维持，详见 docs/02 内存模型章）：
+ *  1. str 缓冲泄漏语义不变（程序生命周期持有、零 free）；但"独占"缓冲允许
+ *     经 sg_str_concat_grow 原地追加。一切使缓冲产生第二引用的操作必须先
+ *     sg_str_mark 登记——登记后的指针永远走慢路径（整串新缓冲），别名侧
+ *     内容永不变化，与 VM 值语义逐字一致。
+ *  2. 第二引用的全部创建通道：槽位存入非独占值（storeTo/storeGlobal 发射
+ *     lang.str_mark）、形参绑定（callee 入口发射）、容器捕获（list_new_s /
+ *     dict_set / set_new / result_ok_s / result_err / 元组字面量）。
+ *  3. 其余运行时函数不得滞留 str 实参（print/len/find 等只读）；str 方法
+ *     族一律整串新缓冲返回，无内部指针通道。
+ * 失误容错：登记遗漏只会让 grow 误走慢路径（行为仍正确），登记/快路径
+ * 永不影响输出内容——性能优化与可观测行为解耦。 */
+static char** sg_str_esc_set = NULL; /* 开放寻址哈希集（指针键，NULL=空槽） */
+static size_t sg_str_esc_cap = 0;
+static size_t sg_str_esc_len = 0;
+
+static uint64_t sg_str_hash_ptr(const void* p) {
+    uint64_t x = (uint64_t)(uintptr_t)p;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+}
+
+static int sg_str_escaped(const char* p) {
+    if (!p || sg_str_esc_cap == 0) return 0;
+    size_t mask = sg_str_esc_cap - 1;
+    size_t i = (size_t)sg_str_hash_ptr(p) & mask;
+    while (sg_str_esc_set[i]) {
+        if (sg_str_esc_set[i] == p) return 1;
+        i = (i + 1) & mask;
+    }
+    return 0;
+}
+
+static void sg_str_esc_put(const char* p) { /* 容量充足且未去重时调用 */
+    size_t mask = sg_str_esc_cap - 1;
+    size_t i = (size_t)sg_str_hash_ptr(p) & mask;
+    while (sg_str_esc_set[i]) i = (i + 1) & mask;
+    sg_str_esc_set[i] = (char*)p;
+    sg_str_esc_len++;
+}
+
+void sg_str_mark(const char* p) {
+    if (!p || sg_str_escaped(p)) return;
+    if ((sg_str_esc_len + 1) * 4 > sg_str_esc_cap * 3) { /* 75% 负载 ×2 扩容 */
+        size_t ncap = sg_str_esc_cap ? sg_str_esc_cap * 2 : 64;
+        char** old = sg_str_esc_set;
+        size_t oldcap = sg_str_esc_cap;
+        sg_str_esc_set = (char**)calloc(ncap, sizeof(char*));
+        if (!sg_str_esc_set) exit(1);
+        sg_str_esc_cap = ncap;
+        sg_str_esc_len = 0;
+        for (size_t k = 0; k < oldcap; ++k)
+            if (old[k]) sg_str_esc_put(old[k]);
+        free(old);
+    }
+    sg_str_esc_put(p);
+}
+
+/* 累积器登记表：acc（编译期发射点编号）→ 当前缓冲/长度/容量。state[acc]
+ * 只由本函数写出，故 a==state[acc].ptr 蕴含 len/cap 对该缓冲精确有效。 */
+typedef struct {
+    char* ptr;
+    size_t len, cap;
+} SgAcc;
+
+static SgAcc* sg_accs = NULL;
+static size_t sg_accs_n = 0;
+
+const char* sg_str_concat_grow(int64_t acc, const char* a, const char* b) {
+    size_t nb = strlen(b);
+    if (acc >= 0 && (size_t)acc < sg_accs_n) {
+        SgAcc* s = &sg_accs[acc];
+        /* 快路径：a 是本发射点登记缓冲、容量足够且从未逃逸 → 原地追加。
+         * 恒 memmove：b==a（s+=s 自拼接）时区间重叠。 */
+        if (a == s->ptr && s->len + nb + 1 <= s->cap && !sg_str_escaped(a)) {
+            memmove(s->ptr + s->len, b, nb + 1);
+            s->len += nb;
+            return s->ptr;
+        }
+    }
+    /* 慢路径：内容与 sg_str_concat 逐字节同构；容量按 2 的幂预留（几何
+     * 增长，后续追加落回快路径——bump 下不预留则每次拼接都整串重拷）。 */
+    size_t na = strlen(a);
+    size_t need = na + nb + 1;
+    size_t cp = 32;
+    while (cp < need) cp <<= 1;
+    char* p = sg_str_alloc(cp);
+    memcpy(p, a, na);
+    memcpy(p + na, b, nb + 1);
+    if (acc >= 0) {
+        if ((size_t)acc >= sg_accs_n) {
+            size_t n = sg_accs_n ? sg_accs_n : 8;
+            while (n <= (size_t)acc) n *= 2;
+            SgAcc* na2 = (SgAcc*)realloc(sg_accs, sizeof(SgAcc) * n);
+            if (!na2) exit(1);
+            sg_accs = na2;
+            memset(sg_accs + sg_accs_n, 0,
+                   sizeof(SgAcc) * (n - sg_accs_n));
+            sg_accs_n = n;
+        }
+        sg_accs[acc].ptr = p;
+        sg_accs[acc].len = na + nb;
+        sg_accs[acc].cap = cp;
+    }
     return p;
 }
 
@@ -246,6 +401,28 @@ int sg_str_contains(const char* hay, const char* needle) {
 }
 
 int64_t sg_len_str(const char* s) { return (int64_t)strlen(s); }
+
+/* str 单字节取字符（0.9.7：for 遍历 / 下标读共用）。负下标归一 + 越界
+ * panic，消息与 VM normIndex 逐字一致（"字符串索引越界：<orig>（长度 <len>）"）。
+ * P1 按字节索引（UTF-8 多字节字符返回单字节切片，非码点感知，文档化）。
+ * 结果 malloc 持有（程序生命周期，与 str 方法返回同约定）。 */
+const char* sg_str_chr_at(const char* s, int64_t idx, const char* fn,
+                          const char* file, int64_t line) {
+    int64_t len = (int64_t)strlen(s);
+    int64_t orig = idx;
+    if (idx < 0) idx += len; /* Python 语义：负下标从尾部计 */
+    if (idx < 0 || idx >= len) {
+        char buf[96];
+        snprintf(buf, sizeof buf, "字符串索引越界：%lld（长度 %lld）",
+                 (long long)orig, (long long)len);
+        sg_panic(fn, file, line, buf);
+    }
+    char* p = (char*)malloc(2);
+    if (!p) exit(1);
+    p[0] = s[idx];
+    p[1] = 0;
+    return p;
+}
 
 /* ---- str() 构造 ---- */
 const char* sg_str_from_i64(int64_t v) {
@@ -349,7 +526,9 @@ double sg_now(void) {
     QueryPerformanceCounter(&t);
     return (double)t.QuadPart * inv;
 #else
-    return (double)clock() / (double)CLOCKS_PER_SEC;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts); /* 单调墙钟，与 QPC 同语义 */
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 #endif
 }
 
@@ -1168,12 +1347,14 @@ SgResult* sg_result_ok_b(int v) {
 }
 SgResult* sg_result_ok_s(const char* s) {
     SgResult* r = sg_result_new(1);
+    sg_str_mark(s); /* str 捕获 → 别名登记（见 mark 契约） */
     r->bits = (int64_t)(intptr_t)s;
     return r;
 }
 SgResult* sg_result_ok_n(void) { return sg_result_new(1); }
 SgResult* sg_result_err(const char* msg) {
     SgResult* r = sg_result_new(0);
+    sg_str_mark(msg); /* str 捕获 → 别名登记 */
     r->err = msg;
     return r;
 }
@@ -1246,7 +1427,10 @@ SgList* sg_list_new_s(int64_t n, const char* const* es) {
     l->etag = 2;
     l->data = malloc(sizeof(char*) * (size_t)(n > 0 ? n : 1));
     if (!l->data) exit(1);
-    for (int64_t k = 0; k < n; ++k) ((char**)l->data)[k] = (char*)es[k];
+    for (int64_t k = 0; k < n; ++k) {
+        sg_str_mark(es[k]); /* str 捕获 → 别名登记（见 mark 契约） */
+        ((char**)l->data)[k] = (char*)es[k];
+    }
     return l;
 }
 
@@ -1424,6 +1608,10 @@ uint64_t sg_dict_get(SgDict* d, uint64_t k, const char* fn, const char* file,
 
 void sg_dict_set(SgDict* d, uint64_t k, uint64_t v, const char* fn,
                  const char* file, int64_t line) {
+    /* str 槽位（tag 2）捕获 → 别名登记（见 mark 契约）；dict_new 逐元素
+     * 复用本函数，字面量与 d[k]=v 两路同一埋点。 */
+    if (d->ktag == 2) sg_str_mark((const char*)(uintptr_t)k);
+    if (d->vtag == 2) sg_str_mark((const char*)(uintptr_t)v);
     sg_dict_check_key(d, k, fn, file, line);
     int64_t e = sg_dict_find(d, k);
     if (e >= 0) {
@@ -1675,7 +1863,11 @@ int64_t sg_append_text(const char* path, const char* data, const char* fn,
 }
 
 int sg_exists(const char* path) {
+#ifdef _WIN32
     return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
+#else
+    return access(path, F_OK) == 0;
+#endif
 }
 
 static int sg_sort_names(const void* x, const void* y) {
@@ -1684,6 +1876,11 @@ static int sg_sort_names(const void* x, const void* y) {
 
 SgList* sg_list_dir(const char* path, const char* fn, const char* file,
                     int64_t line) {
+    /* 收集（跳过 "." ".."，与 VM 显式过滤对齐）→ qsort 字节序 → SgList。 */
+    size_t cap = 16, cnt = 0;
+    char** names = (char**)malloc(cap * sizeof(char*));
+    if (!names) exit(1);
+#ifdef _WIN32
     /* 通配拼接：尾分隔符直接加 '*'，否则补 '\\'（与 VM directory_iterator
      * 枚举"直接子项"语义一致）。 */
     size_t pl = strlen(path);
@@ -1702,11 +1899,6 @@ SgList* sg_list_dir(const char* path, const char* fn, const char* file,
     if (h == INVALID_HANDLE_VALUE)
         sg_panic(fn, file, line,
                  sg_io_msg("list_dir() 无法打开目录: ", path));
-
-    /* 收集（跳过 "." ".."，与 VM 显式过滤对齐）→ qsort 字节序 → SgList。 */
-    size_t cap = 16, cnt = 0;
-    char** names = (char**)malloc(cap * sizeof(char*));
-    if (!names) exit(1);
     do {
         const char* nm = fd.cFileName;
         if (nm[0] == '.' && (nm[1] == 0 || (nm[1] == '.' && nm[2] == 0)))
@@ -1720,6 +1912,27 @@ SgList* sg_list_dir(const char* path, const char* fn, const char* file,
         names[cnt++] = sg_dup(nm);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
+#else
+    /* POSIX: opendir/readdir 直接枚举"直接子项"（无需通配拼接）。 */
+    DIR* d = opendir(path);
+    if (!d)
+        sg_panic(fn, file, line,
+                 sg_io_msg("list_dir() 无法打开目录: ", path));
+    struct dirent* de;
+    while ((de = readdir(d)) != NULL) {
+        const char* nm = de->d_name;
+        if (nm[0] == '.' && (nm[1] == 0 || (nm[1] == '.' && nm[2] == 0)))
+            continue;
+        if (cnt + 1 >= cap) {
+            cap *= 2;
+            char** nb = (char**)realloc(names, cap * sizeof(char*));
+            if (!nb) exit(1);
+            names = nb;
+        }
+        names[cnt++] = sg_dup(nm);
+    }
+    closedir(d);
+#endif
     qsort(names, cnt, sizeof(char*), sg_sort_names);
 
     SgList* out = sg_list_empty();
@@ -4017,11 +4230,17 @@ int runCapture(const std::string& exe, const std::string& args,
                const fs::path& capPath, std::string& out) {
     std::error_code ec;
     fs::remove(capPath, ec);
-    // cmd /c 对以引号开头且含特殊字符的命令会剥首尾引号——外层再包一对
-    // 引号（cmd 官方文档的标准规避法），内层各路径引号原样保留。
-    std::string cmd = "\"\"" + exe + "\" " + args + " > \"" + capPath.string() +
-                      "\" 2>&1\"";
-    int rc = std::system(cmd.c_str());
+#ifdef _WIN32
+    // Windows 命令解释器对以引号开头且含特殊字符的命令会剥首尾引号——
+    // 外层再包一对引号（官方文档的标准规避法），内层各路径引号原样保留。
+    std::string cmdline = "\"\"" + exe + "\" " + args + " > \"" +
+                          capPath.string() + "\" 2>&1\"";
+#else
+    // POSIX: /bin/sh 直跑（双引号语义一致，无需外层规避对）。
+    std::string cmdline = "\"" + exe + "\" " + args + " > '" +
+                          capPath.string() + "' 2>&1";
+#endif
+    int rc = std::system(cmdline.c_str());
     out.clear();
     std::ifstream in(capPath, std::ios::binary);
     if (in) {
@@ -4065,6 +4284,13 @@ inline uint64_t fnvKey(std::string_view s,
     return bc::fnv1a64(s, seed);
 }
 
+/// 链接两对象 → 可执行（目标感知）：
+///   * 本机/交叉 Windows：clang 驱动链接（-lws2_32 -lshell32）；
+///   * 交叉 POSIX：ld.lld 直链 musl 静态（crt1/crti/crtn + -lc -lm
+///     -lgcc -lpthread -ldl；clang 驱动在此路径会找 GCC 的 crtbeginT.o，
+///     musl sysroot 不提供，故绕开）。
+/// 需在 buildOnce 可见作用域内取 targetWin/xo/llvmBin——以 lambda 闭包
+/// 形式在 buildOnce 内构造。
 /// 工具链标签：clang 路径 + 大小 + 修改时间——工具链升级即缓存失效。
 std::string clangTag(const fs::path& clang) {
     std::error_code ec;
@@ -4077,19 +4303,48 @@ std::string clangTag(const fs::path& clang) {
            std::to_string(mtime);
 }
 
+/// 编译器自体指纹：自身可执行文件路径 + 大小 + 修改时间。作为 mainObjKey
+/// 的指纹源（对齐 clangTag 模式）：任何 TU 重编 → 重链 → 指纹变化 → obj
+/// 缓存全量失效，无需逐 TU 登记时间戳。路径取值失败时降级为空路径——
+/// 大小/mtime 退化为 0，指纹仍稳定（仅失去失效灵敏度，不产生错误命中）。
+std::string selfTag() {
+    std::string path;
+#ifdef _WIN32
+    char buf[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) path.assign(buf, n);
+#else
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n > 0) path.assign(buf, static_cast<size_t>(n));
+#endif
+    std::error_code ec;
+    uintmax_t size = fs::file_size(path, ec);
+    uint64_t sizeV = ec ? 0 : static_cast<uint64_t>(size);
+    ec.clear();
+    auto t = fs::last_write_time(path, ec);
+    uint64_t mtime = ec ? 0 : static_cast<uint64_t>(t.time_since_epoch().count());
+    return path + "|" + std::to_string(sizeV) + "|" + std::to_string(mtime);
+}
+
 /// main.obj 缓存键（五重一致性，对齐 .sgbc 五重校验）：格式版本、
-/// 工具链标签、源指纹（依赖层序逐模块：名/路径/归一化源文本）、
-/// 优化档+gpuMode、入口。任一不符 → 未命中，全量重编。
+/// 编译器自体指纹、工具链标签、源指纹（依赖层序逐模块：名/路径/归一化
+/// 源文本）、优化档+gpuMode、入口。任一不符 → 未命中，全量重编。
 uint64_t mainObjKey(const std::string& tag, bool gpuMode,
                     const std::string& entry,
                     const std::vector<std::string>& order,
-                    const Session& session) {
+                    const Session& session,
+                    const std::string& targetTag) {
     uint64_t h = fnvKey(kObjCacheVer);
-    // 编译器构建指纹（本 TU 编译时刻）：编译器任何重建（MLIRGen/AOT 代码
-    // 生成行为变化）自动失效全部 obj 缓存——仅哈希源文本会让编译器升级后
-    // 仍命中旧 obj（曾致验证脚本 gpu_syms 假阴性、mlir_same 假阳性）。
-    h = fnvKey(__DATE__ " " __TIME__, h);
+    // 编译器自体指纹（自身 exe 大小+mtime，对齐 clangTag 模式）：任何 TU
+    // 重编必然重链 scourge.exe，指纹随之变化，全部 obj 缓存自动失效。
+    // 旧方案仅哈希本 TU 的 __DATE__ __TIME__——LangToLLVM/MLIRGen 单独
+    // 重编而 Builder.cpp 未动时指纹不变，旧 obj 带着过期代码生成行为继续
+    // 命中（风险台账 P2）。版本标签同入键：发布版与开发版二进制互不共享。
+    h = fnvKey(selfTag(), h);
+    h = fnvKey(kScourgeVersionLabel, h);
     h = fnvKey(tag, h);
+    h = fnvKey(targetTag, h); // 交叉目标（空 = 本机原生；对象不可跨目标复用）
     h = fnvKey(gpuMode ? "gpu" : "cpu", h);
     h = fnvKey("-O2", h);
     h = fnvKey(entry, h);
@@ -4142,9 +4397,11 @@ std::string capRuntimeC() {
 /// rt.obj 缓存键（源无关）：格式版本、工具链标签、gpuMode、运行时源文本。
 /// kRuntimeC / kGpuRuntimeC / kGpuPtxC / kGpuOpenCLC 内嵌于编译器二进制，文本
 /// 哈希入键——开发期改动运行时源自动失效，无需手工递增版本号。
-uint64_t rtObjKey(const std::string& tag, bool gpuMode) {
+uint64_t rtObjKey(const std::string& tag, bool gpuMode,
+                  const std::string& targetTag) {
     uint64_t h = fnvKey(kObjCacheVer);
     h = fnvKey(tag, h);
+    h = fnvKey(targetTag, h); // 同 mainObjKey：对象不可跨目标复用
     h = fnvKey(gpuMode ? "gpu" : "cpu", h);
     h = fnvKey(kRuntimeC, h);
     h = fnvKey(capRuntimeC(), h); // 能力门禁片段（域表随 kAllCaps 变化自动失效）
@@ -4153,6 +4410,7 @@ uint64_t rtObjKey(const std::string& tag, bool gpuMode) {
     h = fnvKey(kSysRuntimeC, h);
     h = fnvKey(kStdRuntimeC, h);
     h = fnvKey(kJsonRuntimeC, h);
+    h = fnvKey(kHttpRuntimeC, h);
     if (gpuMode) {
         h = fnvKey(kGpuRuntimeC, h);
         h = fnvKey(kGpuPtxC, h);
@@ -4183,23 +4441,138 @@ void writeObjKey(const fs::path& p, uint64_t v) {
 // ----------------------------------------------------------------------------
 
 BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
-                       bool gpuMode, bool useCache) {
+                       bool gpuMode, bool useCache, const CrossOpts& xo) {
     BuildOutcome b;
     b.exe = outPath;
     const std::string entry = inPath.stem().string();
 
+    // ---- 交叉目标归类（缓存键成分，最先确定） ----
+    // 链接库与 crt 选择跟随目标平台（而非宿主）：交叉到 Linux 与本机
+    // Linux 的产物形态一致（POSIX 交叉走 musl 静态 sysroot + ld.lld 直链）。
+    bool crossPosix = false, targetWin;
+    if (xo.target.empty()) {
+#ifdef _WIN32
+        targetWin = true;
+#else
+        targetWin = false;
+#endif
+    } else {
+        targetWin = xo.target.find("windows") != std::string::npos ||
+                    xo.target.find("mingw") != std::string::npos;
+        crossPosix = !targetWin;
+    }
+    std::string crossFlags; // 附加到每个 clang 调用（compile 阶段）
+    std::string targetTag;  // 缓存键成分（compile + link 参数合集）
+    if (!xo.target.empty()) {
+        crossFlags += " --target=" + xo.target;
+        targetTag += "t=" + xo.target;
+        if (!xo.sysroot.empty()) {
+            crossFlags += " --sysroot=" + xo.sysroot;
+            targetTag += "|s=" + xo.sysroot;
+        }
+        if (!xo.cpu.empty()) {
+            crossFlags += " -mcpu=" + xo.cpu;
+            targetTag += "|c=" + xo.cpu;
+        }
+        if (!xo.march.empty()) {
+            crossFlags += " -march=" + xo.march;
+            targetTag += "|m=" + xo.march;
+        }
+        if (crossPosix && xo.staticLink) targetTag += "|static";
+        if (gpuMode && crossPosix) {
+            b.log = "构建中止：交叉模式暂不支持 --gpu（GPU 片段依赖宿主 "
+                    "OpenCL 头与宿主 GPU；交叉目标无 GPU 语义）\n";
+            b.exitCode = 1;
+            return b;
+        }
+        if (crossPosix) {
+            // POSIX 交叉 = musl 静态链接（动态需目标侧 ld-musl 与完整
+            // libc.so，v1 不覆盖；静态产物零依赖最贴合嵌入式分发）。
+            if (!xo.staticLink) {
+                b.log = "构建中止：交叉 POSIX 目标要求 --static（musl 静态 "
+                        "sysroot；动态链接需目标侧 ld-musl，暂不覆盖）\n";
+                b.exitCode = 1;
+                return b;
+            }
+            if (xo.sysroot.empty()) {
+                b.log = "构建中止：交叉 POSIX 目标需要 --sysroot（用 "
+                        "toolchain/build_musl_sysroot.sh 产出 musl 静态 "
+                        "libc + 头文件）\n";
+                b.exitCode = 1;
+                return b;
+            }
+            fs::path sl = fs::path(xo.sysroot) / "lib";
+            std::error_code ec;
+            for (const char* f : {"libc.a", "crt1.o", "crti.o", "crtn.o"}) {
+                if (!fs::exists(sl / f, ec)) {
+                    b.log = "构建中止：sysroot 缺少 lib/" + std::string(f) +
+                            "（不完整的 musl sysroot？" + sl.string() + "）\n";
+                    b.exitCode = 1;
+                    return b;
+                }
+            }
+        }
+    }
+
     // ---- 工具链定位（SCOURGE_LLVM_BIN 可覆盖；缓存键成分，最先确定） ----
     const char* envBin = std::getenv("SCOURGE_LLVM_BIN");
     fs::path llvmBin =
-        (envBin && *envBin) ? fs::path(envBin) : fs::path("D:/LLVM/bin");
-    fs::path clang = llvmBin / "clang.exe";
+        (envBin && *envBin)
+            ? fs::path(envBin)
+            : fs::path(
+#ifdef _WIN32
+                  "D:/LLVM/bin"
+#else
+                  "/usr/bin"
+#endif
+              );
+    fs::path clang = llvmBin /
+#ifdef _WIN32
+        "clang.exe";
+#else
+        "clang";
+#endif
     {
         std::error_code ec;
         if (!fs::exists(clang, ec)) {
-            b.log = "构建中止：未找到 " + clang.string() +
-                    "（可用环境变量 SCOURGE_LLVM_BIN 指定 LLVM bin 目录）\n";
-            b.exitCode = 1;
-            return b;
+            // PATH 回退（Linux 宿主常规途径：/usr/bin/clang 在 PATH）
+            const char* pe = std::getenv("PATH");
+            bool found = false;
+            if (pe) {
+                std::string p = pe, delim =
+#ifdef _WIN32
+                    ";";
+#else
+                    ":";
+#endif
+                size_t st = 0;
+                while (st <= p.size()) {
+                    size_t en = p.find(delim, st);
+                    std::string dir =
+                        p.substr(st, en == std::string::npos ? std::string::npos
+                                                             : en - st);
+                    fs::path cand = fs::path(dir) /
+#ifdef _WIN32
+                        "clang.exe";
+#else
+                        "clang";
+#endif
+                    if (fs::exists(cand, ec)) {
+                        clang = cand;
+                        found = true;
+                        break;
+                    }
+                    if (en == std::string::npos) break;
+                    st = en + 1;
+                }
+            }
+            if (!found) {
+                b.log = "构建中止：未找到 " + clang.string() +
+                        "（可用环境变量 SCOURGE_LLVM_BIN 指定 LLVM bin "
+                        "目录）\n";
+                b.exitCode = 1;
+                return b;
+            }
         }
     }
 
@@ -4240,11 +4613,47 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         fs::create_directories(cacheDir, ec);
         cacheOk = !ec;
     }
-    const uint64_t keyMain =
-        mainObjKey(clangTag(clang), gpuMode, entry, order, session);
-    const uint64_t keyRt = rtObjKey(clangTag(clang), gpuMode);
+    const uint64_t keyMain = mainObjKey(clangTag(clang), gpuMode, entry,
+                                        order, session, targetTag);
+    const uint64_t keyRt = rtObjKey(clangTag(clang), gpuMode, targetTag);
 
     std::string toolOut;
+
+    // 链接执行器（目标感知）：交叉 POSIX = ld.lld 直链 musl 静态（clang
+    // 驱动在此路径会找 GCC 的 crtbeginT.o/-lgcc，musl sysroot 不提供）；
+    // Windows 目标 = clang 驱动（-lws2_32 -lshell32）；本机 POSIX =
+    // clang 驱动（-lpthread -ldl -lm）。
+    auto runLink = [&](const std::string& o1, const std::string& o2) -> int {
+        if (crossPosix) {
+            fs::path sl = fs::path(xo.sysroot) / "lib";
+            fs::path lld = llvmBin /
+#ifdef _WIN32
+                "lld.exe"; // lld 通用驱动：需 -flavor gnu 显式选 ELF 后端
+#else
+                "ld.lld";
+#endif
+            std::error_code ec;
+            if (!fs::exists(lld, ec)) lld = fs::path("ld.lld"); // PATH 回退
+            std::string args =
+#ifdef _WIN32
+                "-flavor gnu "
+#endif
+                "-static";
+            args += " \"" + o1 + "\" \"" + o2 + "\" \"" +
+                    (sl / "crt1.o").string() + "\" \"" +
+                    (sl / "crti.o").string() + "\" \"" +
+                    (sl / "crtn.o").string() + "\" -L\"" + sl.string() +
+                    "\" -lc -lm -lgcc -lpthread -ldl -o \"" +
+                    outPath.string() + "\"";
+            return runCapture(lld.string(), args, capPath, toolOut);
+        }
+        return runCapture(clang.string(),
+                          "\"" + o1 + "\" \"" + o2 + "\" -o \"" +
+                              outPath.string() + "\"" +
+                              (targetWin ? " -lws2_32 -lshell32"
+                                         : " -lpthread -ldl -lm"),
+                          capPath, toolOut);
+    };
 
     // ---- 缓存命中判定：双 obj 在盘且双键全等才链接（显式拒绝，无静默回退） ----
     if (cacheOk) {
@@ -4254,11 +4663,7 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         if (fs::exists(objMain, ec) && fs::exists(objRt, ec) &&
             readObjKey(cacheDir / "main.key", keyMain) &&
             readObjKey(cacheDir / "rt.key", keyRt)) {
-            int rc = runCapture(clang.string(),
-                                "\"" + objMain.string() + "\" \"" +
-                                    objRt.string() + "\" -o \"" +
-                                    outPath.string() + "\" -lws2_32 -lshell32",
-                                capPath, toolOut);
+            int rc = runLink(objMain.string(), objRt.string());
             if (rc == 0) {
                 b.fromCache = true;
                 return b;
@@ -4314,6 +4719,9 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         /* JSON 片段（0.9.4 M）：vendored jsmn（MIT）+ SgJson 适配层，复用
          * kRuntimeC 的 SgList/sg_dup/sg_panic 定义。 */
         f << kJsonRuntimeC;
+        /* HTTP 服务端片段（0.9.8）：置于 JSON 之后——复用 kNetRuntimeC 的
+         * SOCKET/recv/sg_net_sockof 与 kJsonRuntimeC 的 SgJson 构造族。 */
+        f << kHttpRuntimeC;
         if (gpuMode) {
             /* GPU 分派层：内嵌 kernel 源（Windows 分支内定义，供 JIT 加载）
              * + 后端抽象分派函数（覆盖集 op，失败回退 CPU） */
@@ -4347,8 +4755,9 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         fs::path objRt = cacheDir / "rt.obj";
         int rc = runCapture(
             clang.string(),
-            "-c -O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS \"" +
-                llPath.string() + "\" -o \"" + objMain.string() + "\"",
+            "-c -O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS" +
+                crossFlags + " \"" + llPath.string() + "\" -o \"" +
+                objMain.string() + "\"",
             capPath, toolOut);
         if (rc != 0) {
             b.log = "构建中止：clang 编译 " + llPath.string() +
@@ -4357,9 +4766,9 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
             return b;
         }
         rc = runCapture(clang.string(),
-                        "-c -O2 -D_CRT_SECURE_NO_WARNINGS \"" +
-                            rtPath.string() + "\" -o \"" + objRt.string() +
-                            "\"",
+                        "-c -O2 -D_CRT_SECURE_NO_WARNINGS" + crossFlags +
+                            " \"" + rtPath.string() + "\" -o \"" +
+                            objRt.string() + "\"",
                         capPath, toolOut);
         if (rc != 0) {
             b.log = "构建中止：clang 编译运行时失败（exit " +
@@ -4371,12 +4780,47 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         writeObjKey(cacheDir / "main.key", keyMain);
         writeObjKey(cacheDir / "rt.key", keyRt);
 
+        rc = runLink(objMain.string(), objRt.string());
+        if (rc != 0) {
+            b.log = "构建中止：链接失败（exit " + std::to_string(rc) +
+                    "）\n" + toolOut;
+            b.exitCode = 1;
+            return b;
+        }
+        return b; // exitCode 0
+    }
+
+    // ---- 交叉 POSIX：强制两步（ld.lld 直链；clang 驱动在此路径会找
+    //      GCC 的 crtbeginT.o/-lgcc，musl sysroot 不提供）。 ----
+    if (crossPosix) {
+        fs::path objMain = dir / (stem + ".obj");
+        fs::path objRt = dir / (stem + "_rt.obj");
+        int rc = runCapture(
+            clang.string(),
+            "-c -O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS" +
+                crossFlags + " \"" + llPath.string() + "\" -o \"" +
+                objMain.string() + "\"",
+            capPath, toolOut);
+        if (rc != 0) {
+            b.log = "构建中止：clang 编译 " + llPath.string() +
+                    " 失败（exit " + std::to_string(rc) + "）\n" + toolOut;
+            b.exitCode = 1;
+            return b;
+        }
         rc = runCapture(clang.string(),
-                        "\"" + objMain.string() + "\" \"" + objRt.string() +
-                            "\" -o \"" + outPath.string() + "\" -lws2_32 -lshell32",
+                        "-c -O2 -D_CRT_SECURE_NO_WARNINGS" + crossFlags +
+                            " \"" + rtPath.string() + "\" -o \"" +
+                            objRt.string() + "\"",
                         capPath, toolOut);
         if (rc != 0) {
-            b.log = "构建中止：clang 链接失败（exit " + std::to_string(rc) +
+            b.log = "构建中止：clang 编译运行时失败（exit " +
+                    std::to_string(rc) + "）\n" + toolOut;
+            b.exitCode = 1;
+            return b;
+        }
+        rc = runLink(objMain.string(), objRt.string());
+        if (rc != 0) {
+            b.log = "构建中止：链接失败（exit " + std::to_string(rc) +
                     "）\n" + toolOut;
             b.exitCode = 1;
             return b;
@@ -4387,9 +4831,10 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
     // ---- 静默降级路径：单步编译链接（原命令形，probe4 验证过） ----
     int rc = runCapture(
         clang.string(),
-        "-O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS \"" +
-            llPath.string() + "\" \"" + rtPath.string() +
-            "\" -o \"" + outPath.string() + "\" -lws2_32 -lshell32",
+        "-O2 -Wno-override-module -D_CRT_SECURE_NO_WARNINGS" + crossFlags +
+            " \"" + llPath.string() + "\" \"" + rtPath.string() +
+            "\" -o \"" + outPath.string() + "\"" +
+            (targetWin ? " -lws2_32 -lshell32" : " -lpthread -ldl -lm"),
         capPath, toolOut);
     if (rc != 0) {
         b.log = "构建中止：clang 链接失败（exit " + std::to_string(rc) +

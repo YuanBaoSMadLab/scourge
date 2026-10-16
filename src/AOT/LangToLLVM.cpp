@@ -95,6 +95,9 @@ const OpLower kLowerings[] = {
     {"lang.powf", "sg_pow_f64", "ff", "ffppi", 'f', true},
     // ---- 字符串 ----
     {"lang.str_concat", "sg_str_concat", "pp", "pp", 'p', false},
+    // 自拼接原地扩容（acc=发射点编号）与别名登记（见 kRuntimeC mark 契约）
+    {"lang.str_concat_grow", "sg_str_concat_grow", "ipp", "ipp", 'p', false},
+    {"lang.str_mark", "sg_str_mark", "p", "p", 'v', false},
     {"lang.str_repeat", "sg_str_repeat", "pi", "pippi", 'p', true},
     {"lang.str_cmp", "sg_str_cmp", "pp", "pp", 'i', false},
     {"lang.str_contains", "sg_str_contains", "pp", "pp", 'I', false},
@@ -148,6 +151,11 @@ const OpLower kLowerings[] = {
     {"lang.net_accept", "sg_net_accept", "i", "ippi", 'i', true, "net"},
     {"lang.net_set_timeout", "sg_net_set_timeout", "ii", "iippi", 'v', true,
      "net"},
+    // ---- 0.9.8 HTTP 服务端 ----
+    {"lang.net_http_read_request", "sg_net_http_read_request", "i", "ippi",
+     'p', true, "net"},
+    {"lang.net_http_write_response", "sg_net_http_write_response", "iipp",
+     "iippppi", 'i', true, "net"},
     {"lang.now", "sg_now", "", "", 'f', false, "time"},
     // ---- 打印 ----
     {"lang.print_i64", "sg_print_i64", "i", "i", 'v', false},
@@ -245,6 +253,8 @@ const OpLower kLowerings[] = {
     {"lang.list_count", "sg_list_count", "pIi", "pIi", 'i', false},
     {"lang.list_format", "sg_list_format", "p", "p", 'p', false},
     {"lang.print_list", "sg_print_list", "p", "p", 'v', false},
+    {"lang.print_dict", "sg_print_dict", "p", "p", 'v', false},
+    {"lang.str_chr_at", "sg_str_chr_at", "pi", "pippi", 'p', true},
     // ---- 系统编程内建（0.9.4 H 专项）：panic 的三个挂上下文，其余纯查询 ----
     {"lang.args", "sg_args", "", "", 'p', false, "env"},
     {"lang.env", "sg_env", "p", "p", 'p', false, "env"},
@@ -263,9 +273,11 @@ const OpLower kLowerings[] = {
     {"lang.tensor_mean", "sg_tensor_mean", "p", "pppi", 'f', true},
     {"lang.tensor_var", "sg_tensor_var", "p", "pppi", 'f', true},
     {"lang.tensor_std", "sg_tensor_std", "p", "pppi", 'f', true},
+    {"lang.tensor_median", "sg_tensor_median", "p", "pppi", 'f', true},
     {"lang.list_mean", "sg_list_mean", "p", "pppi", 'f', true},
     {"lang.list_var", "sg_list_var", "p", "pppi", 'f', true},
     {"lang.list_std", "sg_list_std", "p", "pppi", 'f', true},
+    {"lang.list_median", "sg_list_median", "p", "pppi", 'f', true},
     {"lang.list_reversed", "sg_list_reversed", "p", "p", 'p', false},
     {"lang.str_reversed", "sg_str_reversed", "p", "p", 'p', false},
     {"lang.sha256", "sg_sha256", "p", "p", 'p', false},

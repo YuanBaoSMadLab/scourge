@@ -372,8 +372,12 @@ Value Gen::genTupleLit(const TupleLit& tl) {
     // 检查器类型表消费，不存在按 List 消费的通道——零新 lang op。
     std::vector<Value> bits;
     bits.reserve(tl.elems.size());
-    for (const auto& el : tl.elems)
-        bits.push_back(Value{VK::Int, dictToBits(genExpr(*el))});
+    for (const auto& el : tl.elems) {
+        Value ev = genExpr(*el);
+        // str 元素进入位槽句柄（运行时不可辨识）→ 编译端补别名登记
+        if (ev.vk == VK::Str) emitStrMark(ev);
+        bits.push_back(Value{VK::Int, dictToBits(ev)});
+    }
     std::string arr = buildI64Array(bits);
     std::string h = fresh();
     emit(h + " = \"lang.list_new_i\"(" + intConst((int64_t)bits.size()) + ", " +

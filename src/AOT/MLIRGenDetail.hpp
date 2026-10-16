@@ -55,6 +55,10 @@ struct Value {
     bool tInt = false;   ///< VK::Tensor 时有效：true = i64 元素，false = f64
     uint8_t tRank = 0;   ///< VK::Tensor 时有效：秩（get 标量 / slice 判定用）
     uint8_t lElem = 0;   ///< VK::List 时有效：元素 VK（载荷 VK 语义）
+    /// 编译器证明的独占新缓冲（sg_str_alloc 产出且无第二引用）：存槽时免发
+    /// lang.str_mark。只在 concat/repeat/原地扩容产出点置 true；漏标只是
+    /// 过度保守（多一次登记），错标才会破坏别名不可变契约——宁漏勿错。
+    bool owned = false;
 };
 
 inline const char* mlirTy(VK vk) {
@@ -283,12 +287,14 @@ inline const char* builtinNames[] = {
     "net_connect", "net_send", "net_recv", "net_close", "net_udp_send",
     "net_http_get", "sleep",
     "net_bind", "net_accept", "net_set_timeout",
+    // 0.9.8 HTTP 服务端（与 BC::Compiler 同表）
+    "net_http_read_request", "net_http_write_response",
     // 0.9.4 H 专项：系统编程（args/env/时间/进程/信号；同表）
     "args", "env", "has_env", "set_env", "unset_env", "epoch", "epoch_ms",
     "localtime", "gmtime", "system", "spawn_wait", "signal_caught",
     "signal_reset",
     // 0.9.4 M 专项：标准库广度（统计/倒序/哈希；与 BC::Compiler 同表）
-    "mean", "var", "std", "reversed", "sha256", "crc32",
+    "mean", "var", "std", "median", "reversed", "sha256", "crc32",
     // 0.9.4 M 专项：JSON（动态 Json 值；与 BC::Compiler 同表）
     "json_decode"};
 
@@ -455,6 +461,11 @@ private:
     void storeTo(Slot& slot, Value v);
     Value loadGlobal(const std::string& module, const std::string& name);
     void storeGlobal(const GlobalSlot& g, Value v);
+    /// str 别名登记发射（lang.str_mark）：使 v 的缓冲产生第二引用前调用，
+    /// 运行时据此禁止该缓冲原地扩容（契约见 kRuntimeC sg_str_mark 注释）。
+    void emitStrMark(const Value& v) {
+        emit("\"lang.str_mark\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
+    }
 
     // ---- lang op 位置后缀 ---------------------------------------------------------
     /// lang op 的 loc 后缀：panic 上下文（file/line）由 LangToLLVM 从该
@@ -643,6 +654,8 @@ private:
     /// volatile 后缀：frameHasSetjmp_ 时返回 " volatile"（MLIR LLVM
     /// load/store 的单元属性），否则空串。
     const char* vol() const { return frameHasSetjmp_ ? " volatile" : ""; }
+    /// str 原地扩容发射点编号（跨函数单调递增；运行时登记表按此索引）。
+    int strAccCounter_ = 0;
 };
 
 } // namespace mlirgen

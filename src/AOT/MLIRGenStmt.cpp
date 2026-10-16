@@ -175,6 +175,32 @@ void Gen::genAssign(const Assign& a) {
     if (a.target->kind != Expr::Kind::Name)
         unsupported(a.target->range, "该赋值目标");
     auto& n = static_cast<const Name&>(*a.target);
+
+    // str 自拼接特化 s = s + b → lang.str_concat_grow（局部目标专属）。
+    // 无闭包保证 callee 改不到局部，RHS 含调用也安全；全局目标不特化——
+    // RHS 内调用可能经全局别名原地改掉先读入的快照，与 VM 值快照语义分叉
+    // （AugAssign 无此问题：其求值序是先 RHS 后读左值）。求值序与通用
+    // 路径一致：先读左值，后求 RHS。
+    if (a.value->kind == Expr::Kind::Binary) {
+        auto& bin = static_cast<const Binary&>(*a.value);
+        if (bin.op == "+" && bin.lhs->kind == Expr::Kind::Name &&
+            static_cast<const Name&>(*bin.lhs).name == n.name) {
+            auto lt = locals_.find(n.name);
+            if (lt != locals_.end() && lt->second.vk == VK::Str) {
+                Value l = loadSlot(lt->second);
+                Value r = genExpr(*bin.rhs);
+                std::string ssa = fresh();
+                emit(ssa + " = \"lang.str_concat_grow\"(" +
+                     intConst(strAccCounter_++) + ", " + l.ssa + ", " + r.ssa +
+                     ") : (i64, !llvm.ptr, !llvm.ptr) -> !llvm.ptr");
+                Value v{VK::Str, ssa};
+                v.owned = true; // grow 产出独占 → storeTo 免 mark
+                storeTo(lt->second, v);
+                return;
+            }
+        }
+    }
+
     Value v = genExpr(*a.value);
 
     if (curIsTop_) {
@@ -260,8 +286,17 @@ void Gen::genAugAssign(const AugAssign& a) {
     if (slotVK == VK::Str) {
         if (!(op == "+" && r.vk == VK::Str))
             unsupported(a.range, "字符串复合赋值仅支持 '+='");
+        // 自拼接原地扩容特化：acc 按发射点编号登记，运行时对独占缓冲原地
+        // 追加（perf 契约见 kRuntimeC sg_str_mark 注释）。求值序与 VM 复合
+        // 赋值一致：r 先于左值读入——r 内调用可能原地改缓冲，但左值在调用
+        // 之后才读，不存在快照过期；内容恒等由登记表+mark 保证。
         Value l = isLocal ? loadSlot(slot) : loadGlobal(curModule_, n.name);
-        Value v = genBinary("+", l, r, a.range, nullptr);
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang.str_concat_grow\"(" + intConst(strAccCounter_++) +
+             ", " + l.ssa + ", " + r.ssa +
+             ") : (i64, !llvm.ptr, !llvm.ptr) -> !llvm.ptr");
+        Value v{VK::Str, ssa};
+        v.owned = true; // grow 产出独占 → storeTo/storeGlobal 免 mark
         if (isLocal) storeTo(slot, v);
         else storeGlobal(g, v);
         return;
@@ -485,8 +520,51 @@ void Gen::genFor(const For& f) {
         cur_ = endB;
         return;
     }
+    if (src.vk == VK::Str) {
+        // str 迭代（0.9.7）：0..strlen-1 计数 + 逐轮 str_chr_at 单字节取字符
+        // （字节遍历，非码点感知——与 VM ForNext Str 分支语义一致；空串零次循环）。
+        varSlot = allocSlot(VK::Str);
+        locals_[f.var] = varSlot;
+        storeTo(counter, Value{VK::Int, zeroI64()});
+
+        int condB = newBlock(), incrB = newBlock();
+        terminate("cf.br " + blk(condB).label);
+        cur_ = condB;
+        std::string c = fresh();
+        emit(c + " = llvm.load" + vol() + " " + counter.ptr +
+             " : !llvm.ptr -> i64");
+        std::string len = fresh();
+        emit(len + " = \"lang.str_len\"(" + src.ssa + ") : (!llvm.ptr) -> i64");
+        std::string cont = fresh();
+        emit(cont + " = arith.cmpi slt, " + c + ", " + len + " : i64");
+        int bodyB = newBlock(), endB = newBlock();
+        terminate("cf.cond_br " + cont + ", " + blk(bodyB).label + ", " +
+                  blk(endB).label);
+        cur_ = bodyB;
+        std::string ch = fresh();
+        emit(ch + " = \"lang.str_chr_at\"(" + src.ssa + ", " + c +
+             ") : (!llvm.ptr, i64) -> !llvm.ptr " + opLoc());
+        storeTo(varSlot, Value{VK::Str, ch});
+        // continue 目标 = 独立增量块（与 range/List/Dict 分支一致）。
+        loopStack_.push_back(
+            LoopCtx{blk(endB).label, blk(incrB).label, tryStack_.size()});
+        genStmtList(f.body);
+        loopStack_.pop_back();
+        terminate("cf.br " + blk(incrB).label);
+        cur_ = incrB;
+        std::string c2 = fresh();
+        emit(c2 + " = llvm.load" + vol() + " " + counter.ptr +
+             " : !llvm.ptr -> i64");
+        std::string c3 = fresh();
+        emit(c3 + " = arith.addi " + c2 + ", " + oneReg() + " : i64");
+        storeTo(counter, Value{VK::Int, c3});
+        terminate("cf.br " + blk(condB).label);
+        cur_ = endB;
+        return;
+    }
     if (src.vk != VK::List)
-        unsupported(f.iter->range, "for 迭代源仅支持 range、list、dict 与 Set");
+        unsupported(f.iter->range,
+                    "for 迭代源仅支持 range、list、dict、Set 与 str");
     // List 迭代：0..len-1 计数 + 逐轮 list_get（越界不可达；与 VM ForNext
     // 的「元素 + true / 仅 false」两值语义等价——循环变量即元素）
     VK ev = static_cast<VK>(src.lElem);

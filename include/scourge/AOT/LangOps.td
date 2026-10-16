@@ -66,6 +66,11 @@ def Lang_PowfOp      : Lang_Op<"powf"> { let arguments = (ins F64:$lhs, F64:$rhs
 // 字符串运算（sg_str_* ABI）
 // ============================================================================
 def Lang_StrConcatOp     : Lang_Op<"str_concat"> { let arguments = (ins Lang_Ptr:$lhs, Lang_Ptr:$rhs); let results = (outs Lang_Ptr:$res); }
+// 自拼接原地扩容（perf）：acc 为编译期发射点编号，运行时登记独占缓冲原地
+// 追加；别名契约见 kRuntimeC sg_str_mark 注释与 docs/02 内存模型章。
+def Lang_StrConcatGrowOp : Lang_Op<"str_concat_grow"> { let arguments = (ins I64:$acc, Lang_Ptr:$lhs, Lang_Ptr:$rhs); let results = (outs Lang_Ptr:$res); }
+// str 别名登记：槽位存入非独占值/形参绑定/容器捕获编译端补发点
+def Lang_StrMarkOp       : Lang_Op<"str_mark"> { let arguments = (ins Lang_Ptr:$s); let results = (outs); }
 def Lang_StrRepeatOp     : Lang_Op<"str_repeat"> { let arguments = (ins Lang_Ptr:$str, I64:$count); let results = (outs Lang_Ptr:$res); }
 def Lang_StrCmpOp        : Lang_Op<"str_cmp"> { let arguments = (ins Lang_Ptr:$lhs, Lang_Ptr:$rhs); let results = (outs I64:$res); }
 def Lang_StrContainsOp   : Lang_Op<"str_contains"> { let arguments = (ins Lang_Ptr:$hay, Lang_Ptr:$needle); let results = (outs I32:$res); }
@@ -142,6 +147,10 @@ def Lang_SleepOp      : Lang_Op<"sleep">       { let arguments = (ins I64:$ms); 
 def Lang_NetBindOp    : Lang_Op<"net_bind">    { let arguments = (ins Lang_Ptr:$host, I64:$port); let results = (outs I64:$res); }
 def Lang_NetAcceptOp  : Lang_Op<"net_accept">  { let arguments = (ins I64:$sock); let results = (outs I64:$res); }
 def Lang_NetSetTimeoutOp : Lang_Op<"net_set_timeout"> { let arguments = (ins I64:$sock, I64:$ms); let results = (outs); }
+// 0.9.8 HTTP 服务端：读请求 → Json 动态值（EOF 零字节 → null）；写响应发
+// 全部字节。解析/组包 panic 语义下沉 sg_*（消息与 VMNet.cpp 逐字一致）。
+def Lang_NetHttpReadReqOp : Lang_Op<"net_http_read_request">  { let arguments = (ins I64:$sock); let results = (outs Lang_Ptr:$res); }
+def Lang_NetHttpWriteRespOp : Lang_Op<"net_http_write_response"> { let arguments = (ins I64:$sock, I64:$status, Lang_Ptr:$ctype, Lang_Ptr:$body); let results = (outs I64:$res); }
 
 // ============================================================================
 // 系统编程内建（0.9.4 H 专项）：命令行参数/环境变量/时间日期/进程/信号。
@@ -311,15 +320,19 @@ def Lang_ListCountOp     : Lang_Op<"list_count"> { let arguments = (ins Lang_Ptr
 // 往返补 ".0"），print(List) 与 len 同为 AOT 基础设施。
 def Lang_ListFormatOp : Lang_Op<"list_format"> { let arguments = (ins Lang_Ptr:$list); let results = (outs Lang_Ptr:$res); }
 def Lang_PrintListOp  : Lang_Op<"print_list"> { let arguments = (ins Lang_Ptr:$val); let results = (outs); }
+def Lang_PrintDictOp  : Lang_Op<"print_dict"> { let arguments = (ins Lang_Ptr:$val); let results = (outs); }
+def Lang_StrChrAtOp   : Lang_Op<"str_chr_at"> { let arguments = (ins Lang_Ptr:$s, I64:$i); let results = (outs Lang_Ptr:$res); }
 
 // 标准库广度（0.9.4 M 专项）：统计（总体方差 ÷N，恒 f64）/ 倒序 / 哈希。
 // 张量与列表各一套统计入口（运行时结构不同）；空序列 panic 双模一致。
 def Lang_TensorMeanOp : Lang_Op<"tensor_mean"> { let arguments = (ins Lang_Ptr:$t); let results = (outs F64:$res); }
 def Lang_TensorVarOp  : Lang_Op<"tensor_var">  { let arguments = (ins Lang_Ptr:$t); let results = (outs F64:$res); }
 def Lang_TensorStdOp  : Lang_Op<"tensor_std">  { let arguments = (ins Lang_Ptr:$t); let results = (outs F64:$res); }
+def Lang_TensorMedianOp : Lang_Op<"tensor_median"> { let arguments = (ins Lang_Ptr:$t); let results = (outs F64:$res); }
 def Lang_ListMeanOp   : Lang_Op<"list_mean">   { let arguments = (ins Lang_Ptr:$l); let results = (outs F64:$res); }
 def Lang_ListVarOp    : Lang_Op<"list_var">    { let arguments = (ins Lang_Ptr:$l); let results = (outs F64:$res); }
 def Lang_ListStdOp    : Lang_Op<"list_std">    { let arguments = (ins Lang_Ptr:$l); let results = (outs F64:$res); }
+def Lang_ListMedianOp : Lang_Op<"list_median"> { let arguments = (ins Lang_Ptr:$l); let results = (outs F64:$res); }
 def Lang_ListReversedOp : Lang_Op<"list_reversed"> { let arguments = (ins Lang_Ptr:$l); let results = (outs Lang_Ptr:$res); }
 def Lang_StrReversedOp  : Lang_Op<"str_reversed">  { let arguments = (ins Lang_Ptr:$s); let results = (outs Lang_Ptr:$res); }
 def Lang_Sha256Op : Lang_Op<"sha256"> { let arguments = (ins Lang_Ptr:$s); let results = (outs Lang_Ptr:$res); }
