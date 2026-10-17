@@ -1,4 +1,7 @@
-// Scourge bare runtime — fmt() segment (kBareRtFmtC)
+// ============================================================================
+//  Copyright (c) 2026 Scourge Project. All rights reserved.
+// ============================================================================
+//  Scourge bare runtime — fmt() segment (kBareRtFmtC)
 // Appended in BuilderBare.cpp after str segment, before str-tail segment.
 
 namespace scourge {

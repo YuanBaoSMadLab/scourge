@@ -1,4 +1,7 @@
-// lang op → @sg_* 运行时符号降级表（单一事实源）。
+// ============================================================================
+//  Copyright (c) 2026 Scourge Project. All rights reserved.
+// ============================================================================
+//  lang op → @sg_* 运行时符号降级表（单一事实源）。
 // 类型码：i=i64 f=f64 I=i32 b=i1 p=ptr；ret 同 + v=void。
 // externArgs = args + ppi 当 hasCtx（panic 例外：sg_panic(fn,file,line,msg)
 // 的上下文位于 msg 之前，故为 ppip）。

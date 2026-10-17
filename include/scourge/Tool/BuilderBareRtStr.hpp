@@ -1,4 +1,7 @@
-// Scourge bare runtime — str/container segment (kBareRtStrC + kBareRtStrTailC)
+// ============================================================================
+//  Copyright (c) 2026 Scourge Project. All rights reserved.
+// ============================================================================
+//  Scourge bare runtime — str/container segment (kBareRtStrC + kBareRtStrTailC)
 // Appended in BuilderBare.cpp after base segment; fmt() split out to
 // BuilderBareRtFmt.hpp.
 

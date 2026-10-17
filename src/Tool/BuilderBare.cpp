@@ -1,4 +1,7 @@
-// Scourge build 命令 — aarch64 freestanding / --board 通道
+// ============================================================================
+//  Copyright (c) 2026 Scourge Project. All rights reserved.
+// ============================================================================
+//  Scourge build 命令 — aarch64 freestanding / --board 通道
 // Frontend 复用 Session/MLIR/InProcess，差异在链接层：crt 三件套模板展开，
 // ld.lld -T 直链无 libc，objcopy 出 raw bin；白名单外符号→能力域处方诊断。
 #include "scourge/Tool/Builder.hpp"
