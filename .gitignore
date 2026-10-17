@@ -1,11 +1,8 @@
 build/
 build-rel/
-docs/
-examples/
 bin/
 release/
 dev_feedback/
-book/
 .workbuddy/
 .trae/
 
@@ -13,22 +10,56 @@ book/
 include/mlir/
 
 设计.md
+AGENTS.md
 agents.md
 
+# AI 助手本地配置与规则文件（一律不入库）
+CLAUDE.md
+GEMINI.md
+.cursorrules
+.cursor/
+.windsurf/
+.aider*
+.codeium/
+.serena/
+
+# 文档治理：仅 README 与 docs/ 语言手册入库，其余文档本地留存
+/THIRD_PARTY_NOTICES.md
+firmware/**/REVIEW.md
 
 *.exe
 *.obj
 *.o
 *.lib
+*.dll
+*.bin
+*.elf
+*.log
 *.sgbc
 *.sgi
 *.mlir
 *.ll
 *.buildcap
 
+# demos 内 AOT 构建中间产物（与 verify/stdlib 的 _rt.c 同理，产物不入库）
+demos/*/main_rt.c
+# demos 运行时落盘的报告/摘要产物（重跑即再生，不入库；out/ 内 exe 已被 *.exe 覆盖）
+demos/*/metrics-report.md
+demos/*/sales-report.md
+demos/*/sales-summary.json
+
 # 探针临时输出与打包产物（重跑/重打包即再生，不入库）
 *_tmp.txt
 *.zip
+
+# examples 就地运行产物与第三方合并源：.sg/.bind/.hpp/.ld 源码入库；
+# sqlite3.c/h 为第三方 amalgamation（体量大、有上游），不入库
+examples/sget/.d.*
+examples/sget/.sq.*
+examples/sget/.v.*
+examples/sget/sget.lock.json
+examples/**/sqlite3.c
+examples/**/sqlite3.h
 
 # 外部工具链与第三方依赖源（本地资产，不入库）
 toolchain/

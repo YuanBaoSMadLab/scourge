@@ -31,11 +31,11 @@
 namespace scourge {
 
 /// 语义版本号（MCP serverInfo 用）。
-inline constexpr std::string_view kScourgeVersion = "0.9.10";
+inline constexpr std::string_view kScourgeVersion = "0.1.0";
 
 /// 完整版本标签（CLI 输出与 .sgbc 缓存工具链标签）。
 inline constexpr std::string_view kScourgeVersionLabel =
-    "scourge 0.9.10（AOT 构建：build 命令经进程内 MLIR → LLVM IR → 原生可执行，无外部 mlir-opt/mlir-translate 依赖）";
+    "scourge 0.1.0（AOT 构建：build 命令经进程内 MLIR → LLVM IR → 原生可执行，无外部 mlir-opt/mlir-translate 依赖）";
 
 /// 编译器自体指纹：自身可执行文件路径 + 大小 + 修改时间。各级缓存键的
 /// 指纹源（原 Builder.cpp 本地助手，.sgbc 缓存接入后上移共享——单一
