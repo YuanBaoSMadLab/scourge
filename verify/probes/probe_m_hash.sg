@@ -1,0 +1,4 @@
+def main() -> int:
+    print(sha256("abc"))
+    print(crc32("123456789"))
+    return 0

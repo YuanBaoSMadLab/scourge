@@ -1,0 +1,6 @@
+# D1 探针：List 排序——.sort() 方法 vs sorted() 内建
+def main() -> int:
+    xs: List[int] = [3, 1, 2]
+    xs.sort()
+    print(xs)
+    return 0

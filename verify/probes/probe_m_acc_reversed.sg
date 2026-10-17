@@ -1,0 +1,14 @@
+# M 验收：reversed 列表（int/str/bool）与字符串（字节倒序）
+def main() -> int:
+    xs: List[int] = [1, 2, 3]
+    print(reversed(xs))
+    print(xs)
+    ss: List[str] = ["a", "b"]
+    print(reversed(ss))
+    bs: List[bool] = [True, False]
+    print(reversed(bs))
+    e: List[int] = []
+    print(reversed(e))
+    print(reversed("hello"))
+    print(reversed(""))
+    return 0

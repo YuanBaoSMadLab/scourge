@@ -1,0 +1,13 @@
+# M 验收：mean/var/std 张量+列表（总体方差；int/float/混合）
+def main() -> int:
+    t = [1.0, 2.0, 3.0, 4.0]
+    print(mean(t), var(t), std(t))
+    ti = [2, 4, 4, 4, 5, 5, 7, 9]
+    print(mean(ti), var(ti), std(ti))
+    xs: List[int] = [1, 2, 3]
+    print(mean(xs), var(xs), std(xs))
+    fs: List[float] = [2.0, 4.0]
+    print(mean(fs), var(fs), std(fs))
+    mixed: List[float] = [1, 2.5]
+    print(mean(mixed))
+    return 0

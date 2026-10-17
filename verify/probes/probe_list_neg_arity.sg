@@ -1,0 +1,4 @@
+def main() -> int:
+    xs: List[int] = [1]
+    xs.append(2, 3)
+    return 0

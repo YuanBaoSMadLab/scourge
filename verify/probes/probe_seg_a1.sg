@@ -1,0 +1,4 @@
+# 段错误二分 A1：仅声明式注解
+def main() -> int:
+    count: int
+    return 0

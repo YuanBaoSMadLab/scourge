@@ -43,7 +43,7 @@
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinDialect.h"
-#include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/BuiltinOps.h" // UnrealizedConversionCastOp（thread_spawn 桥）
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -145,6 +145,8 @@ const OpLower kLowerings[] = {
     {"lang.net_close", "sg_net_close", "i", "ippi", 'v', true, "net"},
     {"lang.net_udp_send", "sg_net_udp_send", "pip", "pipppi", 'i', true, "net"},
     {"lang.net_http_get", "sg_net_http_get", "p", "pppi", 'p', true, "net"},
+    {"lang.net_http_get_json", "sg_net_http_get_json", "p", "pppi", 'p', true,
+     "net"},
     {"lang.sleep", "sg_sleep", "i", "ippi", 'v', true, "time"},
     // ---- F/G 迭代 2：TCP 服务端与收发超时 ----
     {"lang.net_bind", "sg_net_bind", "pi", "pippi", 'i', true, "net"},
@@ -156,6 +158,36 @@ const OpLower kLowerings[] = {
      'p', true, "net"},
     {"lang.net_http_write_response", "sg_net_http_write_response", "iipp",
      "iippppi", 'i', true, "net"},
+    // ---- 真并发 M1（thread 域）：句柄 I64 不透明；全部挂 panic 上下文。
+    // thread_spawn 不走通用表——独带 sg_target 符号属性，由特写 pattern
+    // 经 func.constant 取函数地址（见 LangThreadSpawnRewrite）。
+    {"lang.thread_join", "sg_thread_join", "i", "ippi", 'v', true, "thread"},
+    {"lang.lock_new", "sg_lock_new", "", "ppi", 'i', true, "thread"},
+    {"lang.lock_acquire", "sg_lock_acquire", "i", "ippi", 'v', true,
+     "thread"},
+    {"lang.lock_release", "sg_lock_release", "i", "ippi", 'v', true,
+     "thread"},
+    {"lang.channel_new", "sg_channel_new", "", "ppi", 'i', true, "thread"},
+    {"lang.chan_send", "sg_chan_send", "ip", "ipppi", 'v', true, "thread"},
+    {"lang.chan_recv", "sg_chan_recv", "i", "ippi", 'p', true, "thread"},
+    {"lang.chan_close", "sg_chan_close", "i", "ippi", 'v', true, "thread"},
+    // ---- GUI M1+M2（gui 域，仅 AOT/Windows）：句柄 I64 不透明；全部挂
+    // panic 上下文 + sg_cap_check 查位。事件契约见 BuilderRTGui.hpp。
+    {"lang.gui_window", "sg_gui_window", "pii", "piippi", 'i', true, "gui"},
+    {"lang.gui_label", "sg_gui_label", "ipiiii", "ipiiiippi", 'i', true,
+     "gui"},
+    {"lang.gui_button", "sg_gui_button", "ipiiii", "ipiiiippi", 'i', true,
+     "gui"},
+    {"lang.gui_input", "sg_gui_input", "iiiii", "iiiiippi", 'i', true,
+     "gui"},
+    {"lang.gui_poll", "sg_gui_poll", "i", "ippi", 'p', true, "gui"},
+    {"lang.gui_set_text", "sg_gui_set_text", "ip", "ipppi", 'v', true,
+     "gui"},
+    {"lang.gui_get_text", "sg_gui_get_text", "i", "ippi", 'p', true, "gui"},
+    {"lang.gui_show", "sg_gui_show", "i", "ippi", 'v', true, "gui"},
+    {"lang.gui_hide", "sg_gui_hide", "i", "ippi", 'v', true, "gui"},
+    {"lang.gui_title", "sg_gui_title", "ip", "ipppi", 'v', true, "gui"},
+    {"lang.gui_close", "sg_gui_close", "i", "ippi", 'v', true, "gui"},
     {"lang.now", "sg_now", "", "", 'f', false, "time"},
     // ---- 打印 ----
     {"lang.print_i64", "sg_print_i64", "i", "i", 'v', false},
@@ -244,8 +276,18 @@ const OpLower kLowerings[] = {
     {"lang.str_trim_end", "sg_str_trim_end", "p", "p", 'p', false},
     {"lang.str_split", "sg_str_split", "pp", "ppppi", 'p', true},
     {"lang.str_join", "sg_str_join", "pp", "ppppi", 'p', true},
+    {"lang.list_append", "sg_list_append", "pp", "ppppi", 'v', true},
+    {"lang.list_append_i", "sg_list_append_i", "pi", "pippi", 'v', true},
+    {"lang.list_append_f", "sg_list_append_f", "pf", "pfppi", 'v', true},
+    {"lang.list_append_b", "sg_list_append_b", "pb", "pbppi", 'v', true},
+    // 下标写（批 7 前置）：单下标 + 值，ctx 追加；str 槽 sg_dup 副本
+    {"lang.list_store_i", "sg_list_store_i", "pii", "piippi", 'v', true},
+    {"lang.list_store_f", "sg_list_store_f", "pif", "pifppi", 'v', true},
+    {"lang.list_store_b", "sg_list_store_b", "pib", "pibppi", 'v', true},
+    {"lang.list_store_s", "sg_list_store_s", "pip", "pipppi", 'v', true},
     {"lang.str_replace", "sg_str_replace", "ppp", "pppppi", 'p', true},
     {"lang.str_find", "sg_str_find", "pp", "pp", 'i', false},
+    {"lang.str_slice", "sg_str_slice", "pii", "piippi", 'p', true},
     {"lang.str_index", "sg_str_index", "pp", "ppppi", 'i', true},
     {"lang.str_startswith", "sg_str_startswith", "pp", "pp", 'I', false},
     {"lang.str_endswith", "sg_str_endswith", "pp", "pp", 'I', false},
@@ -255,6 +297,34 @@ const OpLower kLowerings[] = {
     {"lang.print_list", "sg_print_list", "p", "p", 'v', false},
     {"lang.print_dict", "sg_print_dict", "p", "p", 'v', false},
     {"lang.str_chr_at", "sg_str_chr_at", "pi", "pippi", 'p', true},
+    // ---- 类型转换 / 码点 / List 归约 / 容器视图（0.9.9）：panic 消息与
+    // VM doBuiltin / callValueMethod 逐字一致；float 不判 errno（strtod
+    // 上溢 → ±inf 与 Python 同语义），int 判 ERANGE ----
+    {"lang.str_to_i64", "sg_str_to_i64", "p", "pppi", 'i', true},
+    {"lang.str_to_f64", "sg_str_to_f64", "p", "pppi", 'f', true},
+    {"lang.int_from_f64", "sg_int_from_f64", "f", "fppi", 'i', true},
+    {"lang.ord", "sg_ord", "p", "pppi", 'i', true},
+    {"lang.chr", "sg_chr", "i", "ippi", 'p', true},
+    {"lang.list_reduce_i", "sg_list_reduce_i", "Ipp", "Ippppi", 'i', true},
+    {"lang.list_reduce_f", "sg_list_reduce_f", "Ipp", "Ippppi", 'f', true},
+    {"lang.str_count", "sg_str_count", "pp", "pp", 'i', false},
+    {"lang.dict_format", "sg_dict_format", "p", "p", 'p', false},
+    {"lang.set_format", "sg_set_format", "p", "p", 'p', false},
+    {"lang.dict_keys", "sg_dict_keys", "p", "pppi", 'p', true},
+    {"lang.dict_values", "sg_dict_values", "p", "pppi", 'p', true},
+    {"lang.dict_items", "sg_dict_items", "p", "pppi", 'p', true},
+    {"lang.dict_get_or", "sg_dict_get_or", "pii", "pii", 'i', false},
+    {"lang.set_add", "sg_set_add", "pi", "pippi", 'v', true},
+    // ---- 切片 s[a:b]（0.9.9）：ABI 5 参 [base,a,b,hasA,hasB]，归一公式
+    // 与 VM Slice2 逐字一致；纯函数无 panic 上下文 ----
+    {"lang.str_nslice", "sg_str_nslice", "piiii", "piiii", 'p', false},
+    {"lang.list_nslice", "sg_list_nslice", "piiii", "piiii", 'p', false},
+    // ---- fmt 格式化（0.9.9）：f-string :spec 降糖，四层按值类型分派；
+    // 纯函数无 panic 上下文，'b' 参数 C 侧 int（sg_str_from_bool 先例） ----
+    {"lang.fmt_i64", "sg_format_i64", "ip", "ip", 'p', false},
+    {"lang.fmt_f64", "sg_format_f64", "fp", "fp", 'p', false},
+    {"lang.fmt_str", "sg_format_str", "pp", "pp", 'p', false},
+    {"lang.fmt_bool", "sg_format_bool", "bp", "bp", 'p', false},
     // ---- 系统编程内建（0.9.4 H 专项）：panic 的三个挂上下文，其余纯查询 ----
     {"lang.args", "sg_args", "", "", 'p', false, "env"},
     {"lang.env", "sg_env", "p", "p", 'p', false, "env"},
@@ -768,6 +838,11 @@ public:
             mlir::ValueRange{operands[0], operands[1], fnVal, fileVal,
                              lineVal});
 
+        // fflush 缓冲统一（0.9.9，F-4）：间接调用前冲刷宿主 stdout——外部
+        // CRT 的 stdout 缓冲与宿主独立，先落盘我方既有输出，交错序确定。
+        rewriter.create<mlir::func::CallOp>(loc, "sg_fflush_stdout",
+                                            mlir::TypeRange{},
+                                            mlir::ValueRange{});
         // 间接调用：函数指针为首操作数。CallOp 带 AttrSizedOperandSegments
         // （callee_operands / op_bundle_operands 两段），须显式给段大小——
         // 泛型 builder 不会自动分段。
@@ -810,6 +885,80 @@ public:
             rewriter.replaceOp(op, wrapped.getResults());
             return mlir::success();
         }
+        rewriter.replaceOp(op, call.getResults());
+        return mlir::success();
+    }
+
+private:
+    mutable PanicCtxCache ctxCache_;
+};
+
+// ============================================================================
+// 降级 pattern：lang.thread_spawn → sg_thread_spawn（真并发 M1 特写）
+// ----------------------------------------------------------------------------
+// sg_target 属性指向当前模块目标函数（@sg_<module>__<fn>）。函数地址获取
+// 不用 LLVM::AddressOfOp——彼时被引函数仍是 func::FuncOp（func 方言在本
+// pass 合法），AddressOf 的符号域不保证跨方言；改用 func.constant（func
+// 方言原生引用，零校验风险）+ unrealized bridge 对齐 !llvm.ptr ABI：
+// 后续 one-shot ConvertToLLVM 的 FuncToLLVM 把 func.constant 降为
+// llvm.mlir.addressof（彼时被引函数已是 llvm.func），bridge 随类型一致
+// 自行消解（管线 2h 阶段另有死 cast 清扫兜底）。
+// ============================================================================
+class LangThreadSpawnRewrite : public mlir::ConversionPattern {
+public:
+    explicit LangThreadSpawnRewrite(mlir::MLIRContext* ctx)
+        : mlir::ConversionPattern(mlir::Pattern::MatchAnyOpTypeTag{}, 5,
+                                  ctx) {}
+
+    mlir::LogicalResult
+    matchAndRewrite(mlir::Operation* op, mlir::ArrayRef<mlir::Value> operands,
+                    mlir::ConversionPatternRewriter& rewriter) const override {
+        if (op->getName().getStringRef() != "lang.thread_spawn")
+            return mlir::failure(); // 非目标 op：让位通用查表 pattern
+        auto ts =
+            op->getAttrOfType<mlir::FlatSymbolRefAttr>("sg_target");
+        if (!ts) {
+            op->emitError("lang.thread_spawn 缺少 sg_target 符号属性");
+            return mlir::failure();
+        }
+        mlir::Location loc = op->getLoc();
+        mlir::MLIRContext* ctx = op->getContext();
+        mlir::Type ptrTy = mlir::LLVM::LLVMPointerType::get(ctx);
+
+        // panic 上下文 + thread 域能力门禁（与 LangCallRewrite 同套路）。
+        mlir::Value fnVal, fileVal, lineVal;
+        if (failed(ensurePanicCtx(op, rewriter, ctxCache_, fnVal, fileVal,
+                                  lineVal)))
+            return mlir::failure();
+        rewriter.create<mlir::func::CallOp>(
+            loc, "sg_cap_check", mlir::TypeRange{},
+            mlir::ValueRange{
+                rewriter.create<mlir::arith::ConstantOp>(
+                    loc, rewriter.getI64Type(),
+                    rewriter.getI64IntegerAttr(
+                        static_cast<int64_t>(capBit(Cap::Thread)))),
+                capWhatAddr(op, rewriter, "thread_spawn"), fnVal, fileVal,
+                lineVal});
+
+        // 目标函数 → 函数指针（func.constant 原生引用 + unrealized bridge）。
+        mlir::ModuleOp mod = op->getParentOfType<mlir::func::FuncOp>()
+                                 ->getParentOfType<mlir::ModuleOp>();
+        auto callee = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+            mlir::SymbolTable::lookupSymbolIn(mod, ts.getAttr()));
+        if (!callee) {
+            op->emitError("thread_spawn 目标符号不存在：" +
+                          ts.getValue().str());
+            return mlir::failure();
+        }
+        mlir::Value fptr = rewriter.create<mlir::func::ConstantOp>(
+            loc, callee.getFunctionType(), ts);
+        auto bridge = rewriter.create<mlir::UnrealizedConversionCastOp>(
+            loc, mlir::TypeRange{ptrTy}, mlir::ValueRange{fptr});
+
+        auto call = rewriter.create<mlir::func::CallOp>(
+            loc, "sg_thread_spawn", op->getResultTypes(),
+            mlir::ValueRange{operands[0], bridge.getOutputs()[0], fnVal,
+                             fileVal, lineVal});
         rewriter.replaceOp(op, call.getResults());
         return mlir::success();
     }
@@ -869,11 +1018,12 @@ public:
 
         mlir::RewritePatternSet patterns(ctx);
         // 标量 int add/sub/mul/neg 优先 IR 内联（benefit 10，非目标 op 返回
-        // failure 自动让位）；@extern 间接调用次之（benefit 5，抢在查表
-        // LangCallRewrite 之前——kLowerings 无此 op，落到它会硬失败）；
-        // 其余 lang op 走 @sg_* 运行时调用。
+        // failure 自动让位）；@extern 间接调用与 thread_spawn 特写次之
+        //（benefit 5，抢在查表 LangCallRewrite 之前——kLowerings 均无此二
+        // op，落到它会硬失败）；其余 lang op 走 @sg_* 运行时调用。
         patterns.add<LangInlineIntRewrite>(ctx);
         patterns.add<LangExternCallRewrite>(ctx);
+        patterns.add<LangThreadSpawnRewrite>(ctx);
         patterns.add<LangCallRewrite>(ctx, gpuMode_);
         if (mlir::failed(
                 mlir::applyFullConversion(mod, target, std::move(patterns))))
@@ -914,6 +1064,17 @@ private:
             // "ipppi"。bit/what 由 LangCallRewrite 前置生成；sg_extern_resolve
             // 亦调用（ffi 域入口查位）。
             {"lang.cap_check", "sg_cap_check", "", "ipppi", 'v', false},
+            // fflush 缓冲统一（0.9.9，F-4）：外部 CRT（msvcrt.dll 等）与宿主
+            // UCRT 的 stdout 缓冲独立，重定向下全缓冲时交错序不确定——
+            // 每个 @extern 调用点前置冲刷宿主缓冲。VMExtern.cpp doExtern
+            // 同点同语义，双模一致。
+            {"lang.fflush", "sg_fflush_stdout", "", "", 'v', false},
+            // 真并发 M1：thread_spawn 特写（LangThreadSpawnRewrite）——ABI
+            // (name, fnptr, fn, file, line) = "ppppi"，fnptr 由 func.constant
+            // 取自 sg_target 指向的目标函数（bridge 后即 !llvm.ptr）。其余
+            // 8 内建在 kLowerings。
+            {"lang.thread_spawn", "sg_thread_spawn", "p", "ppppi", 'i',
+             false},
         };
         for (const OpLower& l : kExternSupport) {
             mlir::SmallVector<mlir::Type> argTys;

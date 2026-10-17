@@ -1,0 +1,10 @@
+# 验证：GPU 15-op 覆盖（max/min 归约、abs/sqrt 一元）双模一致
+def main() -> int:
+    a = [[1.0, 2.0], [3.0, 4.0]]
+    b = [[5.0, 6.0], [7.0, 8.0]]
+    c = a @ b
+    print(max(c))
+    print(min(c))
+    print(abs(-3.0))
+    print(sqrt(2.0))
+    return 0

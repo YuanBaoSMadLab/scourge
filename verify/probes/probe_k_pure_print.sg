@@ -1,0 +1,7 @@
+@pure
+def bad() -> int:
+    print("side effect")
+    return 1
+def main() -> int:
+    print(bad())
+    return 0

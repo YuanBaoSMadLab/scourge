@@ -1,0 +1,5 @@
+# 验证：未声明 capability 使用守门内建 → E5004 静态门禁
+def main() -> int:
+    s = read_text("a.txt")
+    print(s)
+    return 0

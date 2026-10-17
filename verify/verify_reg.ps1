@@ -9,8 +9,8 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $files = @("d:\Scourge\release\examples\train_linreg.sg","d:\Scourge\release\examples\attention_softmax.sg") + (Get-ChildItem "d:\Scourge\verify\ovf_*.sg" | ForEach-Object { $_.FullName }) + (Get-ChildItem "d:\Scourge\verify\dvz_*.sg" | ForEach-Object { $_.FullName })
 $fail = 0

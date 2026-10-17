@@ -29,6 +29,7 @@
 // ============================================================================
 #include "scourge/BC/VM.hpp"
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -295,6 +296,10 @@ void VM::doExtern(const FuncBC& fn, uint32_t argc) {
     }
 
     // ---- 调用 + 返回读回 ----
+    // fflush 缓冲统一（0.9.9，F-4）：调用前冲刷宿主 stdout——外部 CRT
+    // （msvcrt.dll 等）的 stdout 缓冲与宿主独立，先落盘我方既有输出，
+    // 交错序确定（AOT LangExternCallRewrite 同点同语义）。
+    std::fflush(stdout);
     reinterpret_cast<ThunkFn>(thunk)(&fr, target);
     switch (fn.externRet) {
     case 'i':

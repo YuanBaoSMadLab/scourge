@@ -1,0 +1,17 @@
+# 验证：data_ptr 地址透传 + strlen（C 侧直接读写 Scourge 内存）
+capability ffi
+
+@extern("msvcrt.dll")
+def strlen(p: int) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def memset(p: int, c: int, n: int) -> int:
+    pass
+
+def main() -> int:
+    s: str = "hello"
+    print(strlen(data_ptr(s)))
+    t = [1.0, 2.0, 3.0, 4.0]
+    print(strlen(data_ptr(t)))
+    return 0

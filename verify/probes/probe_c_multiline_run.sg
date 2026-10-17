@@ -1,0 +1,7 @@
+# C6 探针（运行版）：三引号多行字符串拼接与打印
+def main() -> int:
+    s: str = """line1
+line2"""
+    print(s)
+    print(len(s))
+    return 0

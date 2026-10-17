@@ -1,0 +1,6 @@
+capability env, proc
+def main() -> int:
+    print(len(args()))
+    print(args())
+    print(spawn_wait("cmd", ["/c", "echo", "child"]) == 0)
+    return 0

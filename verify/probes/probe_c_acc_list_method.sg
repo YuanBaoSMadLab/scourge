@@ -1,0 +1,18 @@
+# D 验收：List.contains / index / count（含 int 键遇 float 列表提升）
+def main() -> int:
+    xs: List[int] = [3, 1, 2, 1]
+    print(xs.contains(2))
+    print(xs.contains(9))
+    print(xs.index(1))
+    print(xs.count(1))
+    print(xs.count(9))
+    fs: List[float] = [1.0, 2.5]
+    print(fs.contains(1))
+    print(fs.index(2))
+    ss: List[str] = ["a", "b", "a"]
+    print(ss.contains("b"))
+    print(ss.index("a"))
+    print(ss.count("a"))
+    bs: List[bool] = [False, True, True]
+    print(bs.count(True))
+    return 0

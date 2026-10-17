@@ -50,21 +50,28 @@ add_library(scourge_core STATIC
     src/Common/ErrorCodes.cpp
     src/Common/Diagnostic.cpp
     src/Syntax/Lexer.cpp
-    src/Syntax/Parser.cpp
+    src/Syntax/Parser.cpp src/Syntax/ParserStmt.cpp
+    src/Syntax/ParserExpr.cpp src/Syntax/ParserType.cpp
     src/Sema/Type.cpp
-    src/Sema/TypeChecker.cpp
+    src/Sema/TypeChecker.cpp src/Sema/TypeCheckerSym.cpp
+    src/Sema/TypeCheckerFunc.cpp src/Sema/TypeCheckerStmt.cpp
+    src/Sema/TypeCheckerExpr.cpp src/Sema/TypeCheckerLit.cpp
+    src/Sema/TypeCheckerCall.cpp src/Sema/TypeCheckerBuiltin.cpp
     src/Interface/SgiGen.cpp
-    src/BC/Compiler.cpp
-    src/BC/VM.cpp
+    src/BC/Compiler.cpp src/BC/CompilerExpr.cpp src/BC/CompilerStmt.cpp
+    src/BC/VM.cpp src/BC/VMBuiltin.cpp src/BC/VMDispatch.cpp
+    src/BC/VMOps.cpp
     src/BC/VMMethod.cpp
     src/BC/VMNet.cpp
+    src/BC/VMThread.cpp
     src/BC/VMSys.cpp
     src/BC/VMExtern.cpp
     src/BC/VMStd.cpp
     src/BC/VMJson.cpp
     src/BC/Serialize.cpp
     src/AOT/MLIRGen.cpp src/AOT/MLIRGenFunc.cpp src/AOT/MLIRGenExpr.cpp
-    src/AOT/MLIRGenLit.cpp src/AOT/MLIRGenCall.cpp src/AOT/MLIRGenStmt.cpp
+    src/AOT/MLIRGenLit.cpp src/AOT/MLIRGenCall.cpp src/AOT/MLIRGenBuiltin.cpp
+    src/AOT/MLIRGenBuiltinSys.cpp src/AOT/MLIRGenStmt.cpp
     src/Tool/Session.cpp
     src/Tool/Runner.cpp
 )

@@ -1,0 +1,8 @@
+def main() -> int:
+    s = ""
+    for r in range(20):
+        s = ""
+        for i in range(40000):
+            s += "x"
+    print(len(s))
+    return 0

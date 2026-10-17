@@ -1,0 +1,14 @@
+# 隔离 A2：int+str 变参（无 float）
+capability ffi
+@extern("msvcrt.dll")
+def printf(fmt: str, ...) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def fflush(all: int) -> int:
+    pass
+
+def main() -> int:
+    printf("i=%d s=%s x=%lld\n", 42, "hi", -7)
+    fflush(0)
+    return 0

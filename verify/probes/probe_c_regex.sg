@@ -1,0 +1,5 @@
+# C4 探针：正则（import re 模块是否存在）
+import re
+def main() -> int:
+    print(re.match("a", "abc"))
+    return 0

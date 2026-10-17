@@ -1,0 +1,5 @@
+# O 节负例：data_ptr(List) → Sema E2001（List 非连续原生数组）
+def main() -> int:
+    lst: List[int] = [1, 2, 3]
+    p = data_ptr(lst)
+    return 0

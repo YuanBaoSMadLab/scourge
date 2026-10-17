@@ -1,0 +1,9 @@
+# 探针9：bytes / str 遍历 / 元组
+def main() -> int:
+    b: bytes = "hi"
+    print(b)
+    for ch in "abc":
+        print(ch)
+    t = (1, 2)
+    print(t)
+    return 0

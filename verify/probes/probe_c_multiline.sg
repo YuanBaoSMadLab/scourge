@@ -1,0 +1,6 @@
+# C6 探针：三引号多行字符串（非 docstring 位置）
+def main() -> int:
+    s: str = """line1
+line2"""
+    print(s)
+    return 0

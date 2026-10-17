@@ -1,0 +1,4 @@
+def main() -> int:
+    ss: List[str] = ["a"]
+    print(var(ss))
+    return 0

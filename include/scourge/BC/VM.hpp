@@ -15,11 +15,14 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace scourge {
 namespace bc {
+
+struct ThreadWorld; ///< 真并发共享世界（定义在 VMDetail.hpp；worker 间共享）
 
 struct VMOptions {
     /// print 输出回调（测试注入断言用；空 → 写 stdout）。
@@ -35,7 +38,10 @@ struct VMOptions {
 
 class VM {
 public:
-    VM(Program program, VMOptions opts = {});
+    /// world：真并发共享世界（GIL + globals + 句柄表）。空则自建（单线程
+    /// 语义与旧版逐字节一致）；thread_spawn 时传入同一 world 即共享。
+    VM(Program program, VMOptions opts = {},
+       std::shared_ptr<ThreadWorld> world = {});
 
     /// 执行程序：
     ///   1) 按 modules 顺序（依赖层序，被依赖者在前）执行各模块 <top>；
@@ -94,6 +100,22 @@ private:
     void netBuiltin(const std::string& n, std::vector<Value>& a);
     std::vector<uintptr_t> netSocks_; ///< 套接字句柄表，0 = 空槽（close 后回收）
 
+    // ---- 真并发 M1（实现分块在 VMThread.cpp；AOT BuilderRTThread.hpp 逐字
+    // 一致）：GIL（world_->gil）在 execute() 入口 RAII 获取——panic 异常展开
+    // 自动释放；阻塞内建（join/chan_recv/lock_acquire）当前线程自持自放 GIL。
+    // 句柄 = world_ 句柄表 1 起始下标，全部注册表操作都在 GIL 持有下执行
+    //（registry 无需独立锁）。worker = 同 world 的新 VM 实例（globals 共享）。
+    /// thread_* / lock_* / channel_new / chan_* 内建执行（doBuiltin 白名单分派）。
+    void threadBuiltin(const std::string& n, std::vector<Value>& a);
+    /// worker 线程入口：根调用目标函数 → execute() → 收尾（panic 即
+    /// sg_panic 格式逐字打印 + exit(1)；正常退出前隐式 join 自己 spawn 的
+    /// 全部未 join 子线程）。
+    void threadEntry(int fidx);
+    /// 隐式 join：仅 join 本实例 spawn 且尚未被显式 join 的线程（槽已空则跳过）。
+    void joinOwnThreads();
+    std::shared_ptr<ThreadWorld> world_;
+    std::vector<int64_t> myThreads_; ///< 本实例 spawn 的句柄（隐式 join 清单）
+
     // ---- 标准库广度（M 专项；实现分块在 VMStd.cpp） ---------------------------
     /// mean/var/std/reversed/sha256/crc32 内建执行（doBuiltin 白名单分派；
     /// panic 消息与数值结果与 BuilderRTStd.hpp 的 sg_* 逐字一致）。
@@ -145,14 +167,16 @@ private:
     std::vector<Frame> frames_;
     std::vector<Frame> freeFrames_; ///< 弹出帧池：复用 locals/stack 容量，深递归零堆分配
     std::vector<CatchPoint> catches_;
-    std::vector<Value> globals_; ///< 与 program_.globalNames 对齐
+    /// 与 program_.globalNames 对齐；真并发 M1 起为指向 world_->globals 的
+    /// 共享指针——worker 与主实例逐槽共享同一份全局（GIL 保证访问互斥）。
+    std::shared_ptr<std::vector<Value>> globals_;
     Value lastReturn_;           ///< 最外层帧的返回值（main 的返回值）
     Panic lastPanic_;
     int exitCode_ = 0;
     bool panicked_ = false;
-    /// random()/seed() 的 splitmix64 状态（构造即默认 0——每次运行序列确定，
-    /// 与 AOT 运行时 sg_rng_state 逐位一致，双模差分对拍可复现）。
-    uint64_t rngState_ = 0;
+    // random()/seed() 的 splitmix64 状态：真并发 M1 起挪入 ThreadWorld——
+    // 与 AOT 运行时 sg_rng_state（进程级单例）同语义，worker 与主线程共享
+    //（GIL 下访问，序列与单线程版逐位一致）。
     /// splitmix64 下一步（与 kRuntimeC 的 sg_rng_next 逐位一致的唯一实现语义）。
     uint64_t rngNext();
 };

@@ -29,7 +29,8 @@
 namespace scourge {
 
 // ---- 能力域（位掩码即 Program.capMask / SG_CAPS 布局，序列化按位存取） ----
-enum class Cap : uint8_t {
+// 底座 uint16_t：Gui=1<<8 起越出单字节（Thread=1<<7 是 uint8_t 的最后一域）。
+enum class Cap : uint16_t {
     Io = 1 << 0,     ///< 文件/目录/stdin：read_text write_text append_text
                      ///<      list_dir exists input
     Net = 1 << 1,    ///< TCP/UDP/HTTP：net_connect net_send net_recv net_close
@@ -41,6 +42,12 @@ enum class Cap : uint8_t {
     Time = 1 << 4,   ///< 挂钟：now epoch epoch_ms localtime gmtime sleep
     Signal = 1 << 5, ///< 控制台信号标志：signal_caught signal_reset
     Ffi = 1 << 6,    ///< 外部代码：@extern("dll") 与 data_ptr（数据地址导出）
+    Thread = 1 << 7, ///< 真并发 M1：thread_spawn thread_join lock_* channel_new
+                     ///<      chan_send chan_recv chan_close
+    Gui = 1 << 8,    ///< GUI M1+M2（仅 AOT/Windows）：gui_window gui_close
+                     ///<      gui_poll gui_label gui_button gui_input
+                     ///<      gui_set_text gui_get_text gui_show gui_hide
+                     ///<      gui_title
 };
 
 /// 域 → 掩码位。枚举值本身即位掩码（Ffi=1<<6=64），此处恒等透传——
@@ -57,6 +64,8 @@ constexpr std::string_view capName(Cap c) {
     case Cap::Time: return "time";
     case Cap::Signal: return "signal";
     case Cap::Ffi: return "ffi";
+    case Cap::Thread: return "thread";
+    case Cap::Gui: return "gui";
     }
     return "";
 }
@@ -64,7 +73,7 @@ constexpr std::string_view capName(Cap c) {
 /// 全域清单（capFromName 与 Builder 生成 rt.c 门禁表共用，禁止平行名单）。
 inline constexpr Cap kAllCaps[] = {Cap::Io,    Cap::Net,   Cap::Env,
                                    Cap::Proc,  Cap::Time,  Cap::Signal,
-                                   Cap::Ffi};
+                                   Cap::Ffi,   Cap::Thread, Cap::Gui};
 
 /// 解析声明中的域名；失败返回 false（Parser 报 E1005）。
 inline bool capFromName(std::string_view n, Cap& out) {
@@ -105,6 +114,19 @@ inline bool capOfBuiltin(std::string_view n, Cap& out) {
     }
     // ffi（内建名域；@extern 装饰器不经此查，直接用 Cap::Ffi）
     if (n == "data_ptr") { out = Cap::Ffi; return true; }
+    // thread（真并发 M1：线程/锁/通道；消息传递恒 str）
+    if (n == "thread_spawn" || n == "thread_join" || n == "lock_new" ||
+        n == "lock_acquire" || n == "lock_release" || n == "channel_new" ||
+        n == "chan_send" || n == "chan_recv" || n == "chan_close") {
+        out = Cap::Thread; return true;
+    }
+    // gui（GUI M1+M2：仅 AOT/Windows；VM 侧授予后调用仍固定 panic）
+    if (n == "gui_window" || n == "gui_close" || n == "gui_poll" ||
+        n == "gui_label" || n == "gui_button" || n == "gui_input" ||
+        n == "gui_set_text" || n == "gui_get_text" || n == "gui_show" ||
+        n == "gui_hide" || n == "gui_title") {
+        out = Cap::Gui; return true;
+    }
     return false;
 }
 

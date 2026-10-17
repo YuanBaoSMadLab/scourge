@@ -1,0 +1,5 @@
+# 验证：纯计算内建 sha256 / crc32（零能力）
+def main() -> int:
+    print(sha256("abc"))
+    print(crc32("abc"))
+    return 0

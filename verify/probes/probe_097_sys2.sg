@@ -1,0 +1,11 @@
+# 验证：H 系统编程内建（localtime/gmtime 用 epoch() 秒；system/signal）
+capability env, time, proc, signal
+
+def main() -> int:
+    print(len(localtime(epoch())))
+    print(len(gmtime(epoch())))
+    print(system("exit 0") == 0)
+    c = signal_caught()
+    signal_reset()
+    print(c)
+    return 0

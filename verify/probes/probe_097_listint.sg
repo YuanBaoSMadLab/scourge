@@ -1,0 +1,6 @@
+# 验证：List[int] 字面量构造现状（C-D P0-2 前置依赖 / Q4 残留）
+def main() -> int:
+    xs: List[int] = [3, 1, 2]
+    print(len(xs))
+    print(xs[0])
+    return 0

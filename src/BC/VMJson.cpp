@@ -464,7 +464,11 @@ void VM::jsonMethod(Method m, const Value& self, const std::vector<Value>& args)
         push((*j.arr)[size_t(idx)]);
         return;
     }
-    case Method::JsonGet: {
+    case Method::JsonGet:
+    // 0.9.9：CompilerExpr 名称映射统一发 Dict* 枚举值（无 base 类型信息）；
+    // Json.get（1 实参）经此前置路由转发到 JsonGet 语义（Dict.get 的 2 实参
+    // 语义在 callValueMethod 的 DictGet case，self.kind 已分域）。
+    case Method::DictGet: {
         needArgs(1);
         if (j.jk != JsonData::JK::Obj)
             panicHere(std::string("get() 仅支持对象形态（实际为 ") +
@@ -491,7 +495,8 @@ void VM::jsonMethod(Method m, const Value& self, const std::vector<Value>& args)
                       jsonKindName(j.jk) + "）");
         return;
     }
-    case Method::JsonKeys: {
+    case Method::JsonKeys:
+    case Method::DictKeys: { // 0.9.9：名称映射统一（同 get 注释）
         needArgs(0);
         if (j.jk != JsonData::JK::Obj)
             panicHere(std::string("keys() 仅支持对象形态（实际为 ") +

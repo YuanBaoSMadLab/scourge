@@ -1,0 +1,4 @@
+capability time
+def main() -> int:
+    sleep(-1)
+    return 0

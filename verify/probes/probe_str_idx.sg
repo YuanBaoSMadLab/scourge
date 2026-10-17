@@ -1,0 +1,10 @@
+def main() -> int:
+    s = "abc"
+    print(s[0])
+    print(s[-1])
+    print(s[1] + "!")
+    try:
+        print(s[5])
+    except:
+        print("caught")
+    return 0

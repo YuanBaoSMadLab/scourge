@@ -1,0 +1,6 @@
+# 验证：跨模块引用 @private 成员 → E5003
+import a.b as ab
+
+def main() -> int:
+    print(str(ab.hidden()))
+    return 0

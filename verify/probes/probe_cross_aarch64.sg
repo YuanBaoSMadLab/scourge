@@ -1,0 +1,22 @@
+# probe_cross_aarch64 — aarch64-linux-gnu 交叉产物级探针（0.9.8）
+# 产物经 llvm-readobj/objdump 验证（EM_AARCH64/静态/符号），真机待板子。
+# 双模对照：本机 build+run 输出 = 交叉产物理论输出（host CPU 执行）。
+def main() -> int:
+    print("cross")
+    print(1 + 2)
+    print(7 / 2)
+    xs: List[int] = [i * i for i in range(5)]
+    print(len(xs), xs[3])
+    ys: List[str] = ["a", "b"]
+    ys.append("c")
+    print("".join(ys))
+    s: str = ""
+    i: int = 0
+    while i < 3:
+        s = s + str(i)
+        i = i + 1
+    print(s)
+    d: Dict[str, int] = {"k": 1}
+    d["v"] = 2
+    print(len(d), "k" in d, d["v"])
+    return 0

@@ -1,0 +1,5 @@
+# 负探针：f-string 表达式为空
+def main() -> int:
+    x = 1
+    print(f"bad {}")
+    return 0

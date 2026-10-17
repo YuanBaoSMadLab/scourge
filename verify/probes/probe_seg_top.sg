@@ -1,0 +1,4 @@
+count: int
+
+def main() -> int:
+    return 0

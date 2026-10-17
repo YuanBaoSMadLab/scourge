@@ -1,0 +1,36 @@
+# 0.9.9 内建探针：int/float/ord/chr panic 路径（try 捕获后继续）
+def main() -> int:
+    try:
+        int("abc")
+    except:
+        print("p1")
+    try:
+        int("12x")
+    except:
+        print("p2")
+    try:
+        int(1.0e300)
+    except:
+        print("p3")
+    try:
+        float("xyz")
+    except:
+        print("p4")
+    try:
+        ord("ab")
+    except:
+        print("p5")
+    try:
+        ord("")
+    except:
+        print("p6")
+    try:
+        chr(1114112)
+    except:
+        print("p7")
+    try:
+        chr(55296)
+    except:
+        print("p8")
+    print("done")
+    return 0

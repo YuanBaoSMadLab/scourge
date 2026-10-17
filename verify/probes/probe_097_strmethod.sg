@@ -1,0 +1,11 @@
+# 验证：C-D 专项 str 方法现状（upper/trim/split/join/replace/find/contains）
+def main() -> int:
+    s: str = "  Hello World  "
+    print(s.upper())
+    print(s.trim())
+    print(s.split(" "))
+    print("-".join(["a", "b", "c"]))
+    print(s.replace("World", "Scourge"))
+    print(s.find("World"))
+    print(s.contains("Hello"))
+    return 0

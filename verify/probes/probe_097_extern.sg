@@ -1,0 +1,15 @@
+# 验证：@extern 标量域调用（kernel32 / msvcrt）
+capability ffi
+
+@extern("kernel32.dll")
+def lstrlenA(s: str) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def fabs(x: float) -> float:
+    pass
+
+def main() -> int:
+    print(lstrlenA("hello"))
+    print(fabs(-3.5))
+    return 0

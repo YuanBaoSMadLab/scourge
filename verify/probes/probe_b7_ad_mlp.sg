@@ -1,0 +1,89 @@
+# ============================================================================
+#  probe_b7_ad_mlp.sg — 批 7 探针：MLP 解析梯度（tape 反传）对拍有限差分
+# ----------------------------------------------------------------------------
+#  网络：2 输入 → 2 隐单元（tanh_）→ 1 输出（线性），批量 3，MSE。
+#  解析梯度：std/nn 前向 + std/autodiff.backprop。
+#  数值梯度：中心差分 (L(w+e)-L(w-e))/(2e)，e=1e-6；对全部 9 参数逐个
+#  扰动重建 tape 前向（tanh 二阶截断 O(e²)，阈值 1e-4 覆盖浮点噪声）。
+#  期望输出（恒定）：两列梯度对比 + 末行 MLP-AD OK。
+# ============================================================================
+
+import std.autodiff as ad
+import std.nn
+
+NIN = 2
+NHID = 2
+NOUT = 1
+NS = 3
+EPS = 1e-6
+
+# 固定初始参数（gather 序：W1(4) → b1(2) → W2(2) → b2(1)）
+W1: List[float] = [0.3, -0.2, 0.5, 0.1]
+b1: List[float] = [0.05, -0.05]
+W2: List[float] = [0.4, -0.6]
+b2: List[float] = [0.02]
+# 固定样本（展平：每样本 2 维）与目标
+xs: List[float] = [0.5, -0.25, 0.1, 0.8, -0.6, 0.3]
+ys: List[float] = [0.3, -0.1, 0.5]
+
+def forward_loss(T: List[float], ids1: List[int], ids2: List[int]) -> int:
+    """全批量前向到 loss 节点（参数节点 id 由调用方登记后传入）。"""
+    preds: List[int] = []
+    for s in range(NS):
+        xin: List[int] = []
+        xin.append(ad.const(T, xs[2 * s]))
+        xin.append(ad.const(T, xs[2 * s + 1]))
+        l1 = std.nn.linear_nodes(T, ids1, xin, NIN, NHID)
+        ha: List[int] = []
+        ha.append(ad.tanh_(T, l1[0]))
+        ha.append(ad.tanh_(T, l1[1]))
+        o = std.nn.linear_nodes(T, ids2, ha, NHID, NOUT)
+        preds.append(o[0])
+    return std.nn.mse(T, preds, ys, NS)
+
+def fd_seg(W: List[float], g: List[float], off: int, n: int) -> int:
+    """对参数表 W 的 [0, n) 段做中心差分对拍（W 段恒从头起；g 为全参数
+    梯度表，off 为该段在 g 中的对齐偏移）。"""
+    i = 0
+    while i < n:
+        old = W[i]
+        W[i] = old + EPS
+        Ta = ad.tape()
+        ia1 = std.nn.params(Ta, W1, b1, NIN, NHID)
+        ia2 = std.nn.params(Ta, W2, b2, NHID, NOUT)
+        la = ad.value(Ta, forward_loss(Ta, ia1, ia2))
+        W[i] = old - EPS
+        Tb = ad.tape()
+        ib1 = std.nn.params(Tb, W1, b1, NIN, NHID)
+        ib2 = std.nn.params(Tb, W2, b2, NHID, NOUT)
+        lb = ad.value(Tb, forward_loss(Tb, ib1, ib2))
+        W[i] = old
+        num = (la - lb) / (2.0 * EPS)
+        assert(abs(g[off + i] - num) < 1e-4)
+        if off + i < 2:
+            print("p" + str(off + i) + " ana=" + fmt(g[off + i], ".6f") + " num=" + fmt(num, ".6f"))
+        i = i + 1
+    return 0
+
+def main() -> int:
+    # ---- 解析梯度 ----
+    T = ad.tape()
+    ids1 = std.nn.params(T, W1, b1, NIN, NHID)
+    ids2 = std.nn.params(T, W2, b2, NHID, NOUT)
+    allids: List[int] = []
+    for i in range(NIN * NHID + NHID):
+        allids.append(ids1[i])
+    for i in range(NHID * NOUT + NOUT):
+        allids.append(ids2[i])
+    ln = forward_loss(T, ids1, ids2)
+    loss0 = ad.value(T, ln)
+    g = std.nn.gather_grads(T, ln, allids, 9)
+    print("loss=" + fmt(loss0, ".6f"))
+
+    # ---- 有限差分对拍（四段：W1/b1/W2/b2）----
+    fd_seg(W1, g, 0, 4)
+    fd_seg(b1, g, 4, 2)
+    fd_seg(W2, g, 6, 2)
+    fd_seg(b2, g, 8, 1)
+    print("MLP-AD OK")
+    return 0

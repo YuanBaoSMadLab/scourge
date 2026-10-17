@@ -1,6 +1,6 @@
 # Regression: @extern dll calls (0.9.4 H) dual-mode byte check.
-# Probe: codebuddytest/probe_h_extern.sg  (positive: kernel32/msvcrt)
-#        codebuddytest/probe_h_extern_panic.sg (negative: missing dll)
+# Probe: verify/probes/probe_h_extern.sg  (positive: kernel32/msvcrt)
+#        verify/probes/probe_h_extern_panic.sg (negative: missing dll)
 # ASCII only: Windows PowerShell 5.1 parses BOM-less ps1 as ANSI.
 # Env note: drop lowercase proxy duplicates (case-insensitive .NET dict).
 foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
@@ -10,15 +10,15 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
 
-foreach ($sg in @("d:\Scourge\codebuddytest\probe_h_extern.sg",
-                  "d:\Scourge\codebuddytest\probe_h_extern_panic.sg")) {
+foreach ($sg in @("d:\Scourge\verify\probes\probe_h_extern.sg",
+                  "d:\Scourge\verify\probes\probe_h_extern_panic.sg")) {
     $stem = [IO.Path]::GetFileNameWithoutExtension($sg)
-    Get-ChildItem "$dir" -Filter "$stem.*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem "$dir" -Filter "$stem.*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue
 
     $p1 = Start-Process -FilePath $exe -ArgumentList @("run", $sg) -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$stem.run.out" -RedirectStandardError "$dir\$stem.run.err"

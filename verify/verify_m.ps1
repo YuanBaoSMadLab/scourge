@@ -10,9 +10,9 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify"
-$cb = "d:\Scourge\codebuddytest"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify"
+$cb = "d:\Scourge\verify\probes"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
 

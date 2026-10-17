@@ -1,0 +1,5 @@
+# 探测 len 是否支持张量（预期仍 E2001，与 0.9.2 一致）
+def main() -> int:
+    t = [1, 2, 3]
+    print(str(len(t)))
+    return 0

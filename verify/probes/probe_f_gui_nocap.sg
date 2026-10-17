@@ -1,0 +1,3 @@
+# 无 capability gui 声明：gui_window 触发静态门禁 E5004（双模编译期一致
+# 拒绝；运行时门禁为纵深防御，正常路径到不了）。
+w = gui_window("x", 100, 80)

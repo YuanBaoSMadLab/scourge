@@ -1,0 +1,5 @@
+# D 现状确认：sorted() 是否支持 key 参数
+def main() -> int:
+    a: List[str] = ["cc", "a", "bbb"]
+    print(sorted(a, len))
+    return 0

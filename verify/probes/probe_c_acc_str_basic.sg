@@ -1,0 +1,11 @@
+# C1 验收：upper/lower/trim 族（ASCII 映射；非 ASCII 字节原样）
+def main() -> int:
+    print("Hello World".upper())
+    print("Hello World".lower())
+    print("héllo".upper())
+    print("  pad  ".trim())
+    print("\t\ntail  \r\n".trim_end())
+    print("  head".trim_start())
+    print("".trim())
+    print("   ".trim() == "")
+    return 0

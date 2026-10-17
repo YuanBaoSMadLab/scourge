@@ -1,0 +1,8 @@
+# 探针4：List 元素添加方法
+def main() -> int:
+    xs: List[int] = []
+    xs.append(1)
+    xs.append(2)
+    print(len(xs))
+    print(xs[0])
+    return 0

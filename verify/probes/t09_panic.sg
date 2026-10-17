@@ -1,0 +1,75 @@
+# ============================================================================
+#  t09_panic.sg — panic 与 try/except：运行时错误的捕获与传播
+#  对应章节：第9章 错误处理
+# ============================================================================
+
+def boom(a: int, b: int) -> int:
+    return a // b
+
+def safeDiv(a: int, b: int) -> int:
+    try:
+        return a // b
+    except:
+        return -1
+
+def nestedTry() -> str:
+    try:
+        try:
+            x = 1 // 0
+            print("unreachable-inner")
+        except:
+            print("inner-caught")
+        y = 1 // 0
+        print("unreachable-outer")
+    except:
+        return "outer-caught"
+    return "no-panic"
+
+def outOfBounds(xs: List[str], i: int) -> str:
+    try:
+        return xs[i]
+    except:
+        return "-999"
+
+def assertDemo(n: int) -> int:
+    assert n >= 0, "n 必须非负"
+    return n * 2
+
+def assertCaught(n: int) -> int:
+    try:
+        return assertDemo(n)
+    except:
+        return -1
+
+def overflow() -> int:
+    big = 9223372036854775807
+    return big + 1
+
+def overflowCaught() -> int:
+    try:
+        return overflow()
+    except:
+        return 0
+
+def main() -> int:
+    print(safeDiv(10, 3))
+    print(safeDiv(10, 0))
+    print(nestedTry())
+    xs: List[str] = ["a", "b", "c"]
+    print(outOfBounds(xs, 1))
+    print(outOfBounds(xs, 9))
+    print(assertCaught(21))
+    print(assertCaught(-1))
+    print(overflowCaught())
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# 3
+# -1
+# inner-caught
+# outer-caught
+# b
+# -999
+# 42
+# -1
+# 0

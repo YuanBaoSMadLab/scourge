@@ -1,0 +1,8 @@
+# 探针7：Option 构造与使用
+def find(xs: List[str], t: str) -> Option[int]:
+    return some(1)
+
+def main() -> int:
+    o: Option[int] = none()
+    print(o.is_some())
+    return 0

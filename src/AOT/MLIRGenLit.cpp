@@ -8,7 +8,7 @@
 //  编解码 dictToBits/dictFromBits）、元组字面量（0.9.6：位槽 + list_new_i）。
 //  内部分块文件，共享模型见 MLIRGenDetail.hpp。
 // ============================================================================
-#include "MLIRGenDetail.hpp"
+#include "scourge/AOT/MLIRGenDetail.hpp"
 
 namespace scourge {
 namespace aot {
@@ -362,6 +362,158 @@ Value Gen::genListLit(const ListLit& ls) {
 }
 
 // ----------------------------------------------------------------------------
+// 列表推导式（0.9.8）：空列表句柄 + 计数循环 + 条件 append。迭代源限
+// range/List/str（与检查器同拒）；循环骨架与 genFor 同构（计数器槽 + 独立
+// 增量块），body 换为「过滤条件 + list_append_*」。append 的列表句柄每轮
+// 从槽重载（循环内 SSA 唯一性）；元素 int→float 提升与 append 成员方法同规。
+// ----------------------------------------------------------------------------
+
+Value Gen::genListComp(const ListComp& c) {
+    Value src = genExpr(*c.iter);
+    if (src.vk != VK::Range && src.vk != VK::Str && src.vk != VK::List)
+        unsupported(c.iter->range,
+                    "推导式迭代源仅支持 range、List 或 str");
+    // 结果元素 VK：检查器注解表（List 参数 0）
+    VK ev = VK::Bad;
+    if (auto rt = types_.find(&c);
+        rt != types_.end() && rt->second->kind == Type::Kind::List &&
+        !rt->second->params.empty())
+        ev = vkOfType(rt->second->params[0]);
+    if (ev != VK::Int && ev != VK::Float && ev != VK::Bool && ev != VK::Str)
+        unsupported(c.range, "推导式仅支持标量元素列表");
+
+    Slot counter = allocSlot(VK::Int);
+    Slot listSlot = allocSlot(VK::List);
+    std::string lh = fresh();
+    emit(lh + " = \"lang.list_empty\"() : () -> !llvm.ptr");
+    storeTo(listSlot, Value{VK::List, lh, false, 0, static_cast<uint8_t>(ev)});
+
+    Slot varSlot;
+    if (src.vk == VK::Range) {
+        varSlot = allocSlot(VK::Int);
+        locals_[c.var] = varSlot;
+        storeTo(counter, Value{VK::Int, zeroI64()});
+    } else if (src.vk == VK::Str) {
+        varSlot = allocSlot(VK::Str);
+        locals_[c.var] = varSlot;
+        storeTo(counter, Value{VK::Int, zeroI64()});
+    } else {
+        VK sev = static_cast<VK>(src.lElem);
+        if (sev != VK::Int && sev != VK::Float && sev != VK::Bool &&
+            sev != VK::Str)
+            unsupported(c.iter->range, "该元素类型的列表推导式");
+        varSlot = allocSlot(sev);
+        locals_[c.var] = varSlot;
+        storeTo(counter, Value{VK::Int, zeroI64()});
+    }
+
+    int condB = newBlock(), incrB = newBlock();
+    terminate("cf.br " + blk(condB).label);
+    cur_ = condB;
+    std::string cnt = fresh();
+    emit(cnt + " = llvm.load" + vol() + " " + counter.ptr +
+         " : !llvm.ptr -> i64");
+    // 轮次上限：按迭代源取长度（range=源上界 / str=list_len）
+    std::string bound;
+    if (src.vk == VK::Range) {
+        bound = src.ssa;
+    } else if (src.vk == VK::Str) {
+        bound = fresh();
+        emit(bound + " = \"lang.str_len\"(" + src.ssa +
+             ") : (!llvm.ptr) -> i64");
+    } else {
+        bound = fresh();
+        emit(bound + " = \"lang.list_len\"(" + src.ssa +
+             ") : (!llvm.ptr) -> i64");
+    }
+    std::string cont = fresh();
+    emit(cont + " = arith.cmpi slt, " + cnt + ", " + bound + " : i64");
+    int bodyB = newBlock(), endB = newBlock();
+    terminate("cf.cond_br " + cont + ", " + blk(bodyB).label + ", " +
+              blk(endB).label);
+    cur_ = bodyB;
+    // 循环变量落槽：range=计数器原值 / str=str_chr_at / List=list_get_*
+    if (src.vk == VK::Range) {
+        storeTo(varSlot, Value{VK::Int, cnt});
+    } else if (src.vk == VK::Str) {
+        std::string ch = fresh();
+        emit(ch + " = \"lang.str_chr_at\"(" + src.ssa + ", " + cnt +
+             ") : (!llvm.ptr, i64) -> !llvm.ptr " + opLoc());
+        storeTo(varSlot, Value{VK::Str, ch});
+    } else {
+        VK sev = static_cast<VK>(src.lElem);
+        const char* getSym = sev == VK::Int   ? "lang.list_get_i"
+                             : sev == VK::Float ? "lang.list_get_f"
+                             : sev == VK::Bool  ? "lang.list_get_b"
+                                                : "lang.list_get_s";
+        const char* elemTy = sev == VK::Int   ? "i64"
+                             : sev == VK::Float ? "f64"
+                             : sev == VK::Bool  ? "i1"
+                                                : "!llvm.ptr";
+        std::string el = fresh();
+        emit(el + " = \"" + getSym + "\"(" + src.ssa + ", " + cnt +
+             ") : (!llvm.ptr, i64) -> " + elemTy);
+        storeTo(varSlot, Value{sev, el});
+    }
+    // append 发射（cond/无 cond 两路径共用）：重载列表句柄 + 元素 +
+    // list_append_*（void 调用，无 SSA 绑定）。
+    auto emitAppend = [&] {
+        std::string lv = fresh();
+        emit(lv + " = llvm.load" + vol() + " " + listSlot.ptr +
+             " : !llvm.ptr -> !llvm.ptr");
+        Value v = genExpr(*c.elem);
+        if (ev == VK::Float && v.vk == VK::Int) v = promoteF64(v);
+        switch (ev) {
+        case VK::Str:
+            if (v.vk != VK::Str)
+                unsupported(c.elem->range, "append() 实参类型与列表元素不符");
+            emit("\"lang.list_append\"(" + lv + ", " + v.ssa +
+                 ") : (!llvm.ptr, !llvm.ptr) -> () " + opLoc());
+            break;
+        case VK::Int:
+            emit("\"lang.list_append_i\"(" + lv + ", " + v.ssa +
+                 ") : (!llvm.ptr, i64) -> () " + opLoc());
+            break;
+        case VK::Float:
+            emit("\"lang.list_append_f\"(" + lv + ", " + v.ssa +
+                 ") : (!llvm.ptr, f64) -> () " + opLoc());
+            break;
+        case VK::Bool:
+            emit("\"lang.list_append_b\"(" + lv + ", " + v.ssa +
+                 ") : (!llvm.ptr, i1) -> () " + opLoc());
+            break;
+        default:
+            unsupported(c.range, "推导式仅支持标量元素列表");
+        }
+    };
+    // 过滤条件：false → 跳过 append（两个后继块都汇入独立增量块）
+    if (c.cond) {
+        Value cv = genExpr(*c.cond);
+        int useB = newBlock(), skipB = newBlock();
+        terminate("cf.cond_br " + cv.ssa + ", " + blk(useB).label + ", " +
+                  blk(skipB).label);
+        cur_ = useB;
+        emitAppend();
+        terminate("cf.br " + blk(incrB).label);
+        cur_ = skipB;
+        terminate("cf.br " + blk(incrB).label);
+    } else {
+        emitAppend();
+        terminate("cf.br " + blk(incrB).label);
+    }
+    cur_ = incrB;
+    std::string c2 = fresh();
+    emit(c2 + " = llvm.load" + vol() + " " + counter.ptr +
+         " : !llvm.ptr -> i64");
+    std::string c3 = fresh();
+    emit(c3 + " = arith.addi " + c2 + ", " + oneReg() + " : i64");
+    storeTo(counter, Value{VK::Int, c3});
+    terminate("cf.br " + blk(condB).label);
+    cur_ = endB;
+    return loadSlot(listSlot);
+}
+
+// ----------------------------------------------------------------------------
 // 元组（0.9.6）：异构定长不可变——dict 位槽 ABI + i64 List 同构句柄。
 // ----------------------------------------------------------------------------
 
@@ -370,10 +522,21 @@ Value Gen::genTupleLit(const TupleLit& tl) {
     // 嵌套元组句柄 ptrtoint / None 恒 0）后经 lang.list_new_i 构造堆句柄。
     // 运行时与 i64 List 同构，但仅元组专属路径（下标/相等/repr/len）按
     // 检查器类型表消费，不存在按 List 消费的通道——零新 lang op。
+    // Tuple 上下文对齐（批3①）：类型表位 = 变量注解位——float 位上的
+    // int 元素先 sitofp 再入槽（与 List 元素对齐同模式），杜绝 int 位型
+    // 存槽、按注解 float 位读型的错位。
+    auto tt = types_.find(&tl);
+    bool aligned = tt != types_.end() && tt->second &&
+                   tt->second->kind == Type::Kind::Tuple &&
+                   tt->second->params.size() == tl.elems.size();
     std::vector<Value> bits;
     bits.reserve(tl.elems.size());
-    for (const auto& el : tl.elems) {
-        Value ev = genExpr(*el);
+    for (size_t i = 0; i < tl.elems.size(); ++i) {
+        Value ev = genExpr(*tl.elems[i]);
+        if (aligned &&
+            tt->second->params[i]->kind == Type::Kind::Float &&
+            ev.vk == VK::Int)
+            ev = promoteF64(ev);
         // str 元素进入位槽句柄（运行时不可辨识）→ 编译端补别名登记
         if (ev.vk == VK::Str) emitStrMark(ev);
         bits.push_back(Value{VK::Int, dictToBits(ev)});

@@ -1,0 +1,12 @@
+# 验证：io 域内建（read_text/write_text/append_text/exists/list_dir/input）
+capability io
+
+def main() -> int:
+    write_text("probe_097_tmp.txt", "hello")
+    print(read_text("probe_097_tmp.txt"))
+    append_text("probe_097_tmp.txt", "world")
+    print(read_text("probe_097_tmp.txt"))
+    print(exists("probe_097_tmp.txt"))
+    print(exists("probe_097_nope.txt"))
+    print(len(list_dir(".")) > 0)
+    return 0

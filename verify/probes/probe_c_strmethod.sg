@@ -1,0 +1,5 @@
+# C1 探针：str 成员方法现状（upper/lower/trim/split/join/replace/find/startswith）
+def main() -> int:
+    s: str = "Hello World"
+    print(s.upper())
+    return 0

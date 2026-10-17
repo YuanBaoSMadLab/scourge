@@ -1,0 +1,5 @@
+async def go() -> int:
+    return 1
+def main() -> int:
+    print(await go())
+    return 0

@@ -1,0 +1,12 @@
+# Q15 探针：str 遍历（字节语义，与 str 方法同域——非码点感知）
+def main() -> int:
+    for ch in "abc":
+        print(ch)
+    s = "hello"
+    acc = ""
+    for c in s:
+        acc = c + acc
+    print(acc)
+    for x in "":
+        print("never")
+    return 0

@@ -1,12 +1,13 @@
 // ============================================================================
 //  Copyright (c) 2026 Scourge Project. All rights reserved.
-//  Scourge 编译器 — AOT MLIR 生成器 · 调用与内建
+//  Scourge 编译器 — AOT MLIR 生成器 · 调用与 @extern
 // ----------------------------------------------------------------------------
-//  genCall（内建/本模块/跨模块三分派）与 genBuiltinCall（print/str/len/
-//  数学内建/张量内建等全表分派）。内部分块文件，共享模型见
-//  MLIRGenDetail.hpp。
+//  职责边界：genCall（内建/本模块/跨模块三分派）、genCrossCall/foldModuleKey
+//  （跨模块点分路径折叠）与 genExternCall（@extern 变参 ABI 落地）。
+//  内建全表分派见 MLIRGenBuiltin.cpp；共享模型见 MLIRGenDetail.hpp
+//  （拆分纪律见 AGENTS.md）。
 // ============================================================================
-#include "MLIRGenDetail.hpp"
+#include "scourge/AOT/MLIRGenDetail.hpp"
 
 namespace scourge {
 namespace aot {
@@ -123,16 +124,18 @@ Value Gen::genCall(const Call& c) {
     }
     if (c.callee->kind == Expr::Kind::Attr) {
         auto& at = static_cast<const Attr&>(*c.callee);
-        // Result 消费方法（is_ok / unwrap / unwrap_or）：载荷 VK 由检查器
-        // 类型表（ExprTypeMap）反查，self 先 args 后（与 VM CallMethod 一致）。
+        // Result/Option 消费方法（is_ok|is_some / unwrap / unwrap_or）：
+        // Option ≡ Result 同构（批3），载荷 VK 由检查器类型表（ExprTypeMap）
+        // 反查，self 先 args 后（与 VM CallMethod 一致）。
         if (auto bt = types_.find(at.base.get());
             bt != types_.end() && bt->second &&
-            bt->second->kind == Type::Kind::Result) {
+            (bt->second->kind == Type::Kind::Result ||
+             bt->second->kind == Type::Kind::Option)) {
             const TypePtr& rt = bt->second;
             VK pv = rt->params.empty() ? VK::Bad : vkOfType(rt->params[0]);
-            if (at.name == "is_ok") {
+            if (at.name == "is_ok" || at.name == "is_some") {
                 if (!c.args.empty())
-                    unsupported(c.range, "is_ok() 不需要参数");
+                    unsupported(c.range, "is_ok()/is_some() 不需要参数");
                 Value self = genExpr(*at.base);
                 std::string ssa = fresh();
                 emit(ssa + " = \"lang.result_is_ok\"(" + self.ssa +
@@ -259,6 +262,29 @@ Value Gen::genCall(const Call& c) {
                      opLoc());
                 return Value{VK::Str, ssa};
             }
+            if (nm == "slice") {
+                needArgs(2);
+                Value a = genExpr(*c.args[0]);
+                Value b = genExpr(*c.args[1]);
+                if (a.vk != VK::Int || b.vk != VK::Int)
+                    unsupported(c.args[0]->range,
+                                "slice() 参数必须是 int");
+                std::string ssa = fresh();
+                emit(ssa + " = \"lang.str_slice\"(" + self.ssa + ", " +
+                     a.ssa + ", " + b.ssa +
+                     ") : (!llvm.ptr, i64, i64) -> !llvm.ptr " + opLoc());
+                return Value{VK::Str, ssa};
+            }
+            if (nm == "count") {
+                // 0.9.9：子串非重叠计数（空子串 = len+1，与 VM/Python 一致）；
+                // 纯函数无 panic（kLowerings 无上下文条目）。
+                needArgs(1);
+                Value sub = strArg(0);
+                std::string ssa = fresh();
+                emit(ssa + " = \"lang.str_count\"(" + self.ssa + ", " +
+                     sub.ssa + ") : (!llvm.ptr, !llvm.ptr) -> i64");
+                return Value{VK::Int, ssa};
+            }
         }
         // List 成员方法（0.9.4）：contains 复用 list_in_*（与 'in' 同降级）；
         // index/count 走 64 位槽 tag ABI（dict 键编码一致，运行时按 etag 匹配）。
@@ -314,6 +340,50 @@ Value Gen::genCall(const Call& c) {
                     unsupported(c.range, "该元素类型的 contains()");
                 }
             }
+            if (at.name == "append") {
+                // List.append(v)：原地尾插，返回 None（非纯）。元素域
+                // str/int/float/bool（0.9.8 标量全域）——C 运行时按 etag
+                // 分四入口；float 列表收 int 实参先提升（与 'in'/contains
+                // 同一唯一放宽）；空列表首插定型 etag（运行时内部簿记）。
+                if (c.args.size() != 1)
+                    unsupported(c.range, "append() 参数个数");
+                Value v = genExpr(*c.args[0]);
+                std::string ssa = fresh();
+                switch (evk) {
+                case VK::Str:
+                    if (v.vk != VK::Str)
+                        unsupported(c.args[0]->range,
+                                    "append() 实参类型与列表元素不符");
+                    emit("\"lang.list_append\"(" + self.ssa + ", " + v.ssa +
+                         ") : (!llvm.ptr, !llvm.ptr) -> () " + opLoc());
+                    break;
+                case VK::Int:
+                    if (v.vk != VK::Int)
+                        unsupported(c.args[0]->range,
+                                    "append() 实参类型与列表元素不符");
+                    emit("\"lang.list_append_i\"(" + self.ssa + ", " + v.ssa +
+                         ") : (!llvm.ptr, i64) -> () " + opLoc());
+                    break;
+                case VK::Float:
+                    if (v.vk == VK::Int) v = promoteF64(v);
+                    else if (v.vk != VK::Float)
+                        unsupported(c.args[0]->range,
+                                    "append() 实参类型与列表元素不符");
+                    emit("\"lang.list_append_f\"(" + self.ssa + ", " + v.ssa +
+                         ") : (!llvm.ptr, f64) -> () " + opLoc());
+                    break;
+                case VK::Bool:
+                    if (v.vk != VK::Bool)
+                        unsupported(c.args[0]->range,
+                                    "append() 实参类型与列表元素不符");
+                    emit("\"lang.list_append_b\"(" + self.ssa + ", " + v.ssa +
+                         ") : (!llvm.ptr, i1) -> () " + opLoc());
+                    break;
+                default:
+                    unsupported(c.range, "append() 仅支持标量元素列表");
+                }
+                return Value{VK::None, ""};
+            }
             if (at.name == "index" || at.name == "count") {
                 if (c.args.size() != 1)
                     unsupported(c.range, at.name + "() 参数个数");
@@ -357,6 +427,77 @@ Value Gen::genCall(const Call& c) {
                      "\"(" + self.ssa + ", " + i32Const(tag) + ", " + bits +
                      ") : (!llvm.ptr, i32, i64) -> i64 " + opLoc());
                 return Value{VK::Int, ssa};
+            }
+        }
+        // Dict 成员方法（0.9.9）：keys/values 只读视图 + items 元组化 +
+        // get 带缺省，经 lang.dict_* 降级（kLowerings）；panic 消息由运行时
+        // sg_dict_* 提供（与 VM callValueMethod 逐字一致）。键/值标量域
+        // （检查器限域），64 位槽 ABI 与 d[k]=v 一致（int 对 float 域先提升）。
+        if (auto bt = types_.find(at.base.get());
+            bt != types_.end() && bt->second &&
+            bt->second->kind == Type::Kind::Dict &&
+            bt->second->params.size() >= 2) {
+            Value self = genExpr(*at.base);
+            const std::string& nm = at.name;
+            VK kvk = vkOfType(bt->second->params[0]);
+            VK vvk = vkOfType(bt->second->params[1]);
+            if (nm == "keys" || nm == "values") {
+                if (c.args.size() != 0)
+                    unsupported(c.range, nm + "() 参数个数");
+                std::string ssa = fresh();
+                emit(ssa + " = \"lang.dict_" +
+                     (nm == "keys" ? std::string("keys") : std::string("values")) +
+                     "\"(" + self.ssa + ") : (!llvm.ptr) -> !llvm.ptr " +
+                     opLoc());
+                return Value{VK::List, ssa, false, 0,
+                             static_cast<uint8_t>(nm == "keys" ? kvk : vvk)};
+            }
+            if (nm == "items") {
+                if (c.args.size() != 0)
+                    unsupported(c.range, "items() 参数个数");
+                std::string ssa = fresh();
+                emit(ssa + " = \"lang.dict_items\"(" + self.ssa +
+                     ") : (!llvm.ptr) -> !llvm.ptr " + opLoc());
+                // 元素 VK 静态记 Tuple：2 元组句柄位存 i64 列表槽，
+                // 下标/for-in 侧 inttoptr 还原（与 genTupleLit 同形态）
+                return Value{VK::List, ssa, false, 0,
+                             static_cast<uint8_t>(VK::Tuple)};
+            }
+            if (nm == "get") {
+                // 缺键取缺省值不 panic（VM DictGet 同哲学）；键/值按
+                // 注解域提升位型，返回值按值域还原。
+                if (c.args.size() != 2)
+                    unsupported(c.range, "get() 参数个数");
+                Value k = genExpr(*c.args[0]);
+                if (kvk == VK::Float && k.vk == VK::Int) k = promoteF64(k);
+                else if (k.vk != kvk)
+                    unsupported(c.args[0]->range, "get() 键类型与字典不符");
+                Value dv = genExpr(*c.args[1]);
+                if (vvk == VK::Float && dv.vk == VK::Int)
+                    dv = promoteF64(dv);
+                else if (dv.vk != vvk)
+                    unsupported(c.args[1]->range,
+                                "get() 缺省值类型与字典值不符");
+                std::string ssa = fresh();
+                emit(ssa + " = \"lang.dict_get_or\"(" + self.ssa + ", " +
+                     dictToBits(k) + ", " + dictToBits(dv) +
+                     ") : (!llvm.ptr, i64, i64) -> i64 " + opLoc());
+                return dictFromBits(vvk, ssa);
+            }
+        }
+        // Set 成员方法（0.9.9）：add 原地插入返回 None（与 VM SetAdd 一致；
+        // NaN panic 消息由运行时 sg_set_add 逐字提供）。
+        if (auto bt = types_.find(at.base.get());
+            bt != types_.end() && bt->second &&
+            bt->second->kind == Type::Kind::Set) {
+            Value self = genExpr(*at.base);
+            if (at.name == "add") {
+                if (c.args.size() != 1)
+                    unsupported(c.range, "add() 参数个数");
+                Value v = genExpr(*c.args[0]);
+                emit("\"lang.set_add\"(" + self.ssa + ", " + dictToBits(v) +
+                     ") : (!llvm.ptr, i64) -> () " + opLoc());
+                return Value{VK::None, ""};
             }
         }
         // Json 成员方法（0.9.4 M 专项）：动态 JSON 值只读面，经 lang.json_*
@@ -457,797 +598,6 @@ Value Gen::genCall(const Call& c) {
         unsupported(c.range, "Result 等方法调用（is_ok / unwrap / unwrap_or）");
     }
     unsupported(c.range, "该调用形式");
-}
-
-// ----------------------------------------------------------------------------
-// 元组 repr（0.9.6）：与 VM toString(Tuple, repr=true) 逐字一致
-// ----------------------------------------------------------------------------
-
-Value Gen::genTupleRepr(Value tuple, const TypePtr& ty, const SourceRange& r) {
-    // "(" + 各元素 repr（", " 连接）+ 单元素尾逗号 + ")"。元素按类型表
-    // params 静态 VK 分派：str 走 lang.str_escape（带引号转义，repr 模式），
-    // None 恒 "None"，嵌套元组递归；元素经 genTupleElem 位槽读取。
-    const auto& ps = ty->params;
-    auto cat = [&](const Value& a, const Value& b) -> Value {
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.str_concat\"(" + a.ssa + ", " + b.ssa +
-             ") : (!llvm.ptr, !llvm.ptr) -> !llvm.ptr");
-        return Value{VK::Str, ssa};
-    };
-    auto reprOf = [&](const Value& e, const TypePtr& et) -> Value {
-        std::string ssa;
-        switch (e.vk) {
-        case VK::Int:
-            ssa = fresh();
-            emit(ssa + " = \"lang.str_from_i64\"(" + e.ssa +
-                 ") : (i64) -> !llvm.ptr");
-            return Value{VK::Str, ssa};
-        case VK::Float:
-            ssa = fresh();
-            emit(ssa + " = \"lang.str_from_f64\"(" + e.ssa +
-                 ") : (f64) -> !llvm.ptr");
-            return Value{VK::Str, ssa};
-        case VK::Bool:
-            ssa = fresh();
-            emit(ssa + " = \"lang.str_from_bool\"(" + e.ssa +
-                 ") : (i1) -> !llvm.ptr");
-            return Value{VK::Str, ssa};
-        case VK::Str:
-            ssa = fresh();
-            emit(ssa + " = \"lang.str_escape\"(" + e.ssa +
-                 ") : (!llvm.ptr) -> !llvm.ptr");
-            return Value{VK::Str, ssa};
-        case VK::None:
-            return strConst("None");
-        case VK::Tuple:
-            return genTupleRepr(e, et, r); // 嵌套元组递归
-        default:
-            unsupported(r, "该元素类型的元组 repr");
-        }
-    };
-    Value acc = strConst("(");
-    for (size_t k = 0; k < ps.size(); ++k) {
-        if (k) acc = cat(acc, strConst(", "));
-        acc = cat(acc, reprOf(genTupleElem(tuple, (int64_t)k, ps[k], r), ps[k]));
-    }
-    if (ps.size() == 1) acc = cat(acc, strConst(","));
-    return cat(acc, strConst(")"));
-}
-
-Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
-    auto need = [&](size_t want) {
-        if (c.args.size() != want) unsupported(c.range, "内建 " + name + "() 参数个数");
-    };
-
-    if (name == "print") {
-        std::vector<Value> args;
-        for (const auto& a : c.args) args.push_back(genExpr(*a));
-        for (size_t k = 0; k < args.size(); ++k) {
-            if (k) emit("\"lang.print_space\"() : () -> ()");
-            const Value& v = args[k];
-            switch (v.vk) {
-            case VK::Int:
-                emit("\"lang.print_i64\"(" + v.ssa + ") : (i64) -> ()");
-                break;
-            case VK::Float:
-                emit("\"lang.print_f64\"(" + v.ssa + ") : (f64) -> ()");
-                break;
-            case VK::Bool:
-                emit("\"lang.print_bool\"(" + v.ssa + ") : (i1) -> ()");
-                break;
-            case VK::Str:
-                emit("\"lang.print_str\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
-                break;
-            case VK::None:
-                emit("\"lang.print_none\"() : () -> ()");
-                break;
-            case VK::Tensor:
-                emit("\"lang.print_tensor\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
-                break;
-            case VK::List:
-                // 0.9.4：repr 格式与 VM stringify 逐字一致（sg_list_format）
-                emit("\"lang.print_list\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
-                break;
-            case VK::Dict: {
-                // 0.9.7：print(Dict) 与 VM repr 逐字一致（sg_print_dict）。
-                // 容器值槽（tag 4，64 位句柄无类型标签）运行时无法 repr，
-                // 编译期显式拒绝；标量值槽（int/float/str/bool）全覆盖。
-                if (auto it = types_.find(c.args[k].get());
-                    it != types_.end() && it->second->kind == Type::Kind::Dict &&
-                    it->second->params.size() >= 2) {
-                    switch (it->second->params[1]->kind) {
-                    case Type::Kind::List:
-                    case Type::Kind::Dict:
-                    case Type::Kind::Set:
-                    case Type::Kind::Tensor:
-                    case Type::Kind::Result:
-                        unsupported(c.args[k]->range,
-                                    "print 容器值字典（AOT 句柄槽无类型标签）");
-                    default:
-                        break;
-                    }
-                }
-                emit("\"lang.print_dict\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
-                break;
-            }
-            case VK::Json:
-                // 0.9.4 M 专项：紧凑 JSON 文本，与 VM stringify(Json) 逐字一致
-                emit("\"lang.print_json\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
-                break;
-            case VK::Tuple: {
-                // 0.9.6：repr 格式与 VM toString(Tuple, repr) 逐字一致
-                Value s = genTupleRepr(
-                    v, types_.find(c.args[k].get())->second, c.args[k]->range);
-                emit("\"lang.print_str\"(" + s.ssa + ") : (!llvm.ptr) -> ()");
-                break;
-            }
-            default:
-                unsupported(c.range, "print 该参数类型");
-            }
-        }
-        emit("\"lang.print_nl\"() : () -> ()");
-        return Value{VK::None, ""};
-    }
-    if (name == "str") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        switch (v.vk) {
-        case VK::Int: {
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.str_from_i64\"(" + v.ssa +
-                 ") : (i64) -> !llvm.ptr");
-            return Value{VK::Str, ssa};
-        }
-        case VK::Float: {
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.str_from_f64\"(" + v.ssa +
-                 ") : (f64) -> !llvm.ptr");
-            return Value{VK::Str, ssa};
-        }
-        case VK::Bool: {
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.str_from_bool\"(" + v.ssa +
-                 ") : (i1) -> !llvm.ptr");
-            return Value{VK::Str, ssa};
-        }
-        case VK::Str:
-            return v; // VM stringify(Str) 原样返回
-        case VK::Tensor: {
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.str_from_tensor\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> !llvm.ptr");
-            return Value{VK::Str, ssa};
-        }
-        case VK::Tuple:
-            // 0.9.6：VM str(Tuple) 与 print 同为 repr 形态（元素一律 repr）
-            return genTupleRepr(v, types_.find(c.args[0].get())->second,
-                                c.args[0]->range);
-        default:
-            unsupported(c.args[0]->range, "str() 该参数类型");
-        }
-    }
-    if (name == "len") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk == VK::Str) {
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.str_len\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
-            return Value{VK::Int, ssa};
-        }
-        if (v.vk == VK::List) {
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.list_len\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
-            return Value{VK::Int, ssa};
-        }
-        if (v.vk == VK::Dict) {
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.dict_len\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
-            return Value{VK::Int, ssa};
-        }
-        if (v.vk == VK::Set) {
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.set_len\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
-            return Value{VK::Int, ssa};
-        }
-        if (v.vk == VK::Tuple) {
-            // 0.9.6：元组句柄与 i64 List 同构，长度经 list_len 读取
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.list_len\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
-            return Value{VK::Int, ssa};
-        }
-        unsupported(c.args[0]->range, "len() 仅支持 str 与列表");
-    }
-    if (name == "now") {
-        std::string ssa = fresh();
-        // 能力行：挂 opLoc——sg_cap_check 拒绝时 panic 上下文与 VM 一致
-        emit(ssa + " = \"lang.now\"() : () -> f64 " + opLoc());
-        return Value{VK::Float, ssa};
-    }
-    if (name == "range") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Int) unsupported(c.args[0]->range, "range() 参数必须是 int");
-        return Value{VK::Range, v.ssa}; // 负数原样存（首轮即结束）
-    }
-    // 一元数学内建（kUnOps 注册表驱动）
-    if (const UnInfo* uop = findUnOp(name)) {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk == VK::Tensor) {
-            // 逐元素：fnid 查表；fnid 0 = abs 保 dtype，其余恒 f64
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.tensor_un\"(" + i32Const(uop->fnid) + ", " +
-                 v.ssa + ") : (i32, !llvm.ptr) -> !llvm.ptr " + opLoc());
-            return Value{VK::Tensor, ssa, uop->fnid == 0 && v.tInt, v.tRank};
-        }
-        if (v.vk != VK::Int && v.vk != VK::Float)
-            unsupported(c.args[0]->range, name + "() 仅支持数值");
-        if (uop->iSym) { // abs：双路径保 dtype，不提升不挂 opLoc
-            std::string ssa = fresh();
-            if (v.vk == VK::Int) {
-                emit(ssa + " = \"" + uop->iSym + "\"(" + v.ssa +
-                     ") : (i64) -> i64");
-                return Value{VK::Int, ssa};
-            }
-            emit(ssa + " = \"" + uop->uSym + "\"(" + v.ssa + ") : (f64) -> f64");
-            return Value{VK::Float, ssa};
-        }
-        // sqrt/exp/log：提升 f64
-        Value vf = promoteF64(v);
-        std::string ssa = fresh();
-        emit(ssa + " = \"" + uop->uSym + "\"(" + vf.ssa + ") : (f64) -> f64 " +
-             opLoc());
-        return Value{VK::Float, ssa};
-    }
-    // ---- v0.9.3 标量数学/随机/排序（仅标量与列表，不触碰张量路径） ----
-    // 三角/双曲/atan2：int 提升 f64，恒返回 float（依 IEEE 754，不 panic）。
-    if (name == "sin" || name == "cos" || name == "tan" || name == "asin" ||
-        name == "acos" || name == "atan" || name == "sinh" || name == "cosh" ||
-        name == "tanh") {
-        need(1);
-        Value vf = promoteF64(genExpr(*c.args[0]));
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang." + name + "\"(" + vf.ssa + ") : (f64) -> f64 " +
-             opLoc());
-        return Value{VK::Float, ssa};
-    }
-    if (name == "atan2") {
-        need(2);
-        Value vy = promoteF64(genExpr(*c.args[0]));
-        Value vx = promoteF64(genExpr(*c.args[1]));
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.atan2\"(" + vy.ssa + ", " + vx.ssa +
-             ") : (f64, f64) -> f64 " + opLoc());
-        return Value{VK::Float, ssa};
-    }
-    // 取整族：int 输入恒等返回（大整数经 f64 会失真，禁止绕道）；
-    // float 输入 → i64，越界/NaN 由运行时 panic（挂上下文）。
-    if (name == "floor" || name == "ceil" || name == "round" ||
-        name == "trunc") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk == VK::Int) return v;
-        if (v.vk != VK::Float)
-            unsupported(c.args[0]->range, name + "() 仅支持标量数值");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang." + name + "\"(" + v.ssa + ") : (f64) -> i64 " +
-             opLoc());
-        return Value{VK::Int, ssa};
-    }
-    if (name == "random") {
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.random\"() : () -> f64");
-        return Value{VK::Float, ssa};
-    }
-    if (name == "seed") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Int)
-            unsupported(c.args[0]->range, "seed() 参数必须是 int");
-        emit("\"lang.seed\"(" + v.ssa + ") : (i64) -> ()");
-        return Value{VK::None, ""};
-    }
-    // sorted：AOT 列表恒同质（SgList etag），运行时按 etag 泛型稳定升序。
-    if (name == "sorted") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::List)
-            unsupported(c.args[0]->range, "sorted() 仅支持列表");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.sorted\"(" + v.ssa + ") : (!llvm.ptr) -> !llvm.ptr " +
-             opLoc());
-        // 元素类型透传（lElem 驱动后续 list_get_* 分派）
-        return Value{VK::List, ssa, false, 0, v.lElem};
-    }
-    // ---- IO 内建（0.9.4）：input/read_text/write_text/append_text/exists/
-    // list_dir。路径窄字节串；失败 panic 的内建挂 opLoc 上下文（exists 纯
-    // 查询不 panic 不挂）；list_dir 元素静态记 Str（驱动 list_get_s/print）。
-    if (name == "input") {
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.input\"() : () -> !llvm.ptr " + opLoc());
-        return Value{VK::Str, ssa};
-    }
-    if (name == "read_text" || name == "list_dir") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Str)
-            unsupported(c.args[0]->range, name + "() 路径参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang." + name + "\"(" + v.ssa +
-             ") : (!llvm.ptr) -> !llvm.ptr " + opLoc());
-        if (name == "read_text") return Value{VK::Str, ssa};
-        return Value{VK::List, ssa, false, 0, static_cast<uint8_t>(VK::Str)};
-    }
-    if (name == "write_text" || name == "append_text") {
-        need(2);
-        Value p = genExpr(*c.args[0]);
-        Value s = genExpr(*c.args[1]);
-        if (p.vk != VK::Str)
-            unsupported(c.args[0]->range, name + "() 路径参数必须是 str");
-        if (s.vk != VK::Str)
-            unsupported(c.args[1]->range, name + "() 内容参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang." + name + "\"(" + p.ssa + ", " + s.ssa +
-             ") : (!llvm.ptr, !llvm.ptr) -> i64 " + opLoc());
-        return Value{VK::Int, ssa};
-    }
-    if (name == "exists") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Str)
-            unsupported(c.args[0]->range, "exists() 路径参数必须是 str");
-        std::string ssa = fresh();
-        // 能力行：挂 opLoc——sg_cap_check 拒绝时 panic 上下文与 VM 一致
-        emit(ssa + " = \"lang.exists\"(" + v.ssa + ") : (!llvm.ptr) -> i1 " +
-             opLoc());
-        return Value{VK::Bool, ssa};
-    }
-    // ---- 网络/睡眠内建（0.9.4 F/G 专项）：句柄不透明 I64；失败 panic 的
-    // 内建挂 opLoc 上下文（与 sg_net_* 运行时消息逐字一致）；仅 http 明文。
-    if (name == "net_connect") {
-        need(2);
-        Value h = genExpr(*c.args[0]);
-        Value p = genExpr(*c.args[1]);
-        if (h.vk != VK::Str)
-            unsupported(c.args[0]->range, "net_connect() 主机参数必须是 str");
-        if (p.vk != VK::Int)
-            unsupported(c.args[1]->range, "net_connect() 端口参数必须是 int");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.net_connect\"(" + h.ssa + ", " + p.ssa +
-             ") : (!llvm.ptr, i64) -> i64 " + opLoc());
-        return Value{VK::Int, ssa};
-    }
-    if (name == "net_send" || name == "net_recv") {
-        need(2);
-        Value s = genExpr(*c.args[0]);
-        Value d = genExpr(*c.args[1]);
-        if (s.vk != VK::Int)
-            unsupported(c.args[0]->range, name + "() 句柄参数必须是 int");
-        if (name == "net_send" && d.vk != VK::Str)
-            unsupported(c.args[1]->range, "net_send() 数据参数必须是 str");
-        if (name == "net_recv" && d.vk != VK::Int)
-            unsupported(c.args[1]->range, "net_recv() 上限参数必须是 int");
-        std::string ssa = fresh();
-        if (name == "net_send") {
-            emit(ssa + " = \"lang.net_send\"(" + s.ssa + ", " + d.ssa +
-                 ") : (i64, !llvm.ptr) -> i64 " + opLoc());
-            return Value{VK::Int, ssa};
-        }
-        emit(ssa + " = \"lang.net_recv\"(" + s.ssa + ", " + d.ssa +
-             ") : (i64, i64) -> !llvm.ptr " + opLoc());
-        return Value{VK::Str, ssa};
-    }
-    if (name == "net_close" || name == "sleep") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Int)
-            unsupported(c.args[0]->range,
-                        name + "() 参数必须是 int");
-        emit("\"lang." + name + "\"(" + v.ssa + ") : (i64) -> () " +
-             opLoc());
-        return Value{VK::None, ""};
-    }
-    if (name == "net_udp_send") {
-        need(3);
-        Value h = genExpr(*c.args[0]);
-        Value p = genExpr(*c.args[1]);
-        Value d = genExpr(*c.args[2]);
-        if (h.vk != VK::Str)
-            unsupported(c.args[0]->range, "net_udp_send() 主机参数必须是 str");
-        if (p.vk != VK::Int)
-            unsupported(c.args[1]->range, "net_udp_send() 端口参数必须是 int");
-        if (d.vk != VK::Str)
-            unsupported(c.args[2]->range, "net_udp_send() 数据参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.net_udp_send\"(" + h.ssa + ", " + p.ssa + ", " +
-             d.ssa + ") : (!llvm.ptr, i64, !llvm.ptr) -> i64 " + opLoc());
-        return Value{VK::Int, ssa};
-    }
-    if (name == "net_http_get") {
-        need(1);
-        Value u = genExpr(*c.args[0]);
-        if (u.vk != VK::Str)
-            unsupported(c.args[0]->range, "net_http_get() URL参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.net_http_get\"(" + u.ssa +
-             ") : (!llvm.ptr) -> !llvm.ptr " + opLoc());
-        return Value{VK::Str, ssa};
-    }
-    // F/G 迭代 2：TCP 服务端与收发超时（句柄不透明 I64；失败 panic 挂
-    // opLoc，与 sg_net_* 运行时消息逐字一致）。
-    if (name == "net_bind") {
-        need(2);
-        Value h = genExpr(*c.args[0]);
-        Value p = genExpr(*c.args[1]);
-        if (h.vk != VK::Str)
-            unsupported(c.args[0]->range, "net_bind() 主机参数必须是 str");
-        if (p.vk != VK::Int)
-            unsupported(c.args[1]->range, "net_bind() 端口参数必须是 int");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.net_bind\"(" + h.ssa + ", " + p.ssa +
-             ") : (!llvm.ptr, i64) -> i64 " + opLoc());
-        return Value{VK::Int, ssa};
-    }
-    if (name == "net_accept") {
-        need(1);
-        Value s = genExpr(*c.args[0]);
-        if (s.vk != VK::Int)
-            unsupported(c.args[0]->range, "net_accept() 句柄参数必须是 int");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.net_accept\"(" + s.ssa + ") : (i64) -> i64 " +
-             opLoc());
-        return Value{VK::Int, ssa};
-    }
-    if (name == "net_set_timeout") {
-        need(2);
-        Value s = genExpr(*c.args[0]);
-        Value m = genExpr(*c.args[1]);
-        if (s.vk != VK::Int)
-            unsupported(c.args[0]->range,
-                        "net_set_timeout() 句柄参数必须是 int");
-        if (m.vk != VK::Int)
-            unsupported(c.args[1]->range,
-                        "net_set_timeout() 毫秒参数必须是 int");
-        emit("\"lang.net_set_timeout\"(" + s.ssa + ", " + m.ssa +
-             ") : (i64, i64) -> () " + opLoc());
-        return Value{VK::None, ""};
-    }
-    // ---- 0.9.8 HTTP 服务端：读请求 → Json / 写响应 → 发送字节数 ----
-    if (name == "net_http_read_request") {
-        need(1);
-        Value s = genExpr(*c.args[0]);
-        if (s.vk != VK::Int)
-            unsupported(c.args[0]->range,
-                        "net_http_read_request() 句柄参数必须是 int");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.net_http_read_request\"(" + s.ssa +
-             ") : (i64) -> !llvm.ptr " + opLoc());
-        return Value{VK::Json, ssa};
-    }
-    if (name == "net_http_write_response") {
-        need(4);
-        Value s = genExpr(*c.args[0]);
-        Value st = genExpr(*c.args[1]);
-        Value ct = genExpr(*c.args[2]);
-        Value bd = genExpr(*c.args[3]);
-        if (s.vk != VK::Int)
-            unsupported(c.args[0]->range,
-                        "net_http_write_response() 句柄参数必须是 int");
-        if (st.vk != VK::Int)
-            unsupported(c.args[1]->range,
-                        "net_http_write_response() 状态码参数必须是 int");
-        if (ct.vk != VK::Str)
-            unsupported(c.args[2]->range,
-                        "net_http_write_response() 内容类型参数必须是 str");
-        if (bd.vk != VK::Str)
-            unsupported(c.args[3]->range,
-                        "net_http_write_response() 响应体参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.net_http_write_response\"(" + s.ssa + ", " +
-             st.ssa + ", " + ct.ssa + ", " + bd.ssa +
-             ") : (i64, i64, !llvm.ptr, !llvm.ptr) -> i64 " + opLoc());
-        return Value{VK::Int, ssa};
-    }
-    // ---- 系统编程内建（0.9.4 H 专项）：args/env/时间日期/进程/信号。
-    // panic 的 localtime/gmtime/spawn_wait 挂 opLoc 上下文（与 sg_* 运行时
-    // 消息逐字一致）；能力行（0.9.7）也一律挂 opLoc——sg_cap_check 拒绝时
-    // panic 上下文与 VM panicHere 逐字一致；列表返回静态记元素 VK（驱动
-    // list_get_*/print 分派）。
-    if (name == "args") {
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.args\"() : () -> !llvm.ptr " + opLoc());
-        return Value{VK::List, ssa, false, 0, static_cast<uint8_t>(VK::Str)};
-    }
-    if (name == "env" || name == "has_env" || name == "unset_env") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Str)
-            unsupported(c.args[0]->range, name + "() 名称参数必须是 str");
-        std::string ssa = fresh();
-        if (name == "env") {
-            emit(ssa + " = \"lang.env\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> !llvm.ptr " + opLoc());
-            return Value{VK::Str, ssa};
-        }
-        if (name == "has_env") {
-            emit(ssa + " = \"lang.has_env\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> i1 " + opLoc());
-            return Value{VK::Bool, ssa};
-        }
-        emit("\"lang.unset_env\"(" + v.ssa + ") : (!llvm.ptr) -> () " +
-             opLoc());
-        return Value{VK::None, ""};
-    }
-    if (name == "set_env") {
-        need(2);
-        Value n = genExpr(*c.args[0]);
-        Value v = genExpr(*c.args[1]);
-        if (n.vk != VK::Str)
-            unsupported(c.args[0]->range, "set_env() 名称参数必须是 str");
-        if (v.vk != VK::Str)
-            unsupported(c.args[1]->range, "set_env() 值参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.set_env\"(" + n.ssa + ", " + v.ssa +
-             ") : (!llvm.ptr, !llvm.ptr) -> i1 " + opLoc());
-        return Value{VK::Bool, ssa};
-    }
-    if (name == "epoch" || name == "epoch_ms" || name == "signal_caught") {
-        std::string ssa = fresh();
-        if (name == "signal_caught") {
-            emit(ssa + " = \"lang.signal_caught\"() : () -> i1 " + opLoc());
-            return Value{VK::Bool, ssa};
-        }
-        emit(ssa + " = \"lang." + name + "\"() : () -> i64 " + opLoc());
-        return Value{VK::Int, ssa};
-    }
-    if (name == "signal_reset") {
-        emit("\"lang.signal_reset\"() : () -> () " + opLoc());
-        return Value{VK::None, ""};
-    }
-    if (name == "localtime" || name == "gmtime") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Int)
-            unsupported(c.args[0]->range, name + "() 时间参数必须是 int");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang." + name + "\"(" + v.ssa + ") : (i64) -> !llvm.ptr " +
-             opLoc());
-        return Value{VK::List, ssa, false, 0, static_cast<uint8_t>(VK::Int)};
-    }
-    if (name == "system") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Str)
-            unsupported(c.args[0]->range, "system() 命令参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.system\"(" + v.ssa + ") : (!llvm.ptr) -> i64 " +
-             opLoc());
-        return Value{VK::Int, ssa};
-    }
-    if (name == "spawn_wait") {
-        need(2);
-        Value p = genExpr(*c.args[0]);
-        Value l = genExpr(*c.args[1]);
-        if (p.vk != VK::Str)
-            unsupported(c.args[0]->range, "spawn_wait() 路径参数必须是 str");
-        if (l.vk != VK::List)
-            unsupported(c.args[1]->range, "spawn_wait() 参数列表必须是 List");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.spawn_wait\"(" + p.ssa + ", " + l.ssa +
-             ") : (!llvm.ptr, !llvm.ptr) -> i64 " + opLoc());
-        return Value{VK::Int, ssa};
-    }
-    // ---- M 专项：标准库广度（统计/倒序/哈希）。统计接受张量/列表
-    // （运行时结构不同各一套入口），恒返回 f64；空序列 panic 双模一致。 ----
-    if (name == "mean" || name == "var" || name == "std" ||
-        name == "median") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        std::string ssa = fresh();
-        if (v.vk == VK::Tensor) {
-            emit(ssa + " = \"lang.tensor_" + name + "\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> f64 " + opLoc());
-            return Value{VK::Float, ssa};
-        }
-        if (v.vk == VK::List) {
-            emit(ssa + " = \"lang.list_" + name + "\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> f64 " + opLoc());
-            return Value{VK::Float, ssa};
-        }
-        unsupported(c.args[0]->range,
-                    name + "() 仅支持张量或数值列表");
-    }
-    // reversed：List → 倒序新列表（元素类型透传）；str → 字节倒序。
-    if (name == "reversed") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        std::string ssa = fresh();
-        if (v.vk == VK::List) {
-            emit(ssa + " = \"lang.list_reversed\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> !llvm.ptr");
-            return Value{VK::List, ssa, false, 0, v.lElem};
-        }
-        if (v.vk == VK::Str) {
-            emit(ssa + " = \"lang.str_reversed\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> !llvm.ptr");
-            return Value{VK::Str, ssa};
-        }
-        unsupported(c.args[0]->range, "reversed() 仅支持列表或字符串");
-    }
-    // sha256：str → 64 位小写 hex（FIPS 180-4）。
-    if (name == "sha256") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Str)
-            unsupported(c.args[0]->range, "sha256() 参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.sha256\"(" + v.ssa +
-             ") : (!llvm.ptr) -> !llvm.ptr");
-        return Value{VK::Str, ssa};
-    }
-    // crc32：str → 非负 int（CRC-32/ISO-HDLC，zlib 同款参数）。
-    if (name == "crc32") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Str)
-            unsupported(c.args[0]->range, "crc32() 参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.crc32\"(" + v.ssa + ") : (!llvm.ptr) -> i64");
-        return Value{VK::Int, ssa};
-    }
-    // json_decode：str → Json 动态值（解析失败 panic 消息与 VM 逐字一致）。
-    if (name == "json_decode") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Str)
-            unsupported(c.args[0]->range, "json_decode() 参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.json_decode\"(" + v.ssa +
-             ") : (!llvm.ptr) -> !llvm.ptr " + opLoc());
-        return Value{VK::Json, ssa};
-    }
-    if (name == "sum") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Tensor)
-            unsupported(c.args[0]->range, "sum() 仅支持张量");
-        std::string ssa = fresh();
-        if (v.tInt) {
-            emit(ssa + " = \"lang.tensor_sum_i\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> i64 " + opLoc());
-            return Value{VK::Int, ssa};
-        }
-        // linalg 覆盖集：f64 + 形状静态 → 写形状属性（否则 LangToLLVM 兜底）
-        std::string attrs;
-        if (auto sh = staticF64Shape(c.args[0].get()))
-            attrs = " {shape = " + shapeArrAttr(*sh) + "}";
-        emit(ssa + " = \"lang.tensor_sum_f\"(" + v.ssa + ")" + attrs +
-             " : (!llvm.ptr) -> f64 " + opLoc());
-        return Value{VK::Float, ssa};
-    }
-    if (name == "max" || name == "min") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Tensor)
-            unsupported(c.args[0]->range, name + "() 仅支持张量");
-        Value nm = strConst(name);
-        std::string ssa = fresh();
-        if (v.tInt) {
-            emit(ssa + " = \"lang.tensor_reduce_i\"(" +
-                 i32Const(name == "max" ? 1 : 0) + ", " + v.ssa + ", " + nm.ssa +
-                 ") : (i32, !llvm.ptr, !llvm.ptr) -> i64 " + opLoc());
-            return Value{VK::Int, ssa};
-        }
-        emit(ssa + " = \"lang.tensor_reduce_f\"(" +
-             i32Const(name == "max" ? 1 : 0) + ", " + v.ssa + ", " + nm.ssa +
-             ") : (i32, !llvm.ptr, !llvm.ptr) -> f64 " + opLoc());
-        return Value{VK::Float, ssa};
-    }
-    if (name == "transpose") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Tensor)
-            unsupported(c.args[0]->range, "transpose() 仅支持张量");
-        std::string ssa = fresh();
-        // 张量降级覆盖集：2D int/float + 形状静态 → 写形状属性（纯数据
-        // 搬移与 dtype 无关；int 经 t_int 属性分派 i64 视图与句柄）
-        std::string attrs;
-        if (v.tRank == 2) {
-            if (auto sh = staticShapeOf(c.args[0].get()))
-                attrs = " {shape = " + shapeArrAttr(*sh) +
-                        ", t_int = " + std::to_string(v.tInt ? 1 : 0) +
-                        " : i32}";
-        }
-        emit(ssa + " = \"lang.tensor_transpose\"(" + v.ssa + ")" + attrs +
-             " : (!llvm.ptr) -> !llvm.ptr " + opLoc());
-        return Value{VK::Tensor, ssa, v.tInt, 2};
-    }
-    if (name == "reshape") {
-        // 变参维度：reshape(t, d1, d2, ...)（与 VM doBuiltin 一致）
-        if (c.args.size() < 2)
-            unsupported(c.range, "reshape() 需要张量 + 至少 1 个维度");
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Tensor)
-            unsupported(c.args[0]->range, "reshape() 首参必须是张量");
-        std::vector<Value> dims;
-        for (size_t k = 1; k < c.args.size(); ++k) {
-            Value d = genExpr(*c.args[k]);
-            if (d.vk != VK::Int)
-                unsupported(c.args[k]->range, "reshape() 维度必须是 int");
-            dims.push_back(d);
-        }
-        std::string arr = buildI64Array(dims);
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.tensor_reshape\"(" + v.ssa + ", " +
-             intConst((int64_t)dims.size()) + ", " + arr +
-             ") : (!llvm.ptr, i64, !llvm.ptr) -> !llvm.ptr " + opLoc());
-        return Value{VK::Tensor, ssa, v.tInt,
-                     static_cast<uint8_t>(dims.size())};
-    }
-    // data_ptr（0.9.6 O 节 FFI 宽类型域）：取连续原生缓冲首地址（int 承载）。
-    // str：全局常量指针就地 ptrtoint（进程期存活，与 VM intern 池同契约——
-    // 地址只读透传）；张量：lang.data_ptr → sg_data_ptr（设备驻留先回拷，
-    // 空张量 panic 消息与 VM doBuiltin 逐字一致）。List 不连续 tagged 数组，
-    // 检查器已拦；此处白名单再拦属防御。
-    if (name == "data_ptr") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk == VK::Str) {
-            std::string ssa = fresh();
-            emit(ssa + " = llvm.ptrtoint " + v.ssa +
-                 " : !llvm.ptr to i64 " + opLoc());
-            return Value{VK::Int, ssa};
-        }
-        if (v.vk == VK::Tensor) {
-            std::string ssa = fresh();
-            emit(ssa + " = \"lang.data_ptr\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> i64 " + opLoc());
-            return Value{VK::Int, ssa};
-        }
-        unsupported(c.args[0]->range,
-                    "data_ptr() 仅支持 Tensor[int]/Tensor[float]/str");
-    }
-    // ok / err（Result 构造；检查器已强制恰好 1 参）
-    if (name == "ok") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        std::string ssa = fresh();
-        switch (v.vk) {
-        case VK::Int:
-            emit(ssa + " = \"lang.result_ok_i\"(" + v.ssa +
-                 ") : (i64) -> !llvm.ptr");
-            break;
-        case VK::Float:
-            emit(ssa + " = \"lang.result_ok_f\"(" + v.ssa +
-                 ") : (f64) -> !llvm.ptr");
-            break;
-        case VK::Bool:
-            emit(ssa + " = \"lang.result_ok_b\"(" + v.ssa +
-                 ") : (i1) -> !llvm.ptr");
-            break;
-        case VK::Str:
-            emit(ssa + " = \"lang.result_ok_s\"(" + v.ssa +
-                 ") : (!llvm.ptr) -> !llvm.ptr");
-            break;
-        case VK::None:
-            emit(ssa + " = \"lang.result_ok_n\"() : () -> !llvm.ptr");
-            break;
-        default:
-            unsupported(c.args[0]->range, "ok() 该载荷类型");
-        }
-        return Value{VK::Result, ssa, false, 0, static_cast<uint8_t>(v.vk)};
-    }
-    if (name == "err") {
-        need(1);
-        Value v = genExpr(*c.args[0]);
-        if (v.vk != VK::Str)
-            unsupported(c.args[0]->range, "err() 参数必须是 str");
-        std::string ssa = fresh();
-        emit(ssa + " = \"lang.result_err\"(" + v.ssa +
-             ") : (!llvm.ptr) -> !llvm.ptr");
-        return Value{VK::Result, ssa, false, 0, static_cast<uint8_t>(VK::Str)};
-    }
-    unsupported(c.range, "内建 " + name + "()（该内建）");
 }
 
 // ============================================================================

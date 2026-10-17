@@ -1,0 +1,18 @@
+# F-15 复现探针（批4）：模块级 Dict/张量/List 字面量 AOT 全局初始化。
+# VM 侧 compileModule 顶层执行天然支持；AOT 需 genModule 发射全局初始化。
+# 预期：双模输出逐字节一致（常量表提到模块顶层是 AI 高频写法）。
+
+d = {"a": 1, "b": 2}
+t = [1.0, 2.0, 3.0]
+xs = ["x", "y", "z"]
+m = [[1.0, 2.0], [3.0, 4.0]]  # 张量字面量（F-15 原始报告形态）
+opt: Option[int] = ok(7)
+
+def main() -> int:
+    print(d["a"], d["b"])
+    print(t[0], t[2])
+    print(xs[1])
+    print(len(d), len(xs))
+    print(m[0][0], m[1][1])
+    print(opt.is_some(), opt.unwrap(0))
+    return 0

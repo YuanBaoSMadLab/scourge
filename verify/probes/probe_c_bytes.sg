@@ -1,0 +1,5 @@
+# C5 探针：bytes 类型与编解码
+def main() -> int:
+    b: bytes = b"abc"
+    print(len(b))
+    return 0

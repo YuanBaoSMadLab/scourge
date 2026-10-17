@@ -1,0 +1,4 @@
+# C1 验收：panic 路径双模一致（split 空分隔符 / replace 空旧串 / index 未找到）
+def main() -> int:
+    print("abc".split(""))
+    return 0

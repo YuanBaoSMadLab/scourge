@@ -1,0 +1,10 @@
+# 隔离 B：仅 data_ptr(str) → strlen
+capability ffi
+@extern("ucrtbase.dll")
+def strlen(s: int) -> int:
+    pass
+
+def main() -> int:
+    s = "hello"
+    print(strlen(data_ptr(s)))
+    return 0

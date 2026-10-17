@@ -1,0 +1,3 @@
+def main() -> int:
+    j: Json = json_decode(42)
+    return 0

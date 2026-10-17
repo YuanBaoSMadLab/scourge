@@ -1,0 +1,9 @@
+# 探针5：float 注解赋 int 字面量后的实际类型
+def main() -> int:
+    f: float = 3
+    print(f)
+    g = f + 0.5
+    print(g)
+    h: float = 3.0
+    print(h)
+    return 0

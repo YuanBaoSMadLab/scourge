@@ -14,8 +14,8 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify\str_for"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify\str_for"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
 
@@ -30,9 +30,9 @@ $pos = @("probe_str_for", "probe_str_idx")
 foreach ($n in $pos) {
     Clean-Artifacts $n
 
-    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\codebuddytest\$n.sg") -NoNewWindow -Wait -PassThru `
+    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\verify\probes\$n.sg") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.run.out" -RedirectStandardError "$dir\$n.run.err"
-    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\codebuddytest\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
+    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\verify\probes\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.build.out" -RedirectStandardError "$dir\$n.build.err"
     if ($p2.ExitCode -ne 0) {
         Write-Host "$n BUILD-FAIL"; Get-Content "$dir\$n.build.err" -First 20; $fail = 1; continue
@@ -59,7 +59,7 @@ foreach ($n in $pos) {
 # No try/except here: the panic text lands on stderr and the two modes'
 # stderr hashes must match (message is the dual-mode contract).
 Clean-Artifacts "probe_str_panic"
-$src = "d:\Scourge\codebuddytest\probe_str_panic.sg"
+$src = "d:\Scourge\verify\probes\probe_str_panic.sg"
 Set-Content -Path $src -Encoding Ascii -Value @('def main() -> int:', '    s = "abc"', '    print(s[5])', '    return 0')
 $p1 = Start-Process -FilePath $exe -ArgumentList @("run", $src) -NoNewWindow -Wait -PassThru `
       -RedirectStandardOutput "$dir\probe_str_panic.run.out" -RedirectStandardError "$dir\probe_str_panic.run.err"
@@ -93,7 +93,7 @@ $negs = @(
 foreach ($g in $negs) {
     $n = $g.name
     Clean-Artifacts $n
-    $src = "d:\Scourge\codebuddytest\$n.sg"
+    $src = "d:\Scourge\verify\probes\$n.sg"
     Set-Content -Path $src -Encoding Ascii -Value $g.lines
     $p1 = Start-Process -FilePath $exe -ArgumentList @("run", $src) -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.run.out" -RedirectStandardError "$dir\$n.run.err"

@@ -1,0 +1,4 @@
+def main() -> int:
+    for x in 123:
+        print(x)
+    return 0

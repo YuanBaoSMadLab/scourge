@@ -1,0 +1,23 @@
+# and/or 短路求值：右侧仅在需要时求值（VM/AOT 一致，panic 副作用可见）
+
+def boom() -> bool:
+    return len("x".split("")) > 0
+
+def safe() -> bool:
+    return True
+
+def main() -> int:
+    l: List[str] = []
+    if len(l) > 0 and l[0] == "x":
+        print("never")
+    else:
+        print("short-circuit and: ok")
+    if len(l) == 0 or l[0] == "x":
+        print("short-circuit or: ok")
+    else:
+        print("never2")
+    print(True and False, False or True)
+    print(True and safe())
+    x: bool = len(l) == 0 or boom()
+    print("or 右侧未触发 panic:", x)
+    return 0

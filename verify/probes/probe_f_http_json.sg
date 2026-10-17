@@ -1,0 +1,12 @@
+capability net
+# 0.9.10 验收：net_http_get_json 分帧解析双模一致
+# 23458 = Content-Length 分帧；23462 = chunked 分帧（含 ';ext' 扩展）
+def main() -> int:
+    r1: Json = net_http_get_json("http://127.0.0.1:23458/index.html")
+    print(r1.is_obj())
+    print(r1.get("status").as_int())
+    print(r1.get("body").as_str())
+    r2: Json = net_http_get_json("http://127.0.0.1:23462/index.html")
+    print(r2.get("status").as_int())
+    print(r2.get("body").as_str())
+    return 0

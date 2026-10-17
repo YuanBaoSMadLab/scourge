@@ -1,0 +1,35 @@
+capability thread
+# 真并发 M1 验收 2：2 线程经通道互发 N 条消息 → 收满 N 条后打印首尾与计数
+# 语义说明：通道句柄在模块顶层初始化（<top> → StoreGlobal），worker 经
+# LoadGlobal 读取；recv 阻塞等待（GIL/运行时阻塞语义）。
+# 哨兵方案：sender 发完 N 条后发 "END" 再 close——recv 在"空且已关闭"时
+# panic（M1 处方），循环必须靠哨兵退出，不能依赖 close。
+# 探针只在 join 后 print，双模输出确定（多线程不打印）。
+N: int = 20
+ch = channel_new()
+
+def sender() -> None:
+    for i in range(N):
+        chan_send(ch, "msg" + str(i))
+    chan_send(ch, "END")
+    chan_close(ch)
+
+def main() -> int:
+    h: int = thread_spawn("sender")
+    got: int = 0
+    first: str = ""
+    last: str = ""
+    s: str = ""
+    while True:
+        s = chan_recv(ch)
+        if s == "END":
+            break
+        if got == 0:
+            first = s
+        last = s
+        got = got + 1
+    thread_join(h)
+    print(first)
+    print(last)
+    print(got)
+    return 0

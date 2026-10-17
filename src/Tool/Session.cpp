@@ -20,6 +20,8 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <iconv.h>  // POSIX 编码转换（ANSI 回退段用）
 #endif
 
 #include "scourge/Interface/SgiGen.hpp"
@@ -30,14 +32,14 @@ namespace scourge {
 
 namespace {
 
-#ifdef _WIN32
 // ----------------------------------------------------------------------------
-// 源码编码自适应（零配置，面向全球机型）。裁决顺序：
+// 源码编码自适应（零配置，面向全球机型；跨平台，Win32 专段见无 BOM 分支）。
+// 裁决顺序：
 //   1. BOM 显式声明（UTF-8 / UTF-16 LE / UTF-16 BE）→ 按声明解码；
-//   2. 无 BOM → 严格 UTF-8 校验（MB_ERR_INVALID_CHARS），有效即原样采用
+//   2. 无 BOM → 严格 UTF-8 校验，有效即原样采用
 //      （生态事实标准，不做无谓转码，行号/列号按字节保持稳定）；
-//   3. 校验失败 → 按系统 ANSI 代码页（GBK/Shift-JIS/Latin-1 等）重解为
-//      UTF-8，兼容记事本"ANSI"保存；
+//   3. 校验失败 → ANSI 代码页重解为 UTF-8，兼容记事本"ANSI"保存
+//      （Windows 按 GetACP；POSIX 按 GB18030——GBK 超集，覆盖中文场景）；
 //   4. 两者皆败 → 原样保留，交由词法器按字节报错定位。
 // 顺序纪律：必须先转码再归一化换行（UTF-16 的 \r\n 是 0D 00 0A 00）。
 // ----------------------------------------------------------------------------
@@ -72,6 +74,61 @@ void u16ToUtf8(const std::wstring& s, std::string& out) {
         }
     }
 }
+
+/// 严格 UTF-8 校验：拒绝截断序列、越界码点、过长编码与 UTF-16 代理区
+/// （等价 Win32 MB_ERR_INVALID_CHARS 语义，两平台判定一致——单一事实源）。
+bool validUtf8(const std::string& s) {
+    static const unsigned kMinCp[5] = {0, 0, 0x80, 0x800, 0x10000};
+    const size_t n = s.size();
+    size_t i = 0;
+    while (i < n) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        size_t len;
+        unsigned cp;
+        if (c < 0x80) {
+            ++i;
+            continue;
+        } else if ((c & 0xE0) == 0xC0) {
+            len = 2; cp = c & 0x1F;
+        } else if ((c & 0xF0) == 0xE0) {
+            len = 3; cp = c & 0x0F;
+        } else if ((c & 0xF8) == 0xF0) {
+            len = 4; cp = c & 0x07;
+        } else {
+            return false;  // 0x80-0xBF 首字节或 0xF8+ 过长首字节
+        }
+        if (i + len > n) return false;
+        for (size_t k = 1; k < len; ++k) {
+            const unsigned char cc = static_cast<unsigned char>(s[i + k]);
+            if ((cc & 0xC0) != 0x80) return false;
+            cp = (cp << 6) | (cc & 0x3F);
+        }
+        if (cp < kMinCp[len] || (cp >= 0xD800 && cp <= 0xDFFF) ||
+            cp > 0x10FFFF) return false;
+        i += len;
+    }
+    return true;
+}
+
+#ifndef _WIN32
+/// POSIX ANSI 回退：iconv 单次转换。目标缓冲 4 倍预留使 E2BIG 不可能，
+/// 任何失败（EILSEQ/EINVAL/描述符不可用）返回 false，调用方保持原样。
+bool iconvToUtf8(const std::string& raw, const char* from, std::string& out) {
+    iconv_t cd = iconv_open("UTF-8", from);
+    if (cd == (iconv_t)-1) return false;
+    std::string buf;
+    buf.resize(raw.size() * 4 + 4);  // UTF-8 最长 4 字节/码点，上界充足
+    char* in = const_cast<char*>(raw.data());
+    size_t inLeft = raw.size();
+    char* ob = &buf[0];
+    size_t obLeft = buf.size();
+    const bool ok = iconv(cd, &in, &inLeft, &ob, &obLeft) != (size_t)-1;
+    iconv_close(cd);
+    if (!ok) return false;
+    out.assign(buf.data(), buf.size() - obLeft);
+    return true;
+}
+#endif
 
 /// 上述裁决的入口。超大文件跳过检测（Win32 API 入参为 int）。
 void decodeSourceBytes(const std::string& raw, std::string& out) {
@@ -112,36 +169,35 @@ void decodeSourceBytes(const std::string& raw, std::string& out) {
     }
 
     // 无 BOM：严格 UTF-8 校验，有效即原样（常见快路径）。
-    if (!raw.empty()) {
-        const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                          raw.data(),
-                                          static_cast<int>(raw.size()),
-                                          nullptr, 0);
-        if (n > 0) {
-            out = raw;
+    if (!raw.empty() && validUtf8(raw)) {
+        out = raw;
+        return;
+    }
+#ifdef _WIN32
+    // ANSI 代码页 → UTF-16 → UTF-8（兼容记事本"ANSI"保存）。
+    const UINT acp = GetACP();
+    const int wlen = MultiByteToWideChar(acp, 0, raw.data(),
+                                         static_cast<int>(raw.size()),
+                                         nullptr, 0);
+    if (wlen > 0) {
+        std::wstring w(static_cast<size_t>(wlen), L'\0');
+        if (MultiByteToWideChar(acp, 0, raw.data(),
+                                static_cast<int>(raw.size()), &w[0],
+                                wlen) == wlen) {
+            u16ToUtf8(w, out);
             return;
         }
-        // ANSI 代码页 → UTF-16 → UTF-8。
-        const UINT acp = GetACP();
-        const int wlen = MultiByteToWideChar(acp, 0, raw.data(),
-                                             static_cast<int>(raw.size()),
-                                             nullptr, 0);
-        if (wlen > 0) {
-            std::wstring w(static_cast<size_t>(wlen), L'\0');
-            if (MultiByteToWideChar(acp, 0, raw.data(),
-                                    static_cast<int>(raw.size()), &w[0],
-                                    wlen) == wlen) {
-                u16ToUtf8(w, out);
-                return;
-            }
-        }
     }
+#else
+    // POSIX：无系统 ANSI 代码页概念，按 GB18030 解（GBK 超集，覆盖中文
+    // "ANSI 保存"主场景）；失败保持原样交词法器按字节报错。
+    if (!raw.empty() && iconvToUtf8(raw, "GB18030", out)) return;
+#endif
     out = raw;
 }
-#endif // _WIN32
 
 // ----------------------------------------------------------------------------
-// 源码读取：编码自适应（Windows，见 decodeSourceBytes）+ 统一换行符
+// 源码读取：编码自适应（BOM/UTF-8/ANSI，见 decodeSourceBytes）+ 统一换行符
 //（词法器只处理 \n），保持位置确定性。一次性按文件长度读入（避免
 // ostringstream 对小文件的中间缓冲拷贝）；换行归一化按 \r 批量切段拼接，
 // 无 \r 时零拷贝直接采用原文。
@@ -159,12 +215,8 @@ bool readFileNormalized(const std::filesystem::path& p, std::string& out) {
     if (size > 0 && !in.read(raw.data(), size)) return false;
     if (size > 0) raw.resize(static_cast<size_t>(in.gcount()));
 
-#ifdef _WIN32
     std::string text;
     decodeSourceBytes(raw, text);
-#else
-    std::string text = std::move(raw);
-#endif
 
     // \r\n 与孤立 \r 均归一为 \n；无 \r 直接移出（常见快路径）。
     if (text.find('\r') == std::string::npos) {

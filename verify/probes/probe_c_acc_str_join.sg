@@ -1,0 +1,11 @@
+# C1 验收：join（self 为分隔符；元素必须 str）
+def main() -> int:
+    parts: List[str] = ["a", "b", "c"]
+    print(",".join(parts))
+    print("".join(parts))
+    print("--".join(parts))
+    empty: List[str] = []
+    print(",".join(empty))
+    one: List[str] = ["x"]
+    print("-".join(one))
+    return 0

@@ -1,0 +1,4 @@
+def main() -> int:
+    j: Json = json_decode("[1]")
+    print(j.at(5).as_int())
+    return 0

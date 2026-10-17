@@ -1,5 +1,5 @@
 # Regression: net_* / sleep builtins (0.9.4 F/G) dual-mode byte check.
-# Probes live in codebuddytest/ (probe_f_* / probe_g_sleep).
+# Probes live in verify/probes/ (probe_f_* / probe_g_sleep).
 # Needs local test servers: python net_test_server.py must be running
 # (TCP echo 23456, fixed HTTP 23458, immediate-close 23460).
 # ASCII only: Windows PowerShell 5.1 parses BOM-less ps1 as ANSI.
@@ -13,8 +13,8 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
 
 # Start helper servers if the echo port is not listening.
@@ -27,15 +27,16 @@ try {
 $srvProc = $null
 if (-not $up) {
     $srvProc = Start-Process -FilePath "python" `
-        -ArgumentList @("d:\Scourge\codebuddytest\net_test_server.py") `
+        -ArgumentList @("d:\Scourge\verify\probes\net_test_server.py") `
         -WindowStyle Hidden -PassThru
     Start-Sleep -Milliseconds 1200
 }
 
-$files = (Get-ChildItem "d:\Scourge\codebuddytest\probe_f_*.sg" | ForEach-Object { $_.FullName }) +
-         (Get-ChildItem "d:\Scourge\codebuddytest\probe_g_sleep.sg" | ForEach-Object { $_.FullName })
+$files = (Get-ChildItem "d:\Scourge\verify\probes\probe_f_*.sg" | ForEach-Object { $_.FullName }) +
+         (Get-ChildItem "d:\Scourge\verify\probes\probe_g_sleep.sg" | ForEach-Object { $_.FullName })
 # probe_f_server needs a python client mid-run; handled after the loop.
-$files = $files | Where-Object { $_ -notmatch 'probe_f_server\.sg$' }
+# probe_f_gui_* are single-mode (Win32 AOT only, VM panic) - covered by verify_b6.
+$files = $files | Where-Object { $_ -notmatch 'probe_f_server\.sg$' -and $_ -notmatch 'probe_f_gui_' }
 $fail = 0
 foreach ($sg in $files) {
     $stem = [IO.Path]::GetFileNameWithoutExtension($sg)
@@ -63,9 +64,9 @@ foreach ($sg in $files) {
 if ($srvProc -ne $null) { Stop-Process -Id $srvProc.Id -Force -ErrorAction SilentlyContinue }
 
 # ---- probe_f_server: dual-mode with python client mid-run ----
-$sg = "d:\Scourge\codebuddytest\probe_f_server.sg"
+$sg = "d:\Scourge\verify\probes\probe_f_server.sg"
 $stem = "probe_f_server"
-$client = "d:\Scourge\codebuddytest\net_test_client.py"
+$client = "d:\Scourge\verify\probes\net_test_client.py"
 $srvFail = 0
 $runs = @(
     @{ exe = $exe; arg = @("run", $sg); out = "$dir\$stem.run.out" },

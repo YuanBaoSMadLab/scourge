@@ -1,0 +1,4 @@
+async def f() -> int:
+    return 1
+def main() -> int:
+    return 0

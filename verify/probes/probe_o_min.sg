@@ -1,0 +1,14 @@
+# O 节探针：变参下边界——0 个变参实参（恰好命名参数个数）
+capability ffi
+@extern("msvcrt.dll")
+def printf(fmt: str, ...) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def fflush(all: int) -> int:
+    pass
+
+def main() -> int:
+    printf("only-fmt\n")
+    fflush(0)
+    return 0

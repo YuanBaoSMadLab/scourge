@@ -1,0 +1,6 @@
+# D2 探针：高阶函数 map/filter（手写 for 之外的惰性/函数式路径）
+def main() -> int:
+    xs: List[int] = [1, 2, 3]
+    ys = map(lambda x: x * 2, xs)
+    print(ys)
+    return 0

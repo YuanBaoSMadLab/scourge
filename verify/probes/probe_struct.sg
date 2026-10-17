@@ -1,0 +1,7 @@
+# 探测 struct 自定义类型是否已支持（预期不支持）
+struct Point:
+    x: int
+    y: int
+
+def main() -> int:
+    return 0

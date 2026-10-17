@@ -1,0 +1,91 @@
+# ============================================================================
+#  t05_control.sg — 控制流：if/elif/else、while、for、break/continue、pass
+#  对应章节：第6章 控制流
+# ============================================================================
+
+def classify(score: int) -> str:
+    if score >= 90:
+        return "A"
+    elif score >= 60:
+        return "B"
+    else:
+        return "F"
+
+def firstTrue(flags: List[bool]) -> int:
+    idx = 0
+    for v in flags:
+        if v:
+            return idx
+        idx += 1
+    return -1
+
+def countDown(n: int) -> int:
+    steps = 0
+    while n > 0:
+        n -= 1
+        steps += 1
+    return steps
+
+def skipPattern(n: int) -> int:
+    total = 0
+    for i in range(n):
+        if i % 3 == 0:
+            continue
+        if i > 8:
+            break
+        total += i
+    return total
+
+def nested(n: int) -> int:
+    acc = 0
+    for i in range(n):
+        for j in range(n):
+            if j > i:
+                break
+            acc += 1
+    return acc
+
+def emptyRange() -> int:
+    hits = 0
+    for i in range(0):
+        hits += 1
+    # 注意：for 循环变量与外层名冲突报 E2007，
+    # 同一函数内第二个循环必须换变量名（k）
+    for k in range(-5):
+        hits += 1
+    return hits
+
+def placeholder(flag: bool) -> int:
+    if flag:
+        pass
+    else:
+        pass
+    return 0
+
+def main() -> int:
+    print(classify(95), classify(70), classify(50))
+    flags: List[bool] = [False, False, True, False]
+    print(firstTrue(flags))
+    print(countDown(5))
+    print(skipPattern(20))
+    print(nested(4))
+    print(emptyRange())
+    print(placeholder(True))
+
+    # for 循环变量是循环体内的新局部变量
+    for i in range(3):
+        print(i)
+
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# A B F
+# 2
+# 5
+# 13
+# 10
+# 0
+# 0
+# 0
+# 1
+# 2

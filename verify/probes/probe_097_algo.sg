@@ -1,0 +1,8 @@
+# 验证：算法内建（min/max/reversed/sorted）对 List[int] 的可用性
+def main() -> int:
+    xs: List[int] = [3, 1, 2]
+    print(min(xs))
+    print(max(xs))
+    print(reversed(xs))
+    print(sorted(xs))
+    return 0

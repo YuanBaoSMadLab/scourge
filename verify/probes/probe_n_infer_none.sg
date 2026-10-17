@@ -1,0 +1,5 @@
+def f():
+    return 7
+def main() -> int:
+    print(f())
+    return 0

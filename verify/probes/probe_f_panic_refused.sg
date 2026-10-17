@@ -1,0 +1,4 @@
+capability net
+def main() -> int:
+    print(net_connect("127.0.0.1", 23461))
+    return 0

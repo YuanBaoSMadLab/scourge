@@ -1,0 +1,10 @@
+# 子模块 a/b.sg（点分路径布局）
+TAG: int = 7
+
+@pure
+def get_tag() -> int:
+    return TAG
+
+@private
+def hidden() -> int:
+    return 1

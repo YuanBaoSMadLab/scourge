@@ -1,0 +1,10 @@
+# 验证：net 域内建（net_http_get）存在且受能力门禁；运行时按环境可达性尝试
+capability net
+
+def main() -> int:
+    try:
+        r = net_http_get("http://example.com")
+        print(len(r) > 0)
+    except:
+        print("net-unreachable")
+    return 0

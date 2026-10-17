@@ -1,0 +1,6 @@
+def main() -> int:
+    t = [1.0, 2.0, 3.0, 4.0]
+    print(mean(t))
+    print(var(t))
+    print(std(t))
+    return 0

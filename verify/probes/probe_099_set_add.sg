@@ -1,0 +1,18 @@
+# 0.9.9 内建探针：Set.add（去重/插入序/NaN panic/str 格式化）
+def main() -> int:
+    s: Set[int] = {1, 2}
+    s.add(3)
+    s.add(1)
+    print(len(s))
+    print(str(s))
+    fs: Set[float] = {1.5}
+    fs.add(2.5)
+    print(str(fs))
+    try:
+        fs.add(0.0 / 0.0)
+    except:
+        print("nan")
+    ss: Set[str] = {"a"}
+    ss.add("b")
+    print(str(ss))
+    return 0

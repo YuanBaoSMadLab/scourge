@@ -1,0 +1,19 @@
+# ============================================================================
+#  lib_greet.sg — 被导入的库模块（与 t13_modules.sg 同目录）
+#  对应章节：第11章 模块系统
+# ============================================================================
+
+SCALE: float = 2.0
+GREETING: str = "hello"
+
+@pure
+def scale(x: float) -> float:
+    """标量乘以模块常量。"""
+    return x * SCALE
+
+def shout(text: str, times: int = 2) -> str:
+    """重复字符串 times 次。注意：默认值当前不生效，调用须显式传第 2 参。"""
+    out = ""
+    for i in range(times):
+        out = out + text
+    return out

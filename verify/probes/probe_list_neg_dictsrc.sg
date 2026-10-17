@@ -1,0 +1,4 @@
+def main() -> int:
+    d: Dict[str, int] = {"a": 1}
+    xs: List[int] = [v for v in d]
+    return 0

@@ -1,0 +1,113 @@
+#!/bin/bash
+# ============================================================================
+#  bootstrap.sh - Scourge 一键构建引导（Linux/macOS）
+#
+#  职责：让用户 clone 后一个脚本拿到可用的 scourge——
+#    1) 检查构建工具链（cmake/ninja/clang）
+#    2) 获取平台预编译 MLIR 库包（默认 GitHub Release 附件；可 --url 覆盖，
+#       或 --llvm-root 指向本机已有 LLVM/MLIR 跳过下载）
+#    3) cmake 配置 + 构建 → build-rel/scourge
+#
+#  说明：AOT build 命令运行时另需系统 clang 与链接器（发行版 clang 即可，
+#  apt/dnf 装 clang；这是 scourge 给 .sg 程序做最终链接的外部驱动，与编译
+#  scourge 本身无关）。
+#  用法：
+#    scripts/bootstrap.sh                 # 全自动（下载库包→构建）
+#    scripts/bootstrap.sh --url <文件>    # 用本地/自定库包 zip|tar.zst
+#    scripts/bootstrap.sh --llvm-root <目录>  # 用本机 LLVM/MLIR（含 lib/cmake/mlir）
+#    scripts/bootstrap.sh --jobs 8        # 构建并行度（默认 nproc）
+# ============================================================================
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPS_DIR="$REPO_ROOT/.deps"
+MLIR_ROOT="$DEPS_DIR/llvm-mlir"
+OWNER_REPO="${SCOURGE_RELEASE_REPO:-}"   # 例：your-name/scourge
+TAG="${SCOURGE_MLIR_TAG:-mlir-libs-v1}"  # 库包 release tag
+ASSET_PFX="scourge-mlir-libs"
+
+URL="" ; LLVM_ROOT="" ; JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --url)       URL="$2"; shift 2 ;;
+        --llvm-root) LLVM_ROOT="$2"; shift 2 ;;
+        --jobs)      JOBS="$2"; shift 2 ;;
+        *) echo "未知参数: $1" >&2; exit 2 ;;
+    esac
+done
+
+echo "[bootstrap] 工具链检查"
+for t in cmake ninja clang; do
+    command -v "$t" >/dev/null || { echo "缺少 $t：apt install cmake ninja-build clang（或发行版等价命令）" >&2; exit 1; }
+done
+
+if [ -n "$LLVM_ROOT" ]; then
+    MLIR_ROOT="$LLVM_ROOT"
+    echo "[bootstrap] 使用本机 LLVM/MLIR: $MLIR_ROOT"
+else
+    ARCH="$(uname -m)"; OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    if [ -d "$MLIR_ROOT/lib/cmake/mlir" ]; then
+        echo "[bootstrap] 库包已就位: $MLIR_ROOT（删除该目录可强制重新下载）"
+    else
+        ASSET="${ASSET_PFX}-${OS}-${ARCH}.tar.zst"
+        if [ -z "$URL" ]; then
+            if [ -z "$OWNER_REPO" ]; then
+                echo "未配置库包下载源。三选一：" >&2
+                echo "  1) export SCOURGE_RELEASE_REPO=<owner/repo> 后重跑（自动拼 Release 附件 URL）" >&2
+                echo "  2) --url <本地或远程库包文件>" >&2
+                echo "  3) --llvm-root <本机 LLVM/MLIR 前缀>" >&2
+                exit 1
+            fi
+            URL="https://github.com/${OWNER_REPO}/releases/download/${TAG}/${ASSET}"
+        fi
+        echo "[bootstrap] 获取库包: $URL"
+        mkdir -p "$DEPS_DIR"
+        case "$URL" in
+            http*|ftp*)
+                if command -v curl >/dev/null; then curl -fL "$URL" -o "$DEPS_DIR/pkg.d"
+                else wget -O "$DEPS_DIR/pkg.d" "$URL"; fi ;;
+            *) cp "$URL" "$DEPS_DIR/pkg.d" ;;
+        esac
+        rm -rf "$MLIR_ROOT"
+        case "$URL" in
+            *.tar.zst|*.zst) tar --zstd -xf "$DEPS_DIR/pkg.d" -C "$DEPS_DIR" ;;
+            *.tar.gz|*.tgz)  tar -xzf "$DEPS_DIR/pkg.d" -C "$DEPS_DIR" ;;
+            *.zip)           unzip -q "$DEPS_DIR/pkg.d" -d "$DEPS_DIR" ;;
+            *) echo "无法识别的库包格式: $URL" >&2; exit 1 ;;
+        esac
+        rm -f "$DEPS_DIR/pkg.d"
+        [ -d "$MLIR_ROOT/lib/cmake/mlir" ] || { echo "库包结构异常（缺 lib/cmake/mlir）" >&2; exit 1; }
+        echo "[bootstrap] 库包解压至 $MLIR_ROOT（含上游 LICENSE.TXT）"
+    fi
+fi
+
+# ---- AOT clang 版本门卫 ----------------------------------------------------
+# MLIR 产出的 IR 带库包版本的属性（如 nocreateundeforpoison），旧系统 clang 在
+# scourge build 时会报 unterminated attribute group。包内自带 clang 则直接
+# 导出 SCOURGE_LLVM_BIN；否则按 LLVM_VERSION.txt 比对大版本并警告。
+if [ -x "$MLIR_ROOT/bin/clang" ]; then
+    export SCOURGE_LLVM_BIN="$MLIR_ROOT/bin"
+    echo "[bootstrap] 使用包内 clang: $MLIR_ROOT/bin"
+elif [ -f "$MLIR_ROOT/LLVM_VERSION.txt" ]; then
+    PKG_VER="$(cat "$MLIR_ROOT/LLVM_VERSION.txt")"
+    PKG_MAJOR="${PKG_VER%%.*}"
+    CLANG_MAJOR="$(clang --version 2>/dev/null | head -n1 \
+        | sed -n 's/.*version \([0-9]*\).*/\1/p')"
+    if [ -n "$PKG_MAJOR" ] && [ -n "$CLANG_MAJOR" ] && [ "$CLANG_MAJOR" -lt "$PKG_MAJOR" ]; then
+        echo "[bootstrap] 警告: clang $CLANG_MAJOR 低于库包 LLVM $PKG_VER，AOT build 将失败。" >&2
+        echo "  先安装匹配版本 clang：deb http://apt.llvm.org/<发行版>/ llvm-toolchain-<发行版>-$PKG_MAJOR main" >&2
+    fi
+fi
+
+echo "[bootstrap] cmake 配置（build-rel）"
+cmake -S "$REPO_ROOT" -B "$REPO_ROOT/build-rel" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+    -DSCOURGE_LLVM_ROOT="$MLIR_ROOT" \
+    -G Ninja
+
+echo "[bootstrap] 构建（-j$JOBS）"
+cmake --build "$REPO_ROOT/build-rel" -j"$JOBS" --target scourge scourge_tests
+
+echo "[bootstrap] 完成：$(cd "$REPO_ROOT/build-rel" && pwd)/scourge"
+echo "[bootstrap] 冒烟：$("$REPO_ROOT/build-rel/scourge" run "$REPO_ROOT/examples/hello.sg" | tail -1)"

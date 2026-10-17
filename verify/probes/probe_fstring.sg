@@ -1,0 +1,8 @@
+def main() -> int:
+    name = "Scourge"
+    n = 3
+    print(f"hello {name}!")
+    print(f"n={n} double={n * 2}")
+    print(f"literal {{}} braces")
+    print("prefix f" + f"ok")
+    return 0

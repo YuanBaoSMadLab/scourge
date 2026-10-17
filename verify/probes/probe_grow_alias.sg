@@ -1,0 +1,50 @@
+# str 自拼接原地扩容：别名登记全通道（形参/列表/字典/集合/元组/Result/
+# 函数返回局部/全局复合赋值）。别名侧内容必须与 VM 值语义逐字一致。
+def mut(p: str) -> str:
+    p += "P"
+    return p
+
+def retloc() -> str:
+    r = "R"
+    r += "L"
+    return r
+
+def main() -> int:
+    # 1 形参别名：callee 内 p += 不得影响调用方 s
+    s = "S"
+    r1 = mut(s)
+    print(s, r1)
+    # 2 列表捕获
+    l = [s]
+    s += "1"
+    print(l[0], s)
+    # 3 字典捕获（字面量 + 下标写两路）
+    d = {"k": s}
+    d["j"] = s
+    s += "2"
+    print(d["k"], d["j"], s)
+    # 4 集合捕获：成员内容冻结在捕获时刻
+    was = s
+    st = {s}
+    s += "3"
+    print(was in st, s in st, len(st))
+    # 5 元组捕获（位槽句柄，编译端登记）
+    tp = (s,)
+    s += "4"
+    print(tp[0], s)
+    # 6 Result 载荷捕获
+    res: Result[str, str] = ok(s)
+    s += "5"
+    print(res.unwrap(""), s)
+    # 7 返回局部后外层继续 +=
+    rl = retloc()
+    rl += "X"
+    print(rl)
+    # 8 RHS panic：左值不得被部分修改（grow 未执行）
+    l2 = ["ab"]
+    s2 = "S"
+    try:
+        s2 += l2[5]
+    except:
+        print("caught", s2)
+    return 0

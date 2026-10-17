@@ -1,0 +1,8 @@
+# 探测 Scourge 是否提供 Web/IO 相关内建能力（预期全部报 E2003 未知名）
+def main() -> int:
+    f = open("x.txt", "w")        # 文件 IO
+    s = socket()                  # 网络 Socket
+    j = json_dumps({"a": 1})      # JSON 序列化
+    t = "hi".upper()              # 字符串方法
+    print(str(f), str(s), str(j), str(t))
+    return 0

@@ -1,0 +1,14 @@
+capability ffi
+# 隔离 D：非变参 msvcrt printf（测 msvcrt stdio 可用性，AL=0 路径）
+@extern("msvcrt.dll")
+def printf(fmt: str) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def fflush(all: int) -> int:
+    pass
+
+def main() -> int:
+    printf("hi\n")
+    fflush(0)
+    return 0

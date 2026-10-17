@@ -1,0 +1,11 @@
+# 隔离 C：仅 data_ptr(Tensor) → memset
+capability ffi
+@extern("ucrtbase.dll")
+def memset(dst: int, c: int, n: int) -> int:
+    pass
+
+def main() -> int:
+    t = [1, 2, 3]
+    memset(data_ptr(t), 0, 24)
+    print(t[0] + t[1] + t[2])
+    return 0

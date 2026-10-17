@@ -1,0 +1,37 @@
+# @extern 动态库调用探针（0.9.4 H 专项）：真函数指针调用。
+# 覆盖：int/bool/float/str 参数与返回、str 返回 NULL 兜底（env 内建替代
+# getenv——@extern getenv 已被 Sema 处方化拒绝）、32 位返回读全 RAX
+# （GetCurrentProcessId）。断言式输出保证确定性。
+# 函数体为纯声明 pass（Sema 强制），AOT/BC 均不发射。
+capability ffi, env
+
+@extern("kernel32.dll")
+def lstrlenA(s: str) -> int:
+    pass
+
+@extern("kernel32.dll")
+def IsDebuggerPresent() -> bool:
+    pass
+
+@extern("kernel32.dll")
+def GetCurrentProcessId() -> int:
+    pass
+
+@extern("kernel32.dll")
+def MulDiv(a: int, b: int, c: int) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def pow(x: float, y: float) -> float:
+    pass
+
+def main() -> int:
+    print(lstrlenA("hello"))
+    print(lstrlenA(""))
+    print(IsDebuggerPresent())
+    print(GetCurrentProcessId() > 0)
+    print(MulDiv(6, 4, 3))
+    print(pow(2.0, 10.0) == 1024.0)
+    print(len(env("PATH")) > 0)
+    print(env("NO_SUCH_ENV_VAR_XYZ_981") == "")
+    return 0

@@ -1,0 +1,6 @@
+# 探针6：Dict 构造与使用
+def main() -> int:
+    d: Dict[str, int] = ["a", 1]
+    print(len(d))
+    print(d["a"])
+    return 0

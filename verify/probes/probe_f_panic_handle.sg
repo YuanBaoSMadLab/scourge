@@ -1,0 +1,4 @@
+capability net
+def main() -> int:
+    print(net_send(999, "x"))
+    return 0

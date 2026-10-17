@@ -6,7 +6,7 @@
 //  for（range/list/dict/set 迭代）、assert、try/except（sg_try_push 蹦床 +
 //  生成函数自帧 setjmp）。内部分块文件，共享模型见 MLIRGenDetail.hpp。
 // ============================================================================
-#include "MLIRGenDetail.hpp"
+#include "scourge/AOT/MLIRGenDetail.hpp"
 
 namespace scourge {
 namespace aot {
@@ -68,6 +68,8 @@ void Gen::genStmt(const Stmt& s) {
             emit(ssa + " = arith.sitofp " + v.ssa + " : i64 to f64");
             v = Value{VK::Float, ssa};
         }
+        if (curRetVK_ == VK::Result)
+            v = boxOption(v); // Option/Result 返回槽统一归一（批3）
         emitDefers(); // 返回值 SSA 已定，defer 块不重定义（SSA 唯一性）
         popTriesAbove(0); // return 穿越全部激活 try（对齐 VM doReturn 清理）
         terminate("func.return " + v.ssa + " : " + mlirTy(curRetVK_));
@@ -132,6 +134,62 @@ void Gen::genAssign(const Assign& a) {
             std::string vbits = dictToBits(v);
             emit("\"lang.dict_set\"(" + base.ssa + ", " + kbits + ", " +
                  vbits + ") : (!llvm.ptr, i64, i64) -> () " + opLoc());
+            return;
+        }
+        if (base.vk == VK::List) {
+            // 列表下标写（批 7 前置）：单下标 int + 按元素 VK（lElem）
+            // 分派四入口；int→float 提升、bool→i64 展宽对齐 append/张量
+            // 分支惯例。负下标归一与越界 panic 下沉 sg_list_store_*。
+            if (ix.indices.size() != 1)
+                unsupported(ix.range, "list 只支持单下标");
+            Value iv = genExpr(*ix.indices[0]);
+            if (iv.vk != VK::Int)
+                unsupported(ix.indices[0]->range, "列表下标必须是 int");
+            Value v = genExpr(*a.value);
+            switch (base.lElem) {
+            case static_cast<uint8_t>(VK::Str):
+                if (v.vk != VK::Str)
+                    unsupported(a.value->range, "下标赋值类型与列表元素不符");
+                emit("\"lang.list_store_s\"(" + base.ssa + ", " + iv.ssa +
+                     ", " + v.ssa + ") : (!llvm.ptr, i64, !llvm.ptr) -> () " +
+                     opLoc());
+                break;
+            case static_cast<uint8_t>(VK::Int):
+                if (v.vk == VK::Float)
+                    unsupported(a.value->range, "浮点值无法赋给整型列表元素");
+                if (v.vk == VK::Bool) {
+                    std::string z = fresh();
+                    emit(z + " = arith.extui " + v.ssa + " : i1 to i64");
+                    v = Value{VK::Int, z};
+                }
+                emit("\"lang.list_store_i\"(" + base.ssa + ", " + iv.ssa +
+                     ", " + v.ssa + ") : (!llvm.ptr, i64, i64) -> () " +
+                     opLoc());
+                break;
+            case static_cast<uint8_t>(VK::Float):
+                if (v.vk == VK::Int) v = promoteF64(v);
+                else if (v.vk == VK::Bool) {
+                    std::string f = fresh();
+                    emit(f + " = arith.uitofp " + v.ssa + " : i1 to f64");
+                    v = Value{VK::Float, f};
+                }
+                emit("\"lang.list_store_f\"(" + base.ssa + ", " + iv.ssa +
+                     ", " + v.ssa + ") : (!llvm.ptr, i64, f64) -> () " +
+                     opLoc());
+                break;
+            case static_cast<uint8_t>(VK::Bool): {
+                if (v.vk != VK::Bool)
+                    unsupported(a.value->range, "下标赋值类型与列表元素不符");
+                std::string z = fresh();
+                emit(z + " = arith.extui " + v.ssa + " : i1 to i64");
+                emit("\"lang.list_store_b\"(" + base.ssa + ", " + iv.ssa +
+                     ", " + v.ssa + ") : (!llvm.ptr, i64, i1) -> () " +
+                     opLoc());
+                break;
+            }
+            default:
+                unsupported(ix.base->range, "该列表元素类型不支持下标赋值");
+            }
             return;
         }
         if (base.vk != VK::Tensor)
@@ -568,7 +626,8 @@ void Gen::genFor(const For& f) {
     // List 迭代：0..len-1 计数 + 逐轮 list_get（越界不可达；与 VM ForNext
     // 的「元素 + true / 仅 false」两值语义等价——循环变量即元素）
     VK ev = static_cast<VK>(src.lElem);
-    if (ev != VK::Int && ev != VK::Float && ev != VK::Bool && ev != VK::Str)
+    if (ev != VK::Int && ev != VK::Float && ev != VK::Bool && ev != VK::Str &&
+        ev != VK::Tuple)
         unsupported(f.iter->range, "该元素类型的列表 for 迭代");
     varSlot = allocSlot(ev);
     locals_[f.var] = varSlot;
@@ -588,18 +647,32 @@ void Gen::genFor(const For& f) {
     terminate("cf.cond_br " + cont + ", " + blk(bodyB).label + ", " +
               blk(endB).label);
     cur_ = bodyB;
-    const char* getSym = ev == VK::Int   ? "lang.list_get_i"
-                         : ev == VK::Float ? "lang.list_get_f"
-                         : ev == VK::Bool  ? "lang.list_get_b"
-                                           : "lang.list_get_s";
-    const char* elemTy = ev == VK::Int   ? "i64"
-                         : ev == VK::Float ? "f64"
-                         : ev == VK::Bool  ? "i1"
-                                           : "!llvm.ptr";
+    const char* getSym;
+    const char* elemTy;
+    if (ev == VK::Float) {
+        getSym = "lang.list_get_f";
+        elemTy = "f64";
+    } else if (ev == VK::Bool) {
+        getSym = "lang.list_get_b";
+        elemTy = "i1";
+    } else if (ev == VK::Str) {
+        getSym = "lang.list_get_s";
+        elemTy = "!llvm.ptr";
+    } else {
+        getSym = "lang.list_get_i"; // Int 与 Tuple（句柄位）共用 i64 槽
+        elemTy = "i64";
+    }
     std::string el = fresh();
     emit(el + " = \"" + getSym + "\"(" + src.ssa + ", " + c + ") : (!llvm.ptr, i64) -> " +
          elemTy);
-    storeTo(varSlot, Value{ev, el});
+    if (ev == VK::Tuple) {
+        // items() 元组槽：句柄位 → ptr（genTupleLit 同形态）
+        std::string h = fresh();
+        emit(h + " = llvm.inttoptr " + el + " : i64 to !llvm.ptr");
+        storeTo(varSlot, Value{VK::Tuple, h});
+    } else {
+        storeTo(varSlot, Value{ev, el});
+    }
     // continue 目标 = 独立增量块（同 range 分支——continue 必须经增量再回条件）。
     loopStack_.push_back(
         LoopCtx{blk(endB).label, blk(incrB).label, tryStack_.size()});

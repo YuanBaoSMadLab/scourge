@@ -1,0 +1,31 @@
+# probe_list_comp.sg - 0.9.8 list comprehension probe (dual mode)
+# Syntax: [elem for x in iter (if cond)?]; iter = range/List/str.
+# Expect (run and build output byte identical):
+#   [0, 1, 4, 9] / [0, 2, 4] / [2, 3, 4] / ["a", "b"] / [1.5, 2.5]
+#   [0.5, 1.5, 2.5] / [False, False, True] / [10, 20, 30, 40] / [] / 4
+def main() -> int:
+    a: List[int] = [x * x for x in range(4)]
+    print(a)
+    b: List[int] = [x for x in range(5) if x % 2 == 0]
+    print(b)
+    src: List[int] = [1, 2, 3]
+    c: List[int] = [x + 1 for x in src]
+    print(c)
+    d: List[str] = [ch for ch in "ab"]
+    print(d)
+    fs: List[float] = [1.0, 2.0]
+    e: List[float] = [v + 0.5 for v in fs]
+    print(e)
+    # int loop variable promoted at the element boundary (append path)
+    f: List[float] = [x + 0.5 for x in range(3)]
+    print(f)
+    g: List[bool] = [x > 1 for x in range(3)]
+    print(g)
+    h: List[int] = [x * 10 for x in range(5) if x > 0]
+    print(h)
+    # filter rejects all -> empty result
+    i: List[int] = [x for x in src if x > 99]
+    print(i)
+    # comprehension result composes with existing builtins
+    print(len(h))
+    return 0

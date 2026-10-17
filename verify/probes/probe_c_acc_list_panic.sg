@@ -1,0 +1,4 @@
+def main() -> int:
+    xs: List[int] = [1, 2]
+    print(xs.index(9))
+    return 0

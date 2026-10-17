@@ -1,0 +1,45 @@
+# ============================================================================
+#  t06_funcs.sg — 函数：注解、默认参数（已知缺口）、递归、None 返回、参数遮蔽
+#  对应章节：第7章 函数
+# ============================================================================
+
+def repeat(s: str, times: int = 2) -> str:
+    """重复字符串：默认参数演示（注意：调用省略实参当前报 E2001，见已知缺口）。"""
+    out = ""
+    for i in range(times):
+        out = out + s
+    return out
+
+def fib(n: int) -> int:
+    """递归下降：调用帧与整数运算。"""
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def noReturn() -> None:
+    print("called")
+
+def defaults(a: int, b: int = 10, c: float = 1.5) -> float:
+    return a + b + c
+
+def shadow(x: int) -> int:
+    x = x + 1
+    return x
+
+def main() -> int:
+    # 默认参数：声明合法，但调用必须显式给全实参（0.9.1 已知缺口）
+    print(repeat("ab", 2))
+    print(repeat("ab", 3))
+    print(fib(10))
+    noReturn()
+    print(defaults(1, 2, 3.5))
+    print(shadow(41))
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# abab
+# ababab
+# 55
+# called
+# 6.5
+# 42

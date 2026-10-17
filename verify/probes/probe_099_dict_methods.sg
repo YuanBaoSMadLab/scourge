@@ -1,0 +1,22 @@
+# 0.9.9 内建探针：Dict 视图方法 keys/values/items/get + 元组槽还原
+def main() -> int:
+    d: Dict[str, int] = {"a": 1}
+    d["b"] = 2
+    ks = d.keys()
+    vs = d.values()
+    print(ks)
+    print(vs)
+    print(len(ks))
+    its = d.items()
+    t = its[0]
+    print(t[0])
+    print(t[1])
+    t1 = its[1]
+    print(t1[0])
+    print(t1[1])
+    for it in d.items():
+        print(it[0])
+        print(it[1])
+    print(d.get("a", 0))
+    print(d.get("zz", -1))
+    return 0

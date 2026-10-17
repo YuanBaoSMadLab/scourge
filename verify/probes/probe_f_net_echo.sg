@@ -1,0 +1,15 @@
+capability net
+# F 验收：TCP echo 往返（net_connect/send/recv/close 全链路 + 对端关闭返回空串）
+def main() -> int:
+    h: int = net_connect("127.0.0.1", 23456)
+    print(h >= 1)
+    n: int = net_send(h, "ping-123")
+    print(n)
+    r: str = net_recv(h, 64)
+    print(r)
+    net_close(h)
+    print("closed")
+    h2: int = net_connect("127.0.0.1", 23460)
+    print(net_recv(h2, 64) == "")
+    net_close(h2)
+    return 0

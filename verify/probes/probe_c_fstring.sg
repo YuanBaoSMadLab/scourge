@@ -1,0 +1,5 @@
+# C2 探针：f-string 格式化
+def main() -> int:
+    n: int = 3
+    print(f"n={n}")
+    return 0

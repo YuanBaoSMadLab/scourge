@@ -1,0 +1,10 @@
+# Q14 数值正确性 + sorted 对 List 排序（用下标验证，避开 str(List) 限制）
+def main() -> int:
+    print(str(sin(0.0)), str(cos(0.0)), str(tan(0.0)))   # 0.0 1.0 0.0
+    print(str(floor(2.5)), str(ceil(2.5)), str(trunc(-2.7)))  # 2.0 3.0 -2.0
+    seed(42)
+    print(str(random()))                                 # [0,1) 浮点
+    words: List[str] = ["c", "a", "b"]
+    s = sorted(words)
+    print(s[0], s[1], s[2])                              # a b c
+    return 0

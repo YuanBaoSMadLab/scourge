@@ -1,0 +1,51 @@
+# ============================================================================
+#  t16_dual_mode.sg — 双模一致性：run（字节码 VM）与 build（AOT 原生）逐字节一致
+#  对应章节：第15章 AOT 构建与双模一致性
+#  验证：scourge run t16_dual_mode.sg > run.txt
+#        scourge build t16_dual_mode.sg -o t16.exe && t16.exe > build.txt
+#        diff run.txt build.txt   （期望无差异）
+# ============================================================================
+
+def divPanic(a: int, b: int) -> int:
+    try:
+        return a // b
+    except:
+        return -1
+
+def main() -> int:
+    # 标量路径
+    print(1 + 2 * 3)
+    print(7 / 2)
+    print(7 // 2)
+    print(2 ** 10)
+    print("ab" + "cd")
+
+    # 张量路径
+    a = [[1.0, 2.0], [3.0, 4.0]]
+    print(a @ a)
+    print(a * 2.0)
+    print(sum(a))
+
+    # Result / List / try-except 路径
+    r: Result[int, str] = ok(9)
+    print(r.unwrap(0))
+    xs: List[str] = ["a", "b", "c"]
+    total = ""
+    for v in xs:
+        total += v
+    print(total)
+    print(divPanic(1, 0))
+    return 0
+
+# 期望输出（scourge 0.9.1 实测，run 与 build 一致）：
+# 7
+# 3.5
+# 3
+# 1024
+# abcd
+# Tensor(2, 2) [[7.0, 10.0], [15.0, 22.0]]
+# Tensor(2, 2) [[2.0, 4.0], [6.0, 8.0]]
+# 10.0
+# 9
+# abc
+# -1

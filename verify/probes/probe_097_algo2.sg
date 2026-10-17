@@ -1,0 +1,9 @@
+# 验证：min/max 张量归约 + reversed/sorted 对 List[int] 的可用性（C-D P0-2/P1-1）
+def main() -> int:
+    t = [3.0, 1.0, 2.0]
+    print(min(t))
+    print(max(t))
+    xs: List[int] = [3, 1, 2]
+    print(reversed(xs))
+    print(sorted(xs))
+    return 0

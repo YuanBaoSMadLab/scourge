@@ -1,0 +1,15 @@
+# 验证：H 专项系统编程内建（env/time/proc/signal 域）
+capability env, time, proc, signal
+
+def main() -> int:
+    set_env("SCOURGE_PROBE", "v1")
+    print(env("SCOURGE_PROBE"))
+    print(has_env("SCOURGE_PROBE"))
+    print(epoch_ms() > 0)
+    print(len(localtime(epoch_ms())))
+    print(len(gmtime(epoch_ms())))
+    print(system("exit 0") == 0)
+    caught = signal_caught()
+    signal_reset()
+    print(caught)
+    return 0

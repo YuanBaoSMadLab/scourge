@@ -1,0 +1,15 @@
+# Q14 数值正确性 + sorted 仅接受 List（非 Tensor）
+def main() -> int:
+    print(str(sin(0.0)), str(cos(0.0)), str(tan(0.0)))     # 0.0 1.0 0.0
+    print(str(asin(0.0)), str(acos(1.0)), str(atan(0.0)))   # 0.0 0.0 0.0
+    print(str(sinh(0.0)), str(cosh(0.0)), str(tanh(0.0)))   # 0.0 1.0 0.0
+    print(str(atan2(1.0, 1.0)))                              # ~0.785398
+    print(str(floor(2.5)), str(floor(-2.5)))                 # 2.0 -3.0
+    print(str(ceil(2.5)), str(ceil(-2.5)))                   # 3.0 -2.0
+    print(str(round(2.5)), str(round(2.4)))                  # 3.0 2.0 (或 2.0/2.0)
+    print(str(trunc(-2.7)), str(trunc(2.7)))                 # -2.0 2.0
+    seed(42)
+    print(str(random()))                                     # [0,1) 浮点
+    words: List[str] = ["c", "a", "b"]
+    print(str(sorted(words)))                                # ["a","b","c"]
+    return 0

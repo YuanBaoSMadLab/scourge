@@ -1,0 +1,6 @@
+# 段错误二分 B：多参数 print + List 下标
+def main() -> int:
+    xs: List[str] = ["a", "b", "c"]
+    print(xs[0], xs[2])
+    print(len(xs))
+    return 0

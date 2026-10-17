@@ -1,0 +1,5 @@
+def main() -> int:
+    words: List[str] = ["a", "b"]
+    if "a" in words:
+        print("yes")
+    return 0

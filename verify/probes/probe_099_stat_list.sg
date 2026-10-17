@@ -1,0 +1,24 @@
+# 0.9.9 内建探针：sum/max/min 接 List（i64/f64/bool 三域 + 空序列语义）
+def main() -> int:
+    xs: List[int] = [3, 1, 2]
+    fs: List[float] = [1.5, 2.5]
+    bs: List[bool] = [True, False, True]
+    print(sum(xs))
+    print(sum(fs))
+    print(sum(bs))
+    print(max(xs))
+    print(min(xs))
+    print(max(fs))
+    print(min(fs))
+    print(max(bs))
+    empty: List[int] = []
+    print(sum(empty))
+    try:
+        max(empty)
+    except:
+        print("empty-max")
+    try:
+        min(empty)
+    except:
+        print("empty-min")
+    return 0

@@ -1,0 +1,14 @@
+# 验证 0.9.3 Q14 新增 17 标量内建：sin/cos/tan/asin/acos/atan/sinh/cosh/tanh/atan2/floor/ceil/round/trunc/random/seed/sorted
+def main() -> int:
+    print(str(sin(0.0)), str(cos(0.0)), str(tan(0.0)))          # 期望 0.0 1.0 0.0
+    print(str(asin(0.0)), str(acos(1.0)), str(atan(0.0)))        # 期望 0.0 0.0 0.0
+    print(str(sinh(0.0)), str(cosh(0.0)), str(tanh(0.0)))        # 期望 0.0 1.0 0.0
+    print(str(atan2(1.0, 1.0)))                                   # 期望 0.785398...
+    print(str(floor(2.5)), str(floor(-2.5)))                      # 期望 2.0 -3.0
+    print(str(ceil(2.5)), str(ceil(-2.5)))                        # 期望 3.0 -2.0
+    print(str(round(2.5)), str(round(2.4)))                       # 期望 3.0 2.0
+    print(str(trunc(-2.7)), str(trunc(2.7)))                      # 期望 -2.0 2.0
+    seed(42)
+    print(str(random()))                                          # 期望 [0,1) 浮点
+    print(str(sorted([3, 1, 2])))                                 # 期望 [1, 2, 3]
+    return 0

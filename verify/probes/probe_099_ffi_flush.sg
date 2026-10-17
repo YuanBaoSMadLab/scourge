@@ -1,0 +1,23 @@
+# 0.9.9 F-4 fflush 缓冲统一探针：print 与 @extern printf 交错序。
+# 重定向下（管道/文件全缓冲）：宿主 UCRT 与外部 msvcrt 的 stdout 缓冲
+# 独立——每次 @extern 调用前宿主缓冲冲刷（VM/AOT 同点），交错序确定：
+# A1 / [ext1 7] / B1 / [ext2 x] / C1。修复前 msvcrt 输出会先于宿主缓冲。
+capability ffi
+
+@extern("msvcrt.dll")
+def printf(fmt: str, ...) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def fflush(all: int) -> int:
+    pass
+
+def main() -> int:
+    print("A1")
+    printf("[ext1 %d]\n", 7)
+    fflush(0)
+    print("B1")
+    printf("[ext2 %s]\n", "x")
+    fflush(0)
+    print("C1")
+    return 0

@@ -13,8 +13,8 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify\str_grow"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify\str_grow"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
 
@@ -28,9 +28,9 @@ $pos = @("probe_grow_basic", "probe_grow_alias", "probe_grow_flow",
 foreach ($n in $pos) {
     Clean-Artifacts $n
 
-    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\codebuddytest\$n.sg") -NoNewWindow -Wait -PassThru `
+    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\verify\probes\$n.sg") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.run.out" -RedirectStandardError "$dir\$n.run.err"
-    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\codebuddytest\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
+    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\verify\probes\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.build.out" -RedirectStandardError "$dir\$n.build.err"
     if ($p2.ExitCode -ne 0) {
         Write-Host "$n BUILD-FAIL"; Get-Content "$dir\$n.build.err" -First 20; $fail = 1; continue
@@ -58,7 +58,7 @@ foreach ($n in $pos) {
 # process-spawn floor of direct invocation. Old AOT (bump-per-concat, no
 # grow) measured ~1046ms for a SINGLE 40000 loop; the grow path must keep
 # the loop O(n) - watch that aot stays far below vm.
-$src = "d:\Scourge\codebuddytest\probe_grow_bench.sg"
+$src = "d:\Scourge\verify\probes\probe_grow_bench.sg"
 Set-Content -Path $src -Encoding Ascii -Value @(
     'def main() -> int:',
     '    s = ""',

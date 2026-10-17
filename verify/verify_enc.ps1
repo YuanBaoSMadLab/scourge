@@ -5,10 +5,10 @@
 #   T2 (non-BMP emoji, GBK cannot encode) in 3 encodings       -> identical stdout
 #   AOT: build one T1 probe, run exe, stdout identical to run mode
 $ErrorActionPreference = 'Stop'
-$root = 'd:\Scourge\build\verify\enc'
+$root = 'd:\Scourge\build-rel\verify\enc'
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-$scourge = 'd:\Scourge\build\scourge.exe'
+$scourge = 'd:\Scourge\build-rel\scourge.exe'
 
 $t1 = -join @([char]0x4F60, [char]0x597D, [char]0x2C, [char]0x4E16, [char]0x754C, [char]0x41, [char]0x42, [char]0x43)
 $t2 = [string][char]0x4F60 + [string][char]0x597D + [string][char]0xD83C + [string][char]0xDF89 + [string][char]0x21

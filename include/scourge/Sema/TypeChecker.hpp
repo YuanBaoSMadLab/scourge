@@ -138,10 +138,14 @@ private:
     TypePtr checkAttr(const Expr& e);
     TypePtr checkIndex(const Expr& e);
     TypePtr checkListLit(const Expr& e);
+    TypePtr checkListComp(const Expr& e);
     TypePtr checkDictLit(const Expr& e);
     TypePtr checkSetLit(const Expr& e);
     TypePtr checkTupleLit(const Expr& e);
     TypePtr checkName(const Expr& e);
+    /// 迭代器类型 → 元素类型（for 语句与列表推导式共用；覆盖 range/List/
+    /// str/Dict/Set，不支持返回 Err，报错措辞由调用方定夺）。
+    TypePtr iterElemOf(const TypePtr& it) const;
 
     // ---- 契约静态验证（调用点） -------------------------------------------------
     struct ConstVal {
@@ -205,6 +209,12 @@ private:
     /// 元素统一对齐注解（int 元素提升）；空 {} 在 Set 上下文判为空集合
     /// （checkedAsSet）。检查完表达式立即清空。
     const Type* setTarget_ = nullptr;
+    /// Tuple 上下文偏好（单发旗标，同 dictTarget_ 架构，0.9.9 批3）：赋值
+    /// 目标为元组注解（或既有元组变量）时指向目标类型，checkTupleLit 据此
+    /// 逐位对齐——int 元素遇 float 位打提升标记并改写推断位，AOT 装箱
+    /// （genTupleLit）按位消费，杜绝 int 位型存槽 / float 位读型的错位。
+    /// 检查完表达式立即清空。
+    const Type* tupleTarget_ = nullptr;
 
     // ---- 能力门禁（0.9.7）------------------------------------------------------
     /// 本模块 capability 声明集（collectTopLevel 扫描并集；check 开头重置）。

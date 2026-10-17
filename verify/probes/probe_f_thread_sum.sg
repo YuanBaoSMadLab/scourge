@@ -1,0 +1,27 @@
+capability thread
+# 真并发 M1 验收 1：4 线程 × 1000 次（全局锁内累加共享计数）→ 4000
+# 语义说明：函数内对名字赋值是局部绑定（不落全局），共享可变状态走
+# Dict 下标赋值（双模 StoreIndex 均支持；List 下标赋值 AOT 未支持，
+# 张量按值语义不适合共享突变）；锁句柄在模块顶层初始化（<top> →
+# StoreGlobal），worker 经 LoadGlobal 读取。读-改-写全程锁内。
+# 探针只在 join 后 print，双模输出确定（多线程不打印）。
+counter: Dict[str, int] = {"n": 0}
+lk = lock_new()
+
+def worker() -> None:
+    for i in range(1000):
+        lock_acquire(lk)
+        counter["n"] = counter["n"] + 1
+        lock_release(lk)
+
+def main() -> int:
+    h1: int = thread_spawn("worker")
+    h2: int = thread_spawn("worker")
+    h3: int = thread_spawn("worker")
+    h4: int = thread_spawn("worker")
+    thread_join(h1)
+    thread_join(h2)
+    thread_join(h3)
+    thread_join(h4)
+    print(counter["n"])
+    return 0

@@ -1,0 +1,13 @@
+# K 验收：@pure 调用纯内建/纯函数/递归——全放行
+@pure
+def sq(x: int) -> int:
+    return x * x
+@pure
+def calc(n: int) -> int:
+    if n <= 1:
+        return abs(n) + 1
+    return sq(n) + calc(n - 1)
+def main() -> int:
+    print(calc(4))
+    print(len("abcd"), floor(2.7), round(2.5))
+    return 0

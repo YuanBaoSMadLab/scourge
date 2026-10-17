@@ -1,0 +1,15 @@
+# 验证：@extern 变参 ... + fflush（MS x64 双 ABI）
+capability ffi
+
+@extern("msvcrt.dll")
+def printf(fmt: str, ...) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def fflush(stream: int) -> int:
+    pass
+
+def main() -> int:
+    printf("hi %d %.2f\n", 42, 3.5)
+    fflush(0)
+    return 0

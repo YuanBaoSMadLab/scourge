@@ -1,0 +1,12 @@
+# Q5 现状普查：Dict 字面量/str 键/len/in/for 遍历键/print
+def main() -> int:
+    d: Dict[str, int] = {"a": 1, "b": 2}
+    print(d["a"])
+    d["c"] = 3
+    print(d["c"])
+    print(len(d))
+    print("b" in d)
+    for k in d:
+        print(k)
+    print(d)
+    return 0

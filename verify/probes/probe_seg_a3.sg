@@ -1,0 +1,5 @@
+# 段错误二分 A3：str 声明式注解 + 打印
+def main() -> int:
+    s: str
+    print(s)
+    return 0

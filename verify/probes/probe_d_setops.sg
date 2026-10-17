@@ -1,0 +1,5 @@
+# D4 探针：Set 字面量与集合运算
+def main() -> int:
+    s: Set[int] = {1, 2, 3}
+    print(len(s))
+    return 0

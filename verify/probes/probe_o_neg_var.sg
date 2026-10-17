@@ -1,0 +1,6 @@
+# O 节负例：非 @extern 函数带变参标记 → Sema E1007
+def f(a: int, ...) -> int:
+    pass
+
+def main() -> int:
+    return 0

@@ -1,0 +1,4 @@
+def main() -> int:
+    xs: List[int] = []
+    print(xs)
+    return 0

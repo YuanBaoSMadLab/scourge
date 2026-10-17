@@ -1,0 +1,21 @@
+# ============================================================================
+#  t15_async.sg — 并发基座：async def 与 await 的当前语义
+#  对应章节：第13章 并发基座
+# ============================================================================
+
+async def double(x: int) -> int:
+    """async 函数：P0 阶段 await 为类型恒等，函数同步执行。"""
+    return x * 2
+
+async def pipeline(x: int) -> int:
+    y = await double(x)
+    z = await double(y)
+    return z
+
+def main() -> int:
+    # await 只能出现在 async def 内（否则报 E2010）
+    print(pipeline(3))
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# 12

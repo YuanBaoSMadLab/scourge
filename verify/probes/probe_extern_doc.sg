@@ -1,0 +1,8 @@
+capability ffi
+# D2：@extern 允许 docstring-only 函数体
+@extern("c")
+def c_abs(x: int) -> int:
+    "C 库 abs（外部 C ABI 实现）"
+
+def main() -> int:
+    return 0

@@ -1,0 +1,35 @@
+capability net
+# probe_http_acc_server.sg - HTTP 服务端闭环（0.9.8）
+# bind -> accept x3 -> read_request(路由: / /echo 404) -> write_response -> close
+# 客户端: verify/http_test_client.py（固定 3 请求：GET /、GET /、POST /echo）
+# 服务器 stdout 仅含确定性日志（请求序列固定）。
+def respond(conn: int, status: int, body: str) -> None:
+    n: int = net_http_write_response(conn, status, "text/plain; charset=utf-8",
+                                     body)
+    print("sent", n)
+
+def main() -> int:
+    l: int = net_bind("127.0.0.1", 23580)
+    print("up", l >= 1)
+    i: int = 0
+    while i < 3:
+        c: int = net_accept(l)
+        req: Json = net_http_read_request(c)
+        if req.is_null():
+            print("null-req")
+            net_close(c)
+            continue
+        path: str = req.get("path").as_str()
+        method: str = req.get("method").as_str()
+        print(method, path)
+        if path == "/":
+            respond(c, 200, "hello-http")
+        elif path == "/echo":
+            respond(c, 200, req.get("body").as_str())
+        else:
+            respond(c, 404, "nope")
+        net_close(c)
+        i = i + 1
+    net_close(l)
+    print("bye")
+    return 0

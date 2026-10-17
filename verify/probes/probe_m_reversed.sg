@@ -1,0 +1,4 @@
+def main() -> int:
+    xs: List[int] = [1, 2, 3]
+    print(reversed(xs))
+    return 0

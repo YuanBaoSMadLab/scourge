@@ -1,0 +1,6 @@
+# 负探针：f-string 格式说明符非法形态（int 带精度，Python 同拒）
+# 0.9.9 批 2 起 spec 已放行（fill/align/宽度/精度/type），此处锁定仍拒绝面。
+def main() -> int:
+    x = 1
+    print(f"{x:.2d}")
+    return 0

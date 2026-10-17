@@ -1,0 +1,73 @@
+# ============================================================================
+#  t04_ops.sg — 运算符与表达式：优先级、数值规则、比较、逻辑、三元
+#  对应章节：第5章 运算符与表达式
+# ============================================================================
+
+def main() -> int:
+    # 算术：int ∘ int → int；任一侧 float → float
+    print(1 + 2)          # 3
+    print(1 + 2.0)        # 3.0
+    print(4 / 2)          # 真除法恒为 float：2.0
+    print(7 // 2)         # 地板除：3
+    print(-7 // 2)        # Python 同号修正：-4
+    print(-7 % 3)         # 取模与除数同号：2
+    print(2 ** 10)        # 幂：1024（int）
+    print(2 ** -1)        # 负指数 → float：0.5
+    print(2 ** 3 ** 2)    # 幂右结合：512
+
+    # 优先级：** > 一元 > * / // % @ > + - > 比较 > not > and > or
+    print(2 + 3 * 4)          # 14
+    print(-2 ** 2)            # -4（幂优先于一元负号）
+    print(1 + 2 < 4)          # True
+    print(not 1 == 2)         # True
+    print(True or False and False)   # True（and 优先于 or）
+
+    # 比较：不可链式连写（a < b < c 报 E1007），用 and 组合
+    a = 1
+    b = 2
+    c = 3
+    print(a < b and b < c)
+
+    # 字符串比较按字典序
+    print("abc" < "abd")
+
+    # 三元条件：两分支类型须一致（或可数值统一）
+    print("big" if c > b else "small")
+    print(1 if c > b else 2.5)
+
+    # 一元运算
+    print(-(3 - 5))
+    print(+7)
+    print(not False)
+
+    # in：List 成员 / str 子串；张量不支持 in（E2001）
+    names: List[str] = ["x", "y"]
+    print("y" in names)
+    print("z" in names)
+
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# 3
+# 3.0
+# 2.0
+# 3
+# -4
+# 2
+# 1024
+# 0.5
+# 512
+# 14
+# -4
+# True
+# True
+# True
+# True
+# True
+# big
+# 1
+# 2
+# 7
+# True
+# True
+# False

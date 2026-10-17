@@ -1,0 +1,8 @@
+# 探测 enum 是否已支持（预期不支持）
+enum Color:
+    Red
+    Green
+    Blue
+
+def main() -> int:
+    return 0

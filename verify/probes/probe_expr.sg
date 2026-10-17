@@ -1,0 +1,14 @@
+# 探针10：三元、in、链式比较、逻辑运算
+def main() -> int:
+    x = 5
+    y = x if x > 3 else 0
+    print(y)
+    print("ell" in "hello")
+
+    print(True and False)
+    print(True or False)
+    print(not True)
+    a = 1
+    b = 2
+    print(a < b and b < 3)
+    return 0

@@ -1,0 +1,4 @@
+def main() -> int:
+    d: Dict[str, int] = {"a": 1}
+    print(d["zz"])
+    return 0

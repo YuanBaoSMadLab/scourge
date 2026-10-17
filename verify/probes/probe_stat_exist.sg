@@ -1,0 +1,8 @@
+# 统计库现状探针：mean/var/std 是否真的可用（缺失清单声称"无"）
+def main() -> int:
+    a = [[1.0, 2.0], [3.0, 4.0]]
+    print(mean(a))
+    print(var(a))
+    print(std(a))
+    print(mean([1, 2, 3]))
+    return 0

@@ -1,0 +1,88 @@
+# ============================================================================
+#  probe_b7_nn_train.sg — 批 7 探针：std/nn 训练收敛（SGD 与 Adam）
+# ----------------------------------------------------------------------------
+#  任务：线性回归 y ≈ w0·x1 + w1·x2 + w2（偏置折入常 1 输入维，参数单表
+#  W(3)——nn.linear 的独立 b 传 [0.0] 不收集，梯度走 W 第三维，数学等价）。
+#  每 epoch 重建 tape：params → 逐样本 linear → mse → gather_grads →
+#  sgd / adam 原地更新。断言两优化器最终 loss 均低于初值（收敛性）。
+#  期望输出（恒定）：两段 loss 轨迹 + 末行 NN-TRAIN OK。
+# ============================================================================
+
+import std.autodiff as ad
+import std.nn
+
+NIN = 3
+NOUT = 1
+NS = 12
+EP = 200
+LR = 0.05
+
+def main() -> int:
+    # 固定数据（公式生成，可复现）：每样本 [x1, x2, 1.0]
+    xs: List[float] = []
+    ys: List[float] = []
+    for i in range(NS):
+        x1 = (i % 6) * 0.4 - 1.0
+        x2 = (i % 4) * 0.5 - 1.0
+        noise = ((i * 5) % 7 - 3) * 0.05
+        xs.append(x1)
+        xs.append(x2)
+        xs.append(1.0)
+        ys.append(2.0 * x1 - 1.5 * x2 + 1.0 + noise)
+    b0: List[float] = [0.0] # 偏置折入 W 后恒置零
+
+    # ---- SGD 段 ----
+    W: List[float] = [0.5, -0.25, 0.1]
+    e = 0
+    while e < EP:
+        T = ad.tape()
+        ids = std.nn.params(T, W, b0, NIN, NOUT)
+        preds: List[int] = []
+        s = 0
+        while s < NS:
+            xi: List[float] = []
+            xi.append(xs[3 * s])
+            xi.append(xs[3 * s + 1])
+            xi.append(xs[3 * s + 2])
+            o = std.nn.linear(T, ids, xi, NIN, NOUT)
+            preds.append(o[0])
+            s = s + 1
+        ln = std.nn.mse(T, preds, ys, NS)
+        g = std.nn.gather_grads(T, ln, ids, NIN * NOUT)
+        if e % 100 == 0:
+            print("sgd ep" + str(e) + " loss=" + fmt(ad.value(T, ln), ".6f"))
+        std.nn.sgd(W, g, LR, NIN * NOUT)
+        e = e + 1
+    loss_sgd = ad.value(T, ln)
+    print("sgd final loss=" + fmt(loss_sgd, ".6f"))
+    assert(loss_sgd < 1.0)
+
+    # ---- Adam 段（重置参数与状态） ----
+    W = [0.5, -0.25, 0.1]
+    m: List[float] = [0.0, 0.0, 0.0]
+    v: List[float] = [0.0, 0.0, 0.0]
+    e = 0
+    while e < EP:
+        T = ad.tape()
+        ids = std.nn.params(T, W, b0, NIN, NOUT)
+        preds: List[int] = []
+        s = 0
+        while s < NS:
+            xi: List[float] = []
+            xi.append(xs[3 * s])
+            xi.append(xs[3 * s + 1])
+            xi.append(xs[3 * s + 2])
+            o = std.nn.linear(T, ids, xi, NIN, NOUT)
+            preds.append(o[0])
+            s = s + 1
+        ln = std.nn.mse(T, preds, ys, NS)
+        g = std.nn.gather_grads(T, ln, ids, NIN * NOUT)
+        if e % 100 == 0:
+            print("adam ep" + str(e) + " loss=" + fmt(ad.value(T, ln), ".6f"))
+        std.nn.adam(W, g, m, v, LR, e + 1, NIN * NOUT)
+        e = e + 1
+    loss_adam = ad.value(T, ln)
+    print("adam final loss=" + fmt(loss_adam, ".6f"))
+    assert(loss_adam < 1.0)
+    print("NN-TRAIN OK")
+    return 0

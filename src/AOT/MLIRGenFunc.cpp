@@ -7,7 +7,7 @@
 //  loadGlobal/storeGlobal）与 func.call 发射（emitCallRet：int→float 提升、
 //  张量/List 返回值元数据回填）。内部分块文件，共享模型见 MLIRGenDetail.hpp。
 // ============================================================================
-#include "MLIRGenDetail.hpp"
+#include "scourge/AOT/MLIRGenDetail.hpp"
 
 namespace scourge {
 namespace aot {
@@ -249,11 +249,12 @@ Value Gen::loadSlot(const Slot& slot) {
 /// Tensor 槽同步更新元素 dtype / 秩记录；List 槽同步更新元素 VK 记录。
 void Gen::storeTo(Slot& slot, Value v) {
     if (slot.vk == VK::None) return;
+    if (slot.vk == VK::Result) v = boxOption(v); // Option/Result 槽统一归一
     if (slot.vk == VK::Tensor) {
         slot.tInt = v.tInt;
         slot.tRank = v.tRank;
     }
-    if (slot.vk == VK::List) slot.lElem = v.lElem;
+    if (slot.vk == VK::List && v.lElem != 0) slot.lElem = v.lElem;
     if (slot.vk == VK::Float && v.vk == VK::Int) {
         std::string ssa = fresh();
         emit(ssa + " = arith.sitofp " + v.ssa + " : i64 to f64");
@@ -276,11 +277,14 @@ Value Gen::loadGlobal(const std::string& module, const std::string& name) {
     emit(p + " = llvm.mlir.addressof " + g.sym + " : !llvm.ptr");
     std::string ssa = fresh();
     emit(ssa + " = llvm.load " + p + " : !llvm.ptr -> " + mlirTy(g.vk));
-    return Value{g.vk, ssa};
+    // 容器/句柄元数据回填（List 元素 VK / Tensor dtype+秩），读出后的
+    // list_get_*/张量分派依赖——与函数参数、emitCallRet 回填同构。
+    return Value{g.vk, ssa, g.tInt, g.tRank, g.lElem};
 }
 
 void Gen::storeGlobal(const GlobalSlot& g, Value v) {
     if (g.vk == VK::None) return;
+    if (g.vk == VK::Result) v = boxOption(v); // Option/Result 槽统一归一
     std::string p = fresh();
     emit(p + " = llvm.mlir.addressof " + g.sym + " : !llvm.ptr");
     if (g.vk == VK::Float && v.vk == VK::Int) {
@@ -294,10 +298,35 @@ void Gen::storeGlobal(const GlobalSlot& g, Value v) {
          ", !llvm.ptr");
 }
 
+/// Option/Result 句柄槽右值归一（0.9.9 批3）：None 右值 → err("") 失败态
+/// 句柄（零 RT 新符号；is_ok(err)=false 即 is_some(None)）；裸标量 →
+/// lang.result_ok_* 包装（发射形态与 genBuiltinCall ok 分支逐字同构）；
+/// Result 句柄（ok()/err() 产出）直存。与 VM 三形态动态判定观察一致。
+Value Gen::boxOption(Value v) {
+    const char* sym = nullptr;
+    switch (v.vk) {
+    case VK::Int: sym = "lang.result_ok_i"; break;
+    case VK::Float: sym = "lang.result_ok_f"; break;
+    case VK::Bool: sym = "lang.result_ok_b"; break;
+    case VK::Str: sym = "lang.result_ok_s"; break;
+    case VK::None: sym = "lang.result_err"; break;
+    default: return v;
+    }
+    std::string ssa = fresh();
+    if (v.vk == VK::None) {
+        Value e = strConst(""); // 空串 SSA（MLIR 调用实参不能内联字面量）
+        emit(ssa + " = \"lang.result_err\"(" + e.ssa +
+             ") : (!llvm.ptr) -> !llvm.ptr");
+    } else
+        emit(ssa + " = \"" + sym + "\"(" + v.ssa + ") : (" +
+             std::string(mlirTy(v.vk)) + ") -> !llvm.ptr");
+    return Value{VK::Result, ssa, false, 0,
+                 static_cast<uint8_t>(v.vk == VK::None ? VK::Str : v.vk)};
+}
+
 // ============================================================================
 // 调用发射
 // ============================================================================
-
 Value Gen::emitCallRet(const std::string& sym, const std::vector<Value>& args,
                        const std::vector<VK>& paramVKs, VK retVK,
                        const TypePtr& retType) {

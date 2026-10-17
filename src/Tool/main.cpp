@@ -286,6 +286,7 @@ int cmdBuild(const std::vector<std::string>& args) {
     std::string inFile;
     bool gpuMode = false;
     bool useCache = true;
+    bool explicitSysroot = false; // 显式 --sysroot：一键交叉不覆盖
     CrossOpts xo;
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "-o" && i + 1 < args.size()) {
@@ -296,8 +297,11 @@ int cmdBuild(const std::vector<std::string>& args) {
             useCache = false; /* 跳过 .sgbuild/obj 缓存，单步直编直链 */
         } else if (args[i] == "--target" && i + 1 < args.size()) {
             xo.target = args[++i]; /* LLVM triple（跨平台/嵌入式 Linux） */
+        } else if (args[i].rfind("--target=", 0) == 0) {
+            xo.target = args[i].substr(9); /* 等号形态（脚本/CI 友好） */
         } else if (args[i] == "--sysroot" && i + 1 < args.size()) {
             xo.sysroot = args[++i]; /* musl 静态 sysroot 目录 */
+            explicitSysroot = true;
         } else if (args[i] == "--cpu" && i + 1 < args.size()) {
             xo.cpu = args[++i]; /* -mcpu（cortex-a53…） */
         } else if (args[i] == "--march" && i + 1 < args.size()) {
@@ -309,10 +313,47 @@ int cmdBuild(const std::vector<std::string>& args) {
         }
     }
     if (inFile.empty() || args.size() > 15) {
-        std::cerr << "用法: scourge build [--gpu] [--no-cache] [--target <triple>] "
+        std::cerr << "用法: scourge build [--gpu] [--no-cache] "
+                     "[--target <triple>|--target=<triple>] "
                      "[--sysroot <dir>] [--cpu <c>] [--march <a>] [--static] "
                      "<file.sg> [-o out]\n";
         return 2;
+    }
+
+    // ---- 一键交叉（0.9.9）：POSIX triple 自动补齐 musl 静态链接与 sysroot
+    // 定位——交叉不再要求记全 --target/--sysroot/--static 三件套。显式
+    // --sysroot 优先（不覆盖，Builder 照旧校验其完整性）。 ----
+    if (!xo.target.empty() &&
+        xo.target.find("windows") == std::string::npos &&
+        xo.target.find("mingw") == std::string::npos) {
+        xo.staticLink = true; // musl 静态产物零依赖（Builder 对交叉同此约束）
+        if (!explicitSysroot) {
+            // 候选相对当前目录，命中首个含 lib/libc.a 者（与 Builder 校验
+            // 同一判定，避免选中不完整 sysroot）
+            const std::string cands[] = {
+                "vendor/" + xo.target + "/sysroot",
+                "vendor/" + xo.target,
+                "toolchain/sysroot-" + xo.target,
+            };
+            std::error_code ec;
+            for (const std::string& c : cands) {
+                if (fs::exists(fs::path(c) / "lib" / "libc.a", ec)) {
+                    xo.sysroot = c;
+                    break;
+                }
+            }
+            if (xo.sysroot.empty()) {
+                std::cerr << "一键交叉：未找到 " << xo.target
+                          << " 的 musl sysroot（已尝试 vendor/" << xo.target
+                          << "/sysroot、vendor/" << xo.target
+                          << "/、toolchain/sysroot-" << xo.target
+                          << "，要求含 lib/libc.a）\n"
+                             "  处方：在仓库根目录运行 "
+                             "toolchain/build_musl_sysroot.sh 产出后重试，"
+                             "或显式 --sysroot <dir> 指定\n";
+                return 1;
+            }
+        }
     }
 
     fs::path inPath(inFile);
@@ -328,9 +369,28 @@ int cmdBuild(const std::vector<std::string>& args) {
     BuildOutcome r = buildOnce(inPath, outPath, gpuMode, useCache, xo);
     // 失败文本走 stderr——stdout 只承载构建结果报告。
     if (!r.log.empty()) std::cerr << r.log;
-    if (r.exitCode == 0)
+    if (r.exitCode == 0) {
+        // sget 包 DLL 分发（0.9.8 生态）：扫描 <输入文件目录>/packages/*/bin/
+        // *.dll 拷到产物目录——FFI 走运行时 LoadLibraryA（搜索序列覆盖 exe
+        // 所在目录），产物无需链接 .lib 即可用第三方动态库。缓存命中路径
+        // 同样部署（重装/更新包后重链接亦生效）。
+        std::error_code ec;
+        fs::path pkgs = inPath.parent_path() / "packages";
+        if (fs::exists(pkgs, ec)) {
+            for (const auto& pkg : fs::directory_iterator(pkgs, ec)) {
+                fs::path bin = pkg.path() / "bin";
+                if (!fs::exists(bin, ec)) continue;
+                for (const auto& dll : fs::directory_iterator(bin, ec)) {
+                    if (dll.path().extension() != ".dll") continue;
+                    fs::copy_file(dll.path(), outPath.parent_path() /
+                                                  dll.path().filename(),
+                                  fs::copy_options::overwrite_existing, ec);
+                }
+            }
+        }
         std::cout << "已生成 " << r.exe.string()
                   << (r.fromCache ? "（AOT 缓存命中，仅链接）\n" : "\n");
+    }
     return r.exitCode;
 }
 
@@ -359,11 +419,12 @@ int main(int argc, char** argv) {
             << "  check [--json] [-j N] <file.sg>...  全量验证（JSON 诊断可选，N 为并行度）\n"
             << "  interface [--out <f>] <file>        生成 .sgi 接口文件\n"
             << "  run [--no-cache] [--watch] <file>   编译执行（.sgbc 缓存；--watch 保存即重跑）\n"
-            << "  build [--gpu] [--no-cache] [--target <triple>] [--sysroot <dir>]\n"
+            << "  build [--gpu] [--no-cache] [--target <triple>|--target=<triple>] [--sysroot <dir>]\n"
             << "        [--cpu <c>] [--march <a>] [--static] <file>\n"
             << "                                    AOT 构建：MLIR → LLVM IR → 原生可执行\n"
             << "                                      （<stem>.sgbuild/obj 增量缓存；交叉编译\n"
-            << "                                      目标：*linux-gnu 走 musl 静态 sysroot）\n"
+            << "                                      目标：*linux-gnu 走 musl 静态 sysroot，\n"
+            << "                                      POSIX triple 自动补 --static 并定位 sysroot）\n"
             << "  repl                                会话式求值（REPL；会话内 :help 查看命令）\n"
             << "  test [--json] [--seed N] [--runs N] <file>\n"
             << "                                      测试框架：<stem>.sgt 显式测试 +\n"

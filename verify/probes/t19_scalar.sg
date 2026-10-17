@@ -1,0 +1,28 @@
+# ============================================================================
+#  t19_scalar.sg — 标量基准：1000 万次循环累加 + fib(30) 递归
+#  对应章节：第16章 性能：实测与客观对比（解释执行 vs CPython 对照）
+#  用法：scourge run t19_scalar.sg  /  scourge build t19_scalar.sg -o t19.exe
+# ============================================================================
+
+def fib(n: int) -> int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+capability time
+
+def main() -> int:
+    t0 = now()
+    total = 0
+    for i in range(10000000):
+        total += i
+    t1 = now()
+    print("loop_total=" + str(total))
+    print("loop_ms=" + str((t1 - t0) * 1000.0))
+
+    t2 = now()
+    r = fib(30)
+    t3 = now()
+    print("fib30=" + str(r))
+    print("fib_ms=" + str((t3 - t2) * 1000.0))
+    return 0

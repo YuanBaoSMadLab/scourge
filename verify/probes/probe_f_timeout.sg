@@ -1,0 +1,6 @@
+capability net
+def main() -> int:
+    h: int = net_connect("127.0.0.1", 23456)
+    net_set_timeout(h, 300)
+    print(net_recv(h, 64))
+    return 0

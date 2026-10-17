@@ -1,0 +1,14 @@
+# C1 验收：find/index/contains/startswith/endswith（字节下标）
+def main() -> int:
+    s: str = "hello world"
+    print(s.find("world"))
+    print(s.find("xyz"))
+    print(s.find(""))
+    print(s.index("o"))
+    print(s.contains("lo w"))
+    print(s.contains("xyz"))
+    print(s.startswith("hell"))
+    print(s.startswith(""))
+    print(s.endswith("rld"))
+    print(s.endswith("rldx"))
+    return 0

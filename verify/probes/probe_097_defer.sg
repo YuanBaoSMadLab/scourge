@@ -1,0 +1,8 @@
+# 验证：defer 确定性清理（LIFO）
+def main() -> int:
+    defer:
+        print("cleanup-1")
+    defer:
+        print("cleanup-2")
+    print("body")
+    return 7

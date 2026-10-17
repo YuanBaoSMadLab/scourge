@@ -1,0 +1,26 @@
+# GUI M1+M2 冒烟（仅 AOT/Windows 可跑；VM 侧 gui_* 固定 panic，
+# 由 verify_b6.ps1 分别验证两模行为）。
+# 生命周期：开窗 → label/button/input → 文本读写 → 改标题 → 显隐 →
+# poll（无交互 → 空 Dict）→ close → 退出码 0，输出恒 "hi abc 0"。
+capability gui
+
+def main() -> int:
+    w = gui_window("smoke", 260, 160)
+    l = gui_label(w, "hello", 12, 12, 200, 22)
+    b = gui_button(w, "ok", 12, 44, 72, 26)
+    i = gui_input(w, 12, 84, 200, 24)
+
+    gui_set_text(l, "hi")
+    t1 = gui_get_text(l)
+    gui_set_text(i, "abc")
+    t2 = gui_get_text(i)
+    gui_title(w, "smoke2")
+    gui_hide(l)
+    gui_show(l)
+
+    ev = gui_poll(w)
+    n = len(ev)
+
+    gui_close(w)
+    print(t1, t2, n)
+    return 0

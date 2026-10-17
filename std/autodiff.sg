@@ -1,0 +1,211 @@
+# ============================================================================
+#  std/autodiff.sg — 标量 tape 自动微分（micrograd 式，.sg 源码级库）
+# ----------------------------------------------------------------------------
+#  设计边界（批 7，计划文档「stdlib 路线」）：
+#  * 语言现状决定载体：List 元素仅标量（AOT etag 0-3）、张量形状须静态
+#    字面量注解、无函数值进容器 —— 故 tape 用单个 List[float] 定长 5 槽
+#    编码节点（value/op/a/b/coef），跨模块不可写模块级变量 → tape 显式传参。
+#  * 单一事实源：局部导数规则只在本文件 backprop 的 op 分支表出现一次，
+#    前向构造（各算子函数）只负责登记 op 编号与操作数，不写梯度规则。
+#  * 双模一致免费：纯 .sg 源码，VM 与 AOT 同源执行；浮点求和顺序由
+#    backprop 的循环序固定，双模逐位一致。
+#  * 节点按创建序天然拓扑 —— 反向扫描无需拓扑排序。
+#
+#  节点编码（单一事实源）：节点 k 占 T[5k .. 5k+4]：
+#    T[5k]   = value  前向值
+#    T[5k+1] = op     算子编号（0=叶子 1=add 2=sub 3=mul 4=div 5=neg
+#                              6=sq 7=tanh 8=exp 9=log 10=sqrt）
+#    T[5k+2] = a      操作数 1 节点 id（叶子为 0，无语义）
+#    T[5k+3] = b      操作数 2 节点 id（单目/叶子为 0，无语义）
+#    T[5k+4] = coef   预留系数（当前算子均由 value 推局部导数，恒 0）
+#  int 域（op/节点 id）以 float 编码存槽，节点数 < 2^53 内无精度损失；
+#  读回用 int() 显式转换。
+# ============================================================================
+
+# ---- tape 生命周期 ---------------------------------------------------------
+
+def tape() -> List[float]:
+    """新建空 tape。一个 tape 承载一次前向-反向的全部节点。"""
+    return []
+
+# ---- 叶子节点 --------------------------------------------------------------
+
+def param(T: List[float], v: float) -> int:
+    """可训练参数叶子：反传的终点（op=0，梯度累积后由调用方收集）。"""
+    T.append(v)
+    T.append(0.0)
+    T.append(0.0)
+    T.append(0.0)
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def const(T: List[float], v: float) -> int:
+    """常量/输入叶子：与 param 同编码，语义上不收集梯度。"""
+    T.append(v)
+    T.append(0.0)
+    T.append(0.0)
+    T.append(0.0)
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+# ---- 算子节点（前向登记：值 + op 编号 + 操作数） ----------------------------
+
+def add(T: List[float], a: int, b: int) -> int:
+    """c = a + b"""
+    T.append(T[5 * a] + T[5 * b])
+    T.append(1.0)
+    T.append(float(a))
+    T.append(float(b))
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def sub(T: List[float], a: int, b: int) -> int:
+    """c = a - b"""
+    T.append(T[5 * a] - T[5 * b])
+    T.append(2.0)
+    T.append(float(a))
+    T.append(float(b))
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def mul(T: List[float], a: int, b: int) -> int:
+    """c = a * b"""
+    T.append(T[5 * a] * T[5 * b])
+    T.append(3.0)
+    T.append(float(a))
+    T.append(float(b))
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def div(T: List[float], a: int, b: int) -> int:
+    """c = a / b（b=0 走浮点除法语义，与语言 / 一致；调用方自避）"""
+    T.append(T[5 * a] / T[5 * b])
+    T.append(4.0)
+    T.append(float(a))
+    T.append(float(b))
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def neg(T: List[float], a: int) -> int:
+    """c = -a"""
+    T.append(-T[5 * a])
+    T.append(5.0)
+    T.append(float(a))
+    T.append(0.0)
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def sq(T: List[float], a: int) -> int:
+    """c = a*a（MSE 高频算子，独立编号以免 mul 同节点双计）"""
+    T.append(T[5 * a] * T[5 * a])
+    T.append(6.0)
+    T.append(float(a))
+    T.append(0.0)
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def tanh_(T: List[float], a: int) -> int:
+    """c = tanh(a)（后缀下划线：与标量内建 tanh 区名，E2007）"""
+    T.append(tanh(T[5 * a]))
+    T.append(7.0)
+    T.append(float(a))
+    T.append(0.0)
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def exp_(T: List[float], a: int) -> int:
+    """c = exp(a)"""
+    T.append(exp(T[5 * a]))
+    T.append(8.0)
+    T.append(float(a))
+    T.append(0.0)
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def log_(T: List[float], a: int) -> int:
+    """c = ln(a)（a<=0 走 log 内建自身语义；调用方自避）"""
+    T.append(log(T[5 * a]))
+    T.append(9.0)
+    T.append(float(a))
+    T.append(0.0)
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+def sqrt_(T: List[float], a: int) -> int:
+    """c = sqrt(a)（a<0 走 sqrt 内建自身语义；调用方自避）"""
+    T.append(sqrt(T[5 * a]))
+    T.append(10.0)
+    T.append(float(a))
+    T.append(0.0)
+    T.append(0.0)
+    return len(T) // 5 - 1
+
+# ---- 反向传播（局部导数规则单一事实源） -------------------------------------
+
+def backprop(T: List[float], root: int) -> List[float]:
+    """从 root 节点反向扫全 tape，返回每节点 d(root)/d(node) 梯度表。
+
+    grads[k] 即节点 k 的梯度；叶子参数的梯度在 grads[参数id]。
+    求和顺序 = 节点创建序的严格逆序（双模逐位一致的前提）。
+    """
+    n = len(T) // 5
+    grads: List[float] = []
+    for i in range(n):
+        grads.append(0.0)
+    grads[root] = 1.0
+    k = n - 1
+    while k >= 0:
+        op = int(T[5 * k + 1])
+        g = grads[k]
+        a = int(T[5 * k + 2])
+        b = int(T[5 * k + 3])
+        if op == 1:
+            # add：d/da = 1, d/db = 1
+            grads[a] = grads[a] + g
+            grads[b] = grads[b] + g
+        elif op == 2:
+            # sub：d/da = 1, d/db = -1
+            grads[a] = grads[a] + g
+            grads[b] = grads[b] - g
+        elif op == 3:
+            # mul：d/da = vb, d/db = va
+            grads[a] = grads[a] + g * T[5 * b]
+            grads[b] = grads[b] + g * T[5 * a]
+        elif op == 4:
+            # div a/b：d/da = 1/vb, d/db = -va/vb^2
+            vb = T[5 * b]
+            grads[a] = grads[a] + g / vb
+            grads[b] = grads[b] - g * T[5 * a] / (vb * vb)
+        elif op == 5:
+            # neg：d/da = -1
+            grads[a] = grads[a] - g
+        elif op == 6:
+            # sq：d/da = 2*va
+            grads[a] = grads[a] + g * 2.0 * T[5 * a]
+        elif op == 7:
+            # tanh：d/da = 1 - v^2
+            v = T[5 * k]
+            grads[a] = grads[a] + g * (1.0 - v * v)
+        elif op == 8:
+            # exp：d/da = v
+            grads[a] = grads[a] + g * T[5 * k]
+        elif op == 9:
+            # log：d/da = 1/va
+            grads[a] = grads[a] + g / T[5 * a]
+        elif op == 10:
+            # sqrt：d/da = 1/(2*sqrt(va))
+            grads[a] = grads[a] + g / (2.0 * T[5 * k])
+        # op == 0：叶子，无后继传播
+        k = k - 1
+    return grads
+
+# ---- 便捷出口 --------------------------------------------------------------
+
+def grad(T: List[float], root: int, node: int) -> float:
+    """单节点梯度便捷形式：backprop 后取 grads[node]。"""
+    g = backprop(T, root)
+    return g[node]
+
+def value(T: List[float], node: int) -> float:
+    """读节点前向值。"""
+    return T[5 * node]

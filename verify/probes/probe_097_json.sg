@@ -1,0 +1,8 @@
+# 验证：JSON 内建 json_decode + Json 值成员方法（M 专项）
+def main() -> int:
+    j = json_decode("{\"a\": 1, \"b\": [true, 2.5]}")
+    print(j.get("a").as_int())
+    print(j.get("b").at(1).as_float())
+    print(j.get("b").len())
+    print(j.dump())
+    return 0

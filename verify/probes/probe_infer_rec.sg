@@ -1,0 +1,9 @@
+# Q10 边界：递归 + 无返回注解 → 定向报错（E2001，指向被调函数名）
+def fact(n: int):
+    if n <= 1:
+        return 1
+    return n * fact(n - 1)
+
+def main() -> int:
+    print(fact(5))
+    return 0

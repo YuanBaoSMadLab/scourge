@@ -1,0 +1,4 @@
+# 负探针：format() 占位符与实参数不一致
+def main() -> int:
+    print(format("{} {}", 1))
+    return 0

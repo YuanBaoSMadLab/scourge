@@ -7,7 +7,7 @@
 //  类型/形状只查检查器注解表，不在生成期重算推导。内部分块文件，
 //  共享模型见 MLIRGenDetail.hpp。
 // ============================================================================
-#include "MLIRGenDetail.hpp"
+#include "scourge/AOT/MLIRGenDetail.hpp"
 
 namespace scourge {
 namespace aot {
@@ -175,6 +175,7 @@ Value Gen::genExpr(const Expr& e) {
         return genUnary(static_cast<const Unary&>(e));
     case Expr::Kind::Binary: {
         auto& b = static_cast<const Binary&>(e);
+        if (b.op == "and" || b.op == "or") return genLogical(b);
         Value l = genExpr(*b.lhs);
         Value r = genExpr(*b.rhs);
         return genBinary(b.op, l, r, b.range, b.rhs.get(), b.lhs.get());
@@ -198,9 +199,47 @@ Value Gen::genExpr(const Expr& e) {
         unsupported(e.range, "成员访问（Attr）");
     }
     case Expr::Kind::Await:
-        unsupported(e.range, "async / await");
+        // await 类型透传（Task 语义 P2）；VM 内同步执行，与 BC
+        // CompilerExpr.cpp Await 分支同一语义（双模一致）。
+        return genExpr(*static_cast<const Await&>(e).operand);
     case Expr::Kind::Index: {
         auto& ix = static_cast<const Index&>(e);
+        // 切片 s[a:b]（0.9.9）：按基型静态分派 str_nslice/list_nslice，
+        // ABI 5 参 [base,a,b,hasA,hasB]——缺省端补 (0, has=0)，与 VM
+        // Slice2 同一 normSlice 公式（单一事实源，注释互指）。
+        if (ix.isSlice) {
+            Value base = genExpr(*ix.base);
+            std::string ssa = fresh();
+            // 两边界值 + 两 has 位按序发射。
+            Value es[2], hs[2];
+            for (int k = 0; k < 2; ++k) {
+                const Expr* ex = ix.indices[static_cast<size_t>(k)].get();
+                if (ex) {
+                    es[k] = genExpr(*ex);
+                    if (es[k].vk != VK::Int)
+                        unsupported(ex->range, "切片边界必须是 int");
+                    hs[k] = Value{VK::Int, intConst(1)};
+                } else {
+                    es[k] = Value{VK::Int, intConst(0)};
+                    hs[k] = Value{VK::Int, intConst(0)};
+                }
+            }
+            if (base.vk == VK::Str) {
+                emit(ssa + " = \"lang.str_nslice\"(" + base.ssa + ", " +
+                     es[0].ssa + ", " + es[1].ssa + ", " + hs[0].ssa + ", " +
+                     hs[1].ssa + ") : (!llvm.ptr, i64, i64, i64, i64) -> "
+                     "!llvm.ptr " + opLoc());
+                return Value{VK::Str, ssa};
+            }
+            if (base.vk == VK::List) {
+                emit(ssa + " = \"lang.list_nslice\"(" + base.ssa + ", " +
+                     es[0].ssa + ", " + es[1].ssa + ", " + hs[0].ssa + ", " +
+                     hs[1].ssa + ") : (!llvm.ptr, i64, i64, i64, i64) -> "
+                     "!llvm.ptr " + opLoc());
+                return Value{VK::List, ssa, false, 0, base.lElem};
+            }
+            unsupported(ix.range, "仅 str 与 List 支持 s[a:b] 切片");
+        }
         Value base = genExpr(*ix.base);
         if (base.vk == VK::List) {
             // List 单下标（检查器 E2004 已拒多下标）：list_get_* 内做
@@ -228,6 +267,16 @@ Value Gen::genExpr(const Expr& e) {
                 emit(ssa + " = \"lang.list_get_s\"(" + base.ssa + ", " + iv.ssa +
                      ") : (!llvm.ptr, i64) -> !llvm.ptr " + opLoc());
                 return Value{VK::Str, ssa};
+            case VK::Tuple:
+                // 0.9.9：items() 元组槽——i64 列表槽存元组句柄位（指针位
+                // 型），inttoptr 还原为 genTupleLit 同形态句柄值
+                emit(ssa + " = \"lang.list_get_i\"(" + base.ssa + ", " + iv.ssa +
+                     ") : (!llvm.ptr, i64) -> i64 " + opLoc());
+                {
+                    std::string h = fresh();
+                    emit(h + " = llvm.inttoptr " + ssa + " : i64 to !llvm.ptr");
+                    return Value{VK::Tuple, h};
+                }
             default:
                 unsupported(ix.base->range, "该元素类型的列表下标读取");
             }
@@ -324,6 +373,8 @@ Value Gen::genExpr(const Expr& e) {
         if (!ls.checkedAsTensor) return genListLit(ls);
         return genTensorLit(ls);
     }
+    case Expr::Kind::ListComp:
+        return genListComp(static_cast<const ListComp&>(e));
     case Expr::Kind::DictLit: {
         auto& dl = static_cast<const DictLit&>(e);
         // 检查器判为空集合（Set[T] 注解上下文的空 {}）→ set_new(0)
@@ -362,7 +413,9 @@ Value Gen::genName(const Name& n) {
             std::string ssa = fresh();
             emit(ssa + " = llvm.load " + p + " : !llvm.ptr -> " +
                  mlirTy(gt->second.vk));
-            return Value{gt->second.vk, ssa};
+            // 容器/句柄元数据回填（与 loadGlobal 同一契约）
+            const GlobalSlot& g = gt->second;
+            return Value{g.vk, ssa, g.tInt, g.tRank, g.lElem};
         }
     }
     unsupported(n.range, "内建函数 / 模块名不能作为值使用");
@@ -504,6 +557,43 @@ Value Gen::genTupleEq(Value l, Value r, const TypePtr& lt, const TypePtr& rt,
         }
     }
     return acc;
+}
+
+Value Gen::genLogical(const Binary& b) {
+    // and/or 短路求值（与 VM 语义一致：右侧仅在需要时求值——含 panic
+    // 副作用的表达式两侧差异即双模分歧，cf 块实现，模式同 genTernary）。
+    bool isAnd = b.op == "and";
+    Value cond = genExpr(*b.lhs);
+    Slot slot = allocSlot(VK::Bool);
+    int thenB = newBlock(), elseB = newBlock(), joinB = newBlock();
+    terminate("cf.cond_br " + cond.ssa + ", " + blk(thenB).label + ", " +
+              blk(elseB).label);
+    cur_ = thenB;
+    {
+        if (isAnd) {
+            Value v = genExpr(*b.rhs);
+            storeTo(slot, v);
+        } else {
+            std::string t = fresh();
+            emit(t + " = arith.constant 1 : i1");
+            storeTo(slot, Value{VK::Bool, t});
+        }
+    }
+    terminate("cf.br " + blk(joinB).label);
+    cur_ = elseB;
+    {
+        if (isAnd) {
+            std::string f = fresh();
+            emit(f + " = arith.constant 0 : i1");
+            storeTo(slot, Value{VK::Bool, f});
+        } else {
+            Value v = genExpr(*b.rhs);
+            storeTo(slot, v);
+        }
+    }
+    terminate("cf.br " + blk(joinB).label);
+    cur_ = joinB;
+    return loadSlot(slot);
 }
 
 Value Gen::genBinary(const std::string& op, Value l, Value r,

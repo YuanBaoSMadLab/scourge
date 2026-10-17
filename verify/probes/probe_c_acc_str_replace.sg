@@ -1,0 +1,9 @@
+# C1 验收：replace（全替换；old 不存在 → 原串）
+def main() -> int:
+    print("aXbXc".replace("X", "-"))
+    print("aaa".replace("aa", "b"))
+    print("abc".replace("z", "q"))
+    print("abc".replace("abc", ""))
+    print("".replace("a", "b"))
+    print("中文测试".replace("文", "WEN"))
+    return 0

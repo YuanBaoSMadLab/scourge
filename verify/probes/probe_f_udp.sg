@@ -1,0 +1,6 @@
+capability net
+# F 验收：net_udp_send 单数据报（无监听也成功，返回字节数）
+def main() -> int:
+    print(net_udp_send("127.0.0.1", 23459, "dg-001"))
+    print(net_udp_send("localhost", 23459, "x"))
+    return 0

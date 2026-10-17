@@ -69,7 +69,8 @@ struct Expr {
         Await,   ///< operand（仅 async def 内合法，E2010）
         TupleLit,///< elems（仅形状注解使用；值位置报错）
         DictLit, ///< pairs（k1,v1,...；0.9.3 字典字面量）
-        SetLit   ///< elems（e1,e2,...；0.9.3 集合字面量，元素限标量）
+        SetLit,  ///< elems（e1,e2,...；0.9.3 集合字面量，元素限标量）
+        ListComp ///< elem, var, iter, cond?（0.9.8 列表推导式）
     };
 
     Kind kind;
@@ -140,6 +141,9 @@ struct Call : Expr {
 struct Index : Expr {
     ExprPtr base;
     std::vector<ExprPtr> indices; ///< 支持多维下标 t[i, j]
+    /// 切片标记（0.9.9 s[a:b]）：isSlice 时 indices 恒 2 槽，缺省端为
+    /// nullptr（Python 缺省语义在执行侧补端点；编译器禁止多维与切片混用）。
+    bool isSlice = false;
     Index(SourceRange r, ExprPtr b, std::vector<ExprPtr> i)
         : Expr(Kind::Index, r), base(std::move(b)), indices(std::move(i)) {}
 };
@@ -158,6 +162,24 @@ struct ListLit : Expr {
     mutable bool checkedAsTensor = false;
     explicit ListLit(SourceRange r, std::vector<ExprPtr> es)
         : Expr(Kind::ListLit, r), elems(std::move(es)) {}
+};
+
+/// 列表推导式 [elem for x in iter (if cond)?]（0.9.8）：不做 Parser 语句
+/// 提升降糖——空列表的类型定型注解 Parser 合成不出，故立为独立表达式
+/// 节点；元素/迭代器类型由检查器定型（单一事实源），编译器/AOT 据注解
+/// 降为「空列表 + 计数循环 + 条件 append」（与 for 语句同构）。迭代源
+/// 限 range/List/str（dict/Set 推导式暂缓，双模同拒）。循环变量与 for
+/// 语句同一 Python 式复用语义（检查器落声明）。
+struct ListComp : Expr {
+    ExprPtr elem;
+    std::string var;
+    SourceRange varRange;
+    ExprPtr iter;
+    ExprPtr cond; ///< 可空：无过滤条件
+    ListComp(SourceRange r, ExprPtr el, std::string v, SourceRange vr,
+             ExprPtr it, ExprPtr c)
+        : Expr(Kind::ListComp, r), elem(std::move(el)), var(std::move(v)),
+          varRange(vr), iter(std::move(it)), cond(std::move(c)) {}
 };
 
 /// await 表达式（P0：类型透传操作数；Task/调度器语义随 P2 并发落地）。

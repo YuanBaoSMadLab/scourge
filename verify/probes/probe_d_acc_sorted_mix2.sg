@@ -1,0 +1,13 @@
+# D 验收：sorted 对 int/float/bool 列表（NaN panic 见 probe_d_acc_sorted_nan）
+def main() -> int:
+    xs: List[int] = [3, -1, 2, 0]
+    print(sorted(xs))
+    fs: List[float] = [2.5, -1.5, 0.0]
+    print(sorted(fs))
+    bs: List[bool] = [True, False, True]
+    print(sorted(bs))
+    ss: List[str] = ["b", "a", "c"]
+    print(sorted(ss))
+    e: List[int] = []
+    print(sorted(e))
+    return 0

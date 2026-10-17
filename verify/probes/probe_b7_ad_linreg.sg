@@ -1,0 +1,90 @@
+# ============================================================================
+#  probe_b7_ad_linreg.sg — 批 7 探针：autodiff tape 梯度对拍手写解析梯度
+# ----------------------------------------------------------------------------
+#  两侧实现同一模型 y ≈ w0*x1 + w1*x2 + b 的全批量 MSE 梯度：
+#    A 侧：手写公式（逐样本标量累加，train_linreg 的标量化）
+#    B 侧：std/autodiff tape（逐样本前向建节点，backprop 反传）
+#  每 epoch 断言两侧梯度 |diff| < 1e-9（两侧求和顺序不同，非逐位对拍；
+#  双模一致性由「同一侧 VM/AOT 输出逐位一致」承载——求和序两侧各自固定）。
+#  期望输出（恒定）：FIXED 输出块末行 AD-LINREG OK。
+# ============================================================================
+
+import std.autodiff
+
+N = 12
+EPOCHS = 60
+LR = 0.03
+
+def main() -> int:
+    # 固定数据（公式生成，无随机，可复现）
+    xs1: List[float] = []
+    xs2: List[float] = []
+    ys: List[float] = []
+    for i in range(N):
+        x1 = (i % 6) * 0.4 - 1.0
+        x2 = (i % 4) * 0.5 - 1.0
+        noise = ((i * 5) % 7 - 3) * 0.05
+        xs1.append(x1)
+        xs2.append(x2)
+        ys.append(2.0 * x1 - 1.5 * x2 + 1.0 + noise)
+
+    # A 侧状态（手写梯度）
+    w0 = 0.5
+    w1 = -0.25
+    b = 0.1
+
+    ep = 0
+    while ep < EPOCHS:
+        # ---- A 侧：手写公式 ----
+        gw0 = 0.0
+        gw1 = 0.0
+        gb = 0.0
+        loss = 0.0
+        for i in range(N):
+            pred = w0 * xs1[i] + w1 * xs2[i] + b
+            err = pred - ys[i]
+            c = 2.0 / N
+            gw0 = gw0 + c * err * xs1[i]
+            gw1 = gw1 + c * err * xs2[i]
+            gb = gb + c * err
+            loss = loss + err * err / N
+
+        # ---- B 侧：autodiff tape ----
+        T = std.autodiff.tape()
+        w0n = std.autodiff.param(T, w0)
+        w1n = std.autodiff.param(T, w1)
+        bn = std.autodiff.param(T, b)
+        acc = std.autodiff.const(T, 0.0)
+        for i in range(N):
+            x1n = std.autodiff.const(T, xs1[i])
+            x2n = std.autodiff.const(T, xs2[i])
+            yn = std.autodiff.const(T, ys[i])
+            p1 = std.autodiff.mul(T, w0n, x1n)
+            p2 = std.autodiff.mul(T, w1n, x2n)
+            bpred = std.autodiff.add(T, std.autodiff.add(T, p1, p2), bn)
+            berr = std.autodiff.sub(T, bpred, yn)
+            acc = std.autodiff.add(T, acc, std.autodiff.sq(T, berr))
+        invn = std.autodiff.const(T, 1.0 / N)
+        losn = std.autodiff.mul(T, acc, invn)
+        g = std.autodiff.backprop(T, losn)
+        tw0 = g[w0n]
+        tw1 = g[w1n]
+        tb = g[bn]
+
+        # ---- 对拍断言 ----
+        assert(abs(tw0 - gw0) < 1e-9)
+        assert(abs(tw1 - gw1) < 1e-9)
+        assert(abs(tb - gb) < 1e-9)
+
+        if ep < 3:
+            print("ep" + str(ep) + " gw0=" + fmt(gw0, ".9f") + " gw1=" + fmt(gw1, ".9f") + " gb=" + fmt(gb, ".9f") + " loss=" + fmt(loss, ".9f"))
+
+        # ---- A 侧更新（B 跟随 A 的参数） ----
+        w0 = w0 - LR * gw0
+        w1 = w1 - LR * gw1
+        b = b - LR * gb
+        ep = ep + 1
+
+    print("w0=" + fmt(w0, ".9f") + " w1=" + fmt(w1, ".9f") + " b=" + fmt(b, ".9f"))
+    print("AD-LINREG OK")
+    return 0

@@ -38,7 +38,7 @@ L.append('    print(num.as_int())')
 L.append('    print(num.dump())')
 L.append('    return 0')
 
-io.open('codebuddytest/probe_json_edge.sg', 'w', encoding='utf-8', newline='\n').write('\n'.join(L) + '\n')
+io.open('verify/probes/probe_json_edge.sg', 'w', encoding='utf-8', newline='\n').write('\n'.join(L) + '\n')
 
 # panic 探针 3 个
 p1 = 'def main() -> int:\n' \
@@ -56,17 +56,17 @@ p4 = 'def main() -> int:\n' \
      '    j: Json = json_decode("[1]")\n' \
      '    print(j.at(0).len())\n' \
      '    return 0\n'
-io.open('codebuddytest/probe_json_panic_bad.sg', 'w', encoding='utf-8', newline='\n').write(p1)
-io.open('codebuddytest/probe_json_panic_asint.sg', 'w', encoding='utf-8', newline='\n').write(p2)
-io.open('codebuddytest/probe_json_panic_at.sg', 'w', encoding='utf-8', newline='\n').write(p3)
-io.open('codebuddytest/probe_json_panic_len.sg', 'w', encoding='utf-8', newline='\n').write(p4)
+io.open('verify/probes/probe_json_panic_bad.sg', 'w', encoding='utf-8', newline='\n').write(p1)
+io.open('verify/probes/probe_json_panic_asint.sg', 'w', encoding='utf-8', newline='\n').write(p2)
+io.open('verify/probes/probe_json_panic_at.sg', 'w', encoding='utf-8', newline='\n').write(p3)
+io.open('verify/probes/probe_json_panic_len.sg', 'w', encoding='utf-8', newline='\n').write(p4)
 
 # 负探针：类型拦截（check 必失败）
 n1 = '''def main() -> int:
     j: Json = json_decode(42)
     return 0
 '''
-io.open('codebuddytest/neg_json_type.sg', 'w', encoding='utf-8', newline='\n').write(n1)
+io.open('verify/probes/neg_json_type.sg', 'w', encoding='utf-8', newline='\n').write(n1)
 
 # acc 探针：全方法面
 acc = '''def main() -> int:
@@ -93,5 +93,5 @@ acc = '''def main() -> int:
     print(json_decode("[10, 20, 30]").at(2).as_int())
     return 0
 '''
-io.open('codebuddytest/probe_json_acc.sg', 'w', encoding='utf-8', newline='\n').write(acc)
+io.open('verify/probes/probe_json_acc.sg', 'w', encoding='utf-8', newline='\n').write(acc)
 print('probes written')

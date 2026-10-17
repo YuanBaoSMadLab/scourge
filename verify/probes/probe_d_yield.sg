@@ -1,0 +1,8 @@
+# D3 探针：生成器 yield
+def gen() -> int:
+    yield 1
+    return 0
+def main() -> int:
+    for v in gen():
+        print(v)
+    return 0

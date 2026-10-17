@@ -1,0 +1,7 @@
+import a.b as ab
+from a.b import get_tag as gt, TAG as T
+def main() -> int:
+    print(str(ab.get_tag()))
+    print(str(gt()))
+    print(str(T))
+    return 0

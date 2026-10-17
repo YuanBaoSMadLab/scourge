@@ -2,12 +2,10 @@ build/
 build-rel/
 docs/
 examples/
-tests/
 bin/
 release/
 dev_feedback/
 book/
-codebuddytest/
 .workbuddy/
 .trae/
 
@@ -36,14 +34,19 @@ agents.md
 toolchain/
 vendor/
 
+# 本地工作副本资产（dev_feedback 引用素材；打包与库管均排除）
+_gpl/
+
 # AOT obj 增量缓存目录（设计文档 5.2；产物不入库）
 *.sgbuild/
+
+# bootstrap 引导解压的 LLVM/MLIR 库包（一键构建的中间产物）
+.deps/
 
 # verify/ 验证源级资产入库：探针 .sg、脚本 .ps1、驱动探针 .c/.cu、
 # kernel 源 .ptx 本就不被忽略；kernel 源 .ll 需反白名单（上方全局规则）。
 # 运行产物一律不得写入 verify/（脚本产物统一落 build-rel/verify）。
 !verify/**/*.ll
-
 # verify/stdlib 对拍脚本的就地运行产物（重新忽略，覆盖上方 .ll 反白名单）
 verify/stdlib/_*
 verify/stdlib/*_aot.ll

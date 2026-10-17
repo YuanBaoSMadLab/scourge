@@ -1,0 +1,5 @@
+# 负探针：format() 非字面量首参（降糖需要编译期展开）
+def main() -> int:
+    x = 1
+    print(format(x, 1))
+    return 0

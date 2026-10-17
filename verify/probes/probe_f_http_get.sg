@@ -1,0 +1,6 @@
+capability net
+# F 验收：net_http_get 固定响应（完整原始响应逐字节）
+def main() -> int:
+    r: str = net_http_get("http://127.0.0.1:23458/index.html")
+    print(r)
+    return 0

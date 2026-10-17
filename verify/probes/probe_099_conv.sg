@@ -1,0 +1,18 @@
+# 0.9.9 内建探针：int/float/ord/chr 成功路径（双模逐字节）
+def main() -> int:
+    print(int("42"))
+    print(int(-7))
+    print(int(True))
+    print(int(3.9))
+    print(int(-3.9))
+    print(float("2.5"))
+    print(float(3))
+    print(float(True))
+    print(float("1e300"))
+    print(ord("A"))
+    print(ord("中"))
+    print(chr(65))
+    print(chr(20013))
+    print(chr(128512))
+    print(int(float("3.14")))
+    return 0

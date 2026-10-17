@@ -1,0 +1,9 @@
+def impure_greet() -> int:
+    print("hi")
+    return 1
+@pure
+def wrapper() -> int:
+    return impure_greet()
+def main() -> int:
+    print(wrapper())
+    return 0

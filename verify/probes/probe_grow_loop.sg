@@ -1,0 +1,13 @@
+# str 自拼接原地扩容：大循环正确性（40000 次 +=，内容抽查 + len）
+def main() -> int:
+    s = ""
+    for i in range(40000):
+        s += "x"
+    print(len(s))
+    print(s[0], s[1], s[19999], s[39999])
+    t = ""
+    for i in range(20000):
+        t = t + "y"
+    print(len(t))
+    print(t[0], t[19999])
+    return 0

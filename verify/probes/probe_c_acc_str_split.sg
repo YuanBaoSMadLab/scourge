@@ -1,0 +1,9 @@
+# C1 验收：split（Python 语义：空段保留；空分隔符 panic）
+def main() -> int:
+    print("a,b,c".split(","))
+    print("a,,c".split(","))
+    print(",a,".split(","))
+    print("abc".split("x"))
+    print("".split(","))
+    print("a::b".split("::"))
+    return 0

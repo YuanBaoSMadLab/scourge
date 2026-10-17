@@ -12,8 +12,8 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify\stat"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify\stat"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
 
@@ -28,9 +28,9 @@ $pos = @("probe_stat_median", "probe_stat_exist")
 foreach ($n in $pos) {
     Clean-Artifacts $n
 
-    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\codebuddytest\$n.sg") -NoNewWindow -Wait -PassThru `
+    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\verify\probes\$n.sg") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.run.out" -RedirectStandardError "$dir\$n.run.err"
-    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\codebuddytest\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
+    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\verify\probes\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.build.out" -RedirectStandardError "$dir\$n.build.err"
     if ($p2.ExitCode -ne 0) {
         Write-Host "$n BUILD-FAIL"; Get-Content "$dir\$n.build.err" -First 20; $fail = 1; continue
@@ -58,7 +58,7 @@ foreach ($n in $pos) {
 # build stderr does not - the diagnostic block itself is the shared contract.
 $ncode = "E2001"
 Clean-Artifacts "probe_stat_neg"
-$src = "d:\Scourge\codebuddytest\probe_stat_neg.sg"
+$src = "d:\Scourge\verify\probes\probe_stat_neg.sg"
 Set-Content -Path $src -Encoding Ascii -Value @('def main() -> int:', '    print(median(["a", "b"]))', '    return 0')
 $p1 = Start-Process -FilePath $exe -ArgumentList @("run", $src) -NoNewWindow -Wait -PassThru `
       -RedirectStandardOutput "$dir\probe_stat_neg.run.out" -RedirectStandardError "$dir\probe_stat_neg.run.err"

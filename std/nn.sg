@@ -1,0 +1,103 @@
+# ============================================================================
+#  std/nn.sg — 极简神经网络库（Linear/MSE/SGD/Adam，.sg 源码级库）
+# ----------------------------------------------------------------------------
+#  设计边界（批 7，计划文档「stdlib 路线」）：
+#  * 载体与 std/autodiff.sg 同源：权重/梯度/状态一律 List[float]（AOT
+#    etag=1 双模完整支持），计算图走 std.autodiff 标量 tape——每 epoch
+#    重建 tape，参数节点 id 由 params() 登记并贯穿前向/反传。
+#  * 形状约定（单一事实源，本文档为准）：
+#      W: List[float] 行主序 (nout, nin)——W[o*nin+i] 为输出 o 对输入 i 权重
+#      b: List[float] (nout,)
+#      ids: List[int] 参数节点 id 表，前 nin*nout 个对应 W、末 nout 个对应 b
+#  * 双模一致免费：纯 .sg 源码；** 幂与 sqrt/exp 走语言内建（既有算术
+#    路径，批 1-6 回归覆盖）。
+#  * 性能边界：标量 tape 解释执行，适合小规模教学/验证；计划文档明确
+#    「性能不足时再立编译器级批次」。
+# ============================================================================
+
+import std.autodiff
+
+# ---- 参数化 ----------------------------------------------------------------
+
+def params(T: List[float], W: List[float], b: List[float], nin: int,
+           nout: int) -> List[int]:
+    """把 W/b 全部登记为 tape 参数叶子，返回节点 id 表
+    （前 nin*nout 个对应 W 行主序，末 nout 个对应 b）。"""
+    ids: List[int] = []
+    for i in range(nin * nout):
+        ids.append(std.autodiff.param(T, W[i]))
+    for o in range(nout):
+        ids.append(std.autodiff.param(T, b[o]))
+    return ids
+
+# ---- 前向 ------------------------------------------------------------------
+
+def linear_nodes(T: List[float], ids: List[int], xnodes: List[int],
+                 nin: int, nout: int) -> List[int]:
+    """节点输入版线性层：xnodes 为输入层节点 id 表（隐层续接时保持
+    计算图连通——值版 linear 会 const 重建节点而截断反传路径）。"""
+    outs: List[int] = []
+    for o in range(nout):
+        acc = ids[nin * nout + o]
+        for i in range(nin):
+            acc = std.autodiff.add(T, acc,
+                                   std.autodiff.mul(T, ids[o * nin + i],
+                                                    xnodes[i]))
+        outs.append(acc)
+    return outs
+
+def linear(T: List[float], ids: List[int], x: List[float], nin: int,
+           nout: int) -> List[int]:
+    """单样本线性层前向：y_o = b_o + Σ_i W[o,i]·x_i，返回输出节点 id 表。
+    激活由调用方续接（如 std.autodiff.tanh_）。"""
+    xnodes: List[int] = []
+    for i in range(nin):
+        xnodes.append(std.autodiff.const(T, x[i]))
+    return linear_nodes(T, ids, xnodes, nin, nout)
+
+def mse(T: List[float], preds: List[int], ys: List[float], n: int) -> int:
+    """批内均方误差：Σ(pred-y)²/n，返回 loss 节点 id（backprop 的 root）。"""
+    acc = std.autodiff.const(T, 0.0)
+    for k in range(n):
+        d = std.autodiff.sub(T, preds[k], std.autodiff.const(T, ys[k]))
+        acc = std.autodiff.add(T, acc, std.autodiff.sq(T, d))
+    inv = std.autodiff.const(T, 1.0 / float(n))
+    return std.autodiff.mul(T, acc, inv)
+
+# ---- 梯度收集与优化器 -------------------------------------------------------
+
+def gather_grads(T: List[float], root: int, ids: List[int],
+                 n: int) -> List[float]:
+    """反传 root 并按 ids 顺序抽取参数梯度（与 W/b 展平序对齐）。"""
+    g = std.autodiff.backprop(T, root)
+    out: List[float] = []
+    for i in range(n):
+        out.append(g[ids[i]])
+    return out
+
+def sgd(W: List[float], g: List[float], lr: float, n: int) -> int:
+    """SGD 原地更新：W -= lr·g（List 共享语义，调用方表直接生效）。"""
+    for i in range(n):
+        W[i] = W[i] - lr * g[i]
+    return 0
+
+def adam(W: List[float], g: List[float], m: List[float], v: List[float],
+         lr: float, t: int, n: int) -> int:
+    """Adam 原地更新（kingma2014）：m/v 状态表由调用方持有（与 W 等长、
+    调用前清零），t 为从 1 计的步数。偏置校正用 ** 幂（语言内建算术）。"""
+    b1 = 0.9
+    b2 = 0.999
+    eps = 1e-8
+    tf = float(t)
+    c1 = 1.0 - b1 ** tf
+    c2 = 1.0 - b2 ** tf
+    for i in range(n):
+        gi = g[i]
+        mi = b1 * m[i] + (1.0 - b1) * gi
+        vi = b2 * v[i] + (1.0 - b2) * gi * gi
+        m[i] = mi
+        v[i] = vi
+        mhat = mi / c1
+        vhat = vi / c2
+        W[i] = W[i] - lr * mhat / (sqrt(vhat) + eps)
+    return 0

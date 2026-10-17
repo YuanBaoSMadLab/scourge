@@ -1,0 +1,9 @@
+# 探针1：List 构造方式探查
+def main() -> int:
+    xs: List[str] = ["a", "b"]
+    print(xs)
+    print(len(xs))
+    print(xs[0])
+    for v in xs:
+        print(v)
+    return 0

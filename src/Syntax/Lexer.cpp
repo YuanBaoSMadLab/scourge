@@ -254,11 +254,9 @@ void Lexer::lexFString(char quote, uint32_t begin, bool triple) {
                     advance();
                     continue;
                 }
-                if (brace == 0 && bracket == 0 && e == ':') {
-                    diag_.error(Errc::E1007_UnsupportedFeature, file_,
-                                SourceRange(pos_, 1),
-                                "f-string 格式说明符（:spec）暂不支持");
-                }
+                // 0.9.9：顶层 `:` 放行——格式说明符（:spec）由 Parser 在
+                // FStrExpr 文本内拆分降糖为 fmt(expr, "spec")（词法只保证
+                // 完整扫到 '}'，不解释 spec 语法）。
                 if (brace == 0 && bracket == 0 && e == '!' &&
                     (peek(1) == 'r' || peek(1) == 's') && peek(2) == '}') {
                     diag_.error(Errc::E1007_UnsupportedFeature, file_,

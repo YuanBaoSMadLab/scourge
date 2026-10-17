@@ -1,0 +1,3 @@
+def main() -> int:
+    print(median(["a", "b"]))
+    return 0

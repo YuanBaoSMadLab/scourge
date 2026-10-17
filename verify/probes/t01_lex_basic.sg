@@ -1,0 +1,58 @@
+# ============================================================================
+#  t01_lex_basic.sg — 词法基础：注释、缩进、字符串、字面量、关键字
+#  对应章节：第3章 词法与语法基础
+#  验证命令： scourge check t01_lex_basic.sg   （期望 OK）
+#             scourge run   t01_lex_basic.sg   （输出见文件尾注释）
+# ============================================================================
+
+# 行注释：井号到行尾。注意 // 在 Scourge 中不是注释，而是地板除运算符。
+
+def main() -> int:
+    # 块结构：冒号 + 换行 + 空格缩进（只允许空格，Tab 缩进报 E1004）
+    if True:
+        print("indent-ok")
+
+    # 字符串：双引号，支持转义 \" \\ \n \t \r
+    print("hello\nworld")
+    print("quote:\" tab:\t end")
+
+    # 布尔与空值：首字母大写（Python 风格）
+    print(True, False, None)
+
+    # 数字：只支持十进制；整数字面量推断 int，含小数点推断 float
+    print(42)
+    print(3.14)
+    print(1.0e2)
+
+    # 科学计数法与整数除法
+    print(7 // 2)
+    print(7 % 3)
+    print(7 / 2)
+
+    # 字符串拼接与重复
+    print("ab" + "cd")
+    print("ab" * 3)
+
+    # 成员测试：str 子串、List 元素
+    print("ell" in "hello")
+    words: List[str] = ["a", "b"]
+    print("a" in words)
+
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# indent-ok
+# hello
+# world
+# quote:" tab:	 end
+# True False None
+# 42
+# 3.14
+# 100.0
+# 3
+# 1
+# 3.5
+# abcd
+# ababab
+# True
+# True

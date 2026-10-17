@@ -1,0 +1,14 @@
+# 0.9.9 内建探针：str() 容器化（List/Dict/Set repr 与 VM stringify 逐字一致）
+def main() -> int:
+    xs: List[int] = [1, 2, 3]
+    print(str(xs))
+    print(str([True, False]))
+    print(str([1.5]))
+    print(str(["a", "b"]))
+    d: Dict[str, int] = {"a": 1}
+    d["b"] = 2
+    print(str(d))
+    s: Set[str] = {"x", "y"}
+    print(str(s))
+    print(len(str(d)))
+    return 0

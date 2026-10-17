@@ -1,0 +1,10 @@
+def g(x: int) -> int:
+    return 10 // x
+def f2(x: int) -> int:
+    return g(x) + 1
+def main() -> int:
+    try:
+        print(f2(0))
+    except:
+        print("caught deep")
+    return 0

@@ -1,0 +1,14 @@
+# 隔离 E：纯整型变参 printf（无 xmm，AL=0）
+capability ffi
+@extern("msvcrt.dll")
+def printf(fmt: str, ...) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def fflush(all: int) -> int:
+    pass
+
+def main() -> int:
+    printf("i=%d x=%lld\n", 42, -7)
+    fflush(0)
+    return 0

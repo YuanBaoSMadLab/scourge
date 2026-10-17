@@ -1,5 +1,5 @@
 # Regression: O-section FFI wide-type domain dual-mode byte check.
-# Positives: codebuddytest/probe_o_{e,a2,a3,a,smoke,b,c,d,min,max20}.sg
+# Positives: verify/probes/probe_o_{e,a2,a3,a,smoke,b,c,d,min,max20}.sg
 #   variadic @extern (int/float/str args, 0-arg and 20-arg boundaries)
 #   + data_ptr (tensor memset roundtrip / str strlen / readback).
 # Sema negatives: probe_o_{neg_var,neg_list,neg21}.sg - both channels must
@@ -15,15 +15,15 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
 
 # Cleanup helper: PS 5.1 pipeline Remove-Item intermittently NREs on
 # redirected files - direct wildcard delete guarded by try/catch instead.
 function Clean-Artifacts([string]$stem) {
-    try { Remove-Item -Path "$dir\$stem.*" -Force -ErrorAction SilentlyContinue } catch {}
+    try { Remove-Item -Path "$dir\$stem.*" -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue } catch {}
 }
 
 # --- positives: run vs build+aot triple diff (byte identical) -------------
@@ -33,9 +33,9 @@ $pos = @("probe_o_e", "probe_o_a2", "probe_o_a3", "probe_o_a",
 foreach ($n in $pos) {
     Clean-Artifacts $n
 
-    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\codebuddytest\$n.sg") -NoNewWindow -Wait -PassThru `
+    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\verify\probes\$n.sg") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.run.out" -RedirectStandardError "$dir\$n.run.err"
-    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\codebuddytest\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
+    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\verify\probes\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.build.out" -RedirectStandardError "$dir\$n.build.err"
     if ($p2.ExitCode -ne 0) {
         Write-Host "$n BUILD-FAIL"; Get-Content "$dir\$n.build.err" -First 20; $fail = 1; continue
@@ -67,9 +67,9 @@ $negCode = @{ "probe_o_neg_var" = "E1007"; "probe_o_neg_list" = "E2001"; "probe_
 foreach ($n in $neg) {
     Clean-Artifacts $n
 
-    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\codebuddytest\$n.sg") -NoNewWindow -Wait -PassThru `
+    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\verify\probes\$n.sg") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.run.out" -RedirectStandardError "$dir\$n.run.err"
-    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\codebuddytest\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
+    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\verify\probes\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
           -RedirectStandardOutput "$dir\$n.build.out" -RedirectStandardError "$dir\$n.build.err"
     $code = $negCode[$n]
     $rErr = (Get-Content "$dir\$n.run.err" -Raw) -match $code

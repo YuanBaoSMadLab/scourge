@@ -93,4 +93,40 @@ bool unifyShape(const std::vector<int64_t>& a, const std::vector<int64_t>& b,
 /// 人类可读/日志用的类型串："int" / "Tensor[int, (2, 3)]" / "Result[int, str]"。
 std::string typeToString(const TypePtr& t);
 
+// ---- 赋值放宽规则（语句级与模块级检查共用，单一事实源） ----------------------
+/// Option 目标放宽（0.9.10）：None → 任意 Option（空选项）；ok() 产出
+/// Result[T,str] 同构载荷同质 → 放行；裸 T 载荷同质 → 自动包装。仅变量
+/// 赋值与 return 消费——传参不放宽，显式 ok() 构造避免隐式歧义。
+/// 载荷用 typeEquals 严格匹配（不用 isConvertible）：int→float 放宽会让
+/// AOT 按 int 位型包装、按 float 载荷读位——双模位型错位，故禁入。
+inline bool optAssignable(const TypePtr& vt, const TypePtr& target) {
+    if (!vt || target->kind != Type::Kind::Option ||
+        target->params.size() != 1)
+        return false;
+    if (vt->kind == Type::Kind::None) return true;
+    // ok() 产出 Result[T,str]：err 态消息即 None 态（同构），载荷同质放行。
+    if (vt->kind == Type::Kind::Result && vt->params.size() == 2)
+        return typeEquals(vt->params[0], target->params[0]);
+    return typeEquals(vt, target->params[0]);
+}
+
+/// 元组注解 ↔ 字面量逐位匹配（0.9.10）：整体不可赋且双方皆元组时定位首
+/// 错位（isConvertible 已逐参结构化，逐位全兼容则整体兼容——只在真实
+/// 错位时命中）。返回空串 = 非逐位可比场景（走通用报错）。
+inline std::string tupleMismatch(const TypePtr& vt, const TypePtr& ann) {
+    if (!vt || !ann || vt->kind != Type::Kind::Tuple ||
+        ann->kind != Type::Kind::Tuple ||
+        vt->params.size() != ann->params.size())
+        return "";
+    for (size_t i = 0; i < ann->params.size(); ++i) {
+        if (isConvertible(vt->params[i], ann->params[i])) continue;
+        return "元组第 " + std::to_string(i + 1) + " 位与注解错位：字面量 " +
+               typeToString(vt->params[i]) + "，注解要求 " +
+               typeToString(ann->params[i]) +
+               "；Tuple 注解与字面量须逐位匹配（如 (1, \"a\") 配 "
+               "(int, str)）";
+    }
+    return "";
+}
+
 } // namespace scourge

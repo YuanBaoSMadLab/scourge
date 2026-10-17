@@ -1,0 +1,7 @@
+capability net
+# 0.9.10 负探针：23460 立即关闭连接 → 空响应 → 状态行非法 panic
+# （消息 net_http_get_json() 响应状态行非法，双模逐字一致）
+def main() -> int:
+    r: Json = net_http_get_json("http://127.0.0.1:23460/index.html")
+    print(r.get("status").as_int())
+    return 0

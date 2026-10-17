@@ -1,0 +1,30 @@
+# str 自拼接原地扩容：基本语义（+= 循环 / s=s+b 循环 / 局部别名 / 自拼接）
+def main() -> int:
+    # 1 基本累加：len + 首尾字符
+    s = ""
+    for i in range(100):
+        s += "x"
+    print(len(s))
+    print(s[0], s[99])
+    # 2 赋值形态自拼接 s = s + b（局部目标特化）
+    t = ""
+    for i in range(50):
+        t = t + "y"
+    print(len(t))
+    print(t[0], t[49])
+    # 3 局部别名：t2 与 s2 共享缓冲，s2 扩容后 t2 内容不变
+    s2 = "A"
+    t2 = s2
+    s2 += "Z"
+    print(s2)
+    print(t2)
+    # 4 自拼接 s += s（memmove 重叠区间）
+    c = "ab"
+    c += c
+    c += c
+    print(c)
+    # 5 先读后写混排（RHS 含自身：s = s + s）
+    d = "q"
+    d = d + d
+    print(d)
+    return 0

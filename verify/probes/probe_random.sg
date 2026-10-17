@@ -1,0 +1,8 @@
+def main() -> int:
+    seed(42)
+    x = random()
+    seed(42)
+    y = random()
+    print(x == y)
+    print(x > 0.0 and x < 1.0)
+    return 0

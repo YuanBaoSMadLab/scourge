@@ -1,0 +1,4 @@
+# C3 探针：printf 风格 % 格式化
+def main() -> int:
+    print("n=%d" % 3)
+    return 0

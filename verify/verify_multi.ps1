@@ -1,6 +1,6 @@
 # Parameterized dual-mode byte-identical verification (ASCII only)
 # Probes (source assets) live in d:\Scourge\verify (git-tracked);
-# artifacts go to d:\Scourge\build\verify (git-ignored).
+# artifacts go to d:\Scourge\build-rel\verify (git-ignored).
 $Files = @("p_try_min.sg","p_try_cross.sg","p_try_nested.sg","p_try_uncaught.sg","p_result.sg","p_list.sg")
 # Env note: drop lowercase proxy duplicates (case-insensitive .NET dict).
 foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
@@ -10,9 +10,9 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
+$exe = "d:\Scourge\build-rel\scourge.exe"
 $src = "d:\Scourge\verify"
-$dir = "d:\Scourge\build\verify"
+$dir = "d:\Scourge\build-rel\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
 foreach ($f in $Files) {

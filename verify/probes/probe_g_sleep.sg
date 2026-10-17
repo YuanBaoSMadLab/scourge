@@ -1,0 +1,10 @@
+capability time
+# G 验收：sleep 至少睡够指定毫秒（单调钟now()测量）
+def main() -> int:
+    t0: float = now()
+    sleep(150)
+    t1: float = now()
+    print(t1 - t0 >= 0.15)
+    sleep(0)
+    print("ok")
+    return 0

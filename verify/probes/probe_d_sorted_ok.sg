@@ -1,0 +1,7 @@
+# D 现状确认：sorted() 已支持的形式
+def main() -> int:
+    a: List[str] = ["c", "a", "b"]
+    print(sorted(a))
+    b: List[bool] = [True, False]
+    print(sorted(b))
+    return 0

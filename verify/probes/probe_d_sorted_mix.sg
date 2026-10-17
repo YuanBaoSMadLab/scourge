@@ -1,0 +1,5 @@
+# D5 探针：sorted() 内建对 Tensor / 多类型的覆盖面
+def main() -> int:
+    a = sorted([3, 1, 2])
+    print(a)
+    return 0

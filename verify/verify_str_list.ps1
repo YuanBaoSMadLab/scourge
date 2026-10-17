@@ -1,5 +1,5 @@
 # Regression: str / List member methods (0.9.4) dual-mode byte check.
-# Probes live in codebuddytest/ (probe_c_acc_* / probe_d_acc_*).
+# Probes live in verify/probes/ (probe_c_acc_* / probe_d_acc_*).
 # ASCII only: Windows PowerShell 5.1 parses BOM-less ps1 as ANSI.
 # Env note: if proxy vars coexist in different cases (http_proxy/HTTP_PROXY
 # etc), Start-Process fails on a case-insensitive .NET env dictionary; drop
@@ -11,11 +11,11 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
-$files = (Get-ChildItem "d:\Scourge\codebuddytest\probe_c_acc_*.sg" | ForEach-Object { $_.FullName }) +
-         (Get-ChildItem "d:\Scourge\codebuddytest\probe_d_acc_*.sg" | ForEach-Object { $_.FullName })
+$files = (Get-ChildItem "d:\Scourge\verify\probes\probe_c_acc_*.sg" | ForEach-Object { $_.FullName }) +
+         (Get-ChildItem "d:\Scourge\verify\probes\probe_d_acc_*.sg" | ForEach-Object { $_.FullName })
 $fail = 0
 foreach ($sg in $files) {
     $stem = [IO.Path]::GetFileNameWithoutExtension($sg)

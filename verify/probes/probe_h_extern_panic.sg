@@ -1,0 +1,9 @@
+capability ffi
+# @extern 反例：动态库不存在 → 双模 panic 消息逐字一致（stderr hash 比对）。
+@extern("no_such_dll_xyz_123")
+def boom(x: int) -> int:
+    pass
+
+def main() -> int:
+    print(boom(1))
+    return 0

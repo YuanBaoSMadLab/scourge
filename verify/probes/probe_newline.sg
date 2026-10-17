@@ -1,0 +1,22 @@
+# D1：括号内隐式换行（圆括号 / 方括号内换行不产生语句边界）
+def total(a: int, b: int,
+          c: int) -> int:
+    return a + b + c
+
+def main() -> int:
+    m = [1, 2, 3,
+         4, 5, 6]
+    print(total(
+        1,
+        2,
+        3))
+    print(m)
+    x = (1 +
+         2)
+    print(x)
+    return 0
+
+# 期望输出：
+# 6
+# Tensor(6) [1, 2, 3, 4, 5, 6]
+# 3

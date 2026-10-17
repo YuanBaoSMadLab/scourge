@@ -1,0 +1,20 @@
+# fmt 专项可运行探针：f-string 插值 + format() 降糖（str()+concat 链）
+def main() -> int:
+    name = "Scourge"
+    n = 42
+    pi = 3.5
+    print(f"hello {name}!")
+    print(f"n={n} pi={pi}")
+    print(f"expr: {n * 2 + 1}")
+    print(f"brace: {{literal}}")
+    print(f"empty:{''}")
+    print(format("fmt {} and {}", n, name))
+    print(format("esc {{}} done"))
+    s = f"chain {name}/{n}"
+    print(s, len(s))
+    # 嵌套 f-string：子解析器递归走同一降糖路径
+    print(f"outer {f"in-{n}"} end")
+    # 表达式含字符串字面量与切片（':' 在括号深度内不误报格式说明符）
+    print(f"mix {name.upper()} {[1, 2, 3][1]}")
+    print(f"cat {name + "!"} {n > 40}")
+    return 0

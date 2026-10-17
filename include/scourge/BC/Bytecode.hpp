@@ -253,6 +253,24 @@ enum class Method : uint8_t {
     JsonLen,     ///< 数组/对象长度（标量 panic）
     JsonKeys,    ///< 对象键列表 List[str]（非对象 panic）
     JsonDump,    ///< 重编码为紧凑 JSON 文本
+    // List[str].append(str)：原地尾插（共享语义所有别名可见）。**必须
+    // 居于枚举尾部**——Method 数值序列化在 .sgbc 里，中间插入会错位既有
+    // 缓存的 CallMethod 分派（实测 json at 错派成 asint，VM/AOT 分歧）。
+    ListAppend,
+    StrSlice,    ///< s.slice(a, b) -> str：字节区间 [a, b)，两端 clamp 到
+                 ///< [0, len]，a >= b 恒空串（bindgen/模板生成刚需）。
+    // 0.9.9：Dict 视图方法 + get_or + Set.add（尾部追加保 .sgbc 兼容）。
+    // get/keys 名称与 Json 方法同名——CompilerExpr 名称映射统一发 Dict*
+    // 枚举值，VM 前置路由按 self.kind==Json 进 jsonMethod（内有转发
+    // case），实参数差异由 Sema checkAttr 按 base kind 分域校验。
+    DictKeys,   ///< dict.keys() -> List[K]（插入序）
+    DictValues, ///< dict.values() -> List[V]（插入序）
+    DictItems,  ///< dict.items() -> List[(K, V)]（插入序）
+    DictGet,    ///< dict.get(k, def) -> V（缺键取缺省值，不 panic）
+    SetAdd,     ///< set.add(v)：原地插入，返回 None（NaN panic）
+    Slice2,     ///< s[a:b] 切片（0.9.9）：4 参 [start,end,hasA,hasB] 全 int，
+                ///< VM 按 self.kind 分派 str 字节切片 / List 浅拷贝切片；
+                ///< 边界归一公式与 AOT sg_normslice 逐字一致（尾部追加兼容）。
 };
 
 struct Instr {

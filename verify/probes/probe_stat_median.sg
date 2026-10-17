@@ -1,0 +1,13 @@
+# median 全链探针：张量/列表、奇偶、int 提升、NaN 负例（str 列表为 E2001 静态拒绝，单独验证）
+def main() -> int:
+    a = [[1.0, 2.0], [3.0, 4.0]]
+    print(median(a))
+    print(median([5.0, 1.0, 3.0]))
+    print(median([1, 2, 3, 4]))
+    print(median([3, 1, 2]))
+    print(median([2.5, 1.5]))
+    try:
+        print(median([sqrt(-1.0), 1.0]))
+    except:
+        print("neg-nan")
+    return 0

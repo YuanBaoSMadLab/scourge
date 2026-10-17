@@ -1,0 +1,53 @@
+# ============================================================================
+#  t07_contracts.sg — 契约：docstring 中的 requires/ensures/invariant
+#  对应章节：第8章 契约式编程
+# ============================================================================
+
+@pure
+def clamp(x: int, lo: int, hi: int) -> int:
+    """将 x 限制在 [lo, hi]。
+    requires: lo <= hi
+    ensures: result >= lo and result <= hi
+    """
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+@pure
+def pct(part: int, whole: int) -> float:
+    """百分比：whole 必须为正。
+    requires: whole > 0
+    """
+    return part / whole
+
+def safePct(part: int, whole: int) -> Result[float, str]:
+    """用显式分支实现"运行时"前置检查（契约不可静态求值时的配套写法）。"""
+    if whole <= 0:
+        return err("whole 必须为正")
+    return ok(part / whole)
+
+def main() -> int:
+    # 常量实参 → requires 在调用点静态验证；违反即编译错误 E3001
+    print(clamp(150, 0, 100))
+    print(clamp(-5, 0, 100))
+    print(clamp(50, 0, 100))
+
+    # 非常量实参 → requires 降级为运行时断言（W3001 警告）
+    n: int = 200
+    print(pct(n, 1000))
+
+    r: Result[float, str] = safePct(1, 0)
+    print(r.is_ok())
+    r2: Result[float, str] = safePct(1, 4)
+    print(r2.unwrap(0.0))
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# 100
+# 0
+# 50
+# 0.2
+# False
+# 0.25

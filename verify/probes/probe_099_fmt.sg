@@ -1,0 +1,24 @@
+# 0.9.9 f-string :spec / fmt() 探针：精度/宽度三向/填充/零填充/符号/
+# 字符串截断/中文码点计宽/百分号。降糖 fmt(expr, spec)，双模逐字节。
+def main() -> int:
+    x = 3.14159
+    print(f"{x:.2f}")
+    print(f"{x:.0f}")
+    print(f"{1.5:f}")
+    print(f"{12345.678:.2e}")
+    print(f"{0.25:.1%}")
+    print(f"{7:>5}")
+    print(f"{7:<5}|")
+    print(f"{7:^5}")
+    print(f"{7:*>5}")
+    print(f"{42:05}")
+    print(f"{-42:05}")
+    print(f"{42:+05}")
+    print(f"{255:d}")
+    print(f"{'hello':.3}")
+    print(f"{'ab':>6}")
+    print(f"{'中文':>6}|")
+    print(fmt(42, "05"))
+    print(fmt(-7, "+3"))
+    print(f"{x} {7} {True}")
+    return 0

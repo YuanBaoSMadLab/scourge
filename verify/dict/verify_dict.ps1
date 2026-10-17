@@ -14,8 +14,8 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify\dict"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify\dict"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
 
@@ -26,9 +26,9 @@ function Clean-Artifacts([string]$stem) {
 # --- positive: survey triple diff (byte identical) ------------------------
 $n = "probe_dict_survey"
 Clean-Artifacts $n
-$p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\codebuddytest\$n.sg") -NoNewWindow -Wait -PassThru `
+$p1 = Start-Process -FilePath $exe -ArgumentList @("run", "d:\Scourge\verify\probes\$n.sg") -NoNewWindow -Wait -PassThru `
       -RedirectStandardOutput "$dir\$n.run.out" -RedirectStandardError "$dir\$n.run.err"
-$p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\codebuddytest\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
+$p2 = Start-Process -FilePath $exe -ArgumentList @("build", "d:\Scourge\verify\probes\$n.sg", "-o", "$dir\$n.exe") -NoNewWindow -Wait -PassThru `
       -RedirectStandardOutput "$dir\$n.build.out" -RedirectStandardError "$dir\$n.build.err"
 if ($p2.ExitCode -ne 0) {
     Write-Host "$n BUILD-FAIL"; Get-Content "$dir\$n.build.err" -First 20; $fail = 1
@@ -51,7 +51,7 @@ if ($p2.ExitCode -ne 0) {
 
 # --- panic: missing key stderr must be byte-identical ---------------------
 Clean-Artifacts "probe_dict_panic"
-$src = "d:\Scourge\codebuddytest\probe_dict_panic.sg"
+$src = "d:\Scourge\verify\probes\probe_dict_panic.sg"
 Set-Content -Path $src -Encoding Ascii -Value @('def main() -> int:', '    d: Dict[str, int] = {"a": 1}', '    print(d["zz"])', '    return 0')
 $p1 = Start-Process -FilePath $exe -ArgumentList @("run", $src) -NoNewWindow -Wait -PassThru `
       -RedirectStandardOutput "$dir\probe_dict_panic.run.out" -RedirectStandardError "$dir\probe_dict_panic.run.err"
@@ -75,7 +75,7 @@ if ($panicOk) {
 # VM prints it; AOT must reject at compile time with E1007 (not a dual-mode
 # violation: E1007 is the established explicit-rejection channel).
 Clean-Artifacts "probe_dict_cval"
-$src = "d:\Scourge\codebuddytest\probe_dict_cval.sg"
+$src = "d:\Scourge\verify\probes\probe_dict_cval.sg"
 Set-Content -Path $src -Encoding Ascii -Value @('def main() -> int:', '    x: List[int] = [1, 2]', '    d: Dict[str, List[int]] = {"a": x}', '    print(d)', '    return 0')
 $p1 = Start-Process -FilePath $exe -ArgumentList @("run", $src) -NoNewWindow -Wait -PassThru `
       -RedirectStandardOutput "$dir\probe_dict_cval.run.out" -RedirectStandardError "$dir\probe_dict_cval.run.err"

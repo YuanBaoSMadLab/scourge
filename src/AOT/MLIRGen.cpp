@@ -18,8 +18,8 @@
 //    自身活跃帧调用，包装帧方案会被同深度兄弟调用覆盖致死帧），处理器栈
 //    簿记与 VM catches_ 逐一对应（EnterTry/ExitTry/recover
 //    /doReturn 清理/break-continue 显式 ExitTry 穿越）。
-//  * 不进入 AOT 的构造（Dict/Option、print/str 的句柄值、List 下标赋值、
-//    Result/List 全局变量等）显式 E1007，无静默回退。
+//  * 不进入 AOT 的构造显式 E1007，无静默回退（全局容器/句柄槽自 0.9.10
+//    起开放：undef 零值 + <top> 动态初始化，F-15）。
 // ============================================================================
 //
 //  分块（按功能模块与生命周期，共享模型见 MLIRGenDetail.hpp）：
@@ -30,7 +30,7 @@
 // ============================================================================
 #include "scourge/AOT/MLIRGen.hpp"
 
-#include "MLIRGenDetail.hpp"
+#include "scourge/AOT/MLIRGenDetail.hpp"
 
 namespace scourge {
 namespace aot {
@@ -57,11 +57,24 @@ void Gen::precollectGlobals() {
                 auto gt = syms->second->globals.find(n.name);
                 if (gt == syms->second->globals.end()) continue;
                 VK vk = vkOfType(gt->second);
-                if (vk == VK::Bad || vk == VK::Tensor || vk == VK::Result ||
-                    vk == VK::List || vk == VK::Tuple)
+                if (vk == VK::Bad)
                     unsupported(a.target->range,
                                 "全局变量 '" + name + "." + n.name + "' 的类型");
-                gm.emplace(n.name, GlobalSlot{vk, globalSym(name, n.name)});
+                GlobalSlot g{vk, globalSym(name, n.name)};
+                // 容器/句柄元数据从注册表类型回填（loadGlobal 读出后
+                // list_get_*/张量分派依赖；与函数参数回填同构）。
+                const TypePtr& gt2 = gt->second;
+                if (vk == VK::List && gt2 && gt2->kind == Type::Kind::List &&
+                    !gt2->params.empty())
+                    g.lElem = static_cast<uint8_t>(vkOfType(gt2->params[0]));
+                if (vk == VK::Result && gt2 && !gt2->params.empty())
+                    g.lElem = static_cast<uint8_t>(vkOfType(gt2->params[0]));
+                if (vk == VK::Tensor && gt2 && gt2->kind == Type::Kind::Tensor) {
+                    if (!gt2->params.empty())
+                        g.tInt = gt2->params[0]->kind != Type::Kind::Float;
+                    g.tRank = static_cast<uint8_t>(gt2->shape.size());
+                }
+                gm.emplace(n.name, g);
                 switch (vk) {
                 case VK::Int:
                 case VK::Range:
@@ -89,6 +102,20 @@ void Gen::precollectGlobals() {
                                           ") : !llvm.ptr");
                     break;
                 }
+                case VK::Tensor:
+                case VK::Result:
+                case VK::List:
+                case VK::Dict:
+                case VK::Set:
+                case VK::Tuple:
+                case VK::Json:
+                    // 句柄全局：undef 零值定义（先写后读由执行序保证——
+                    // 全部 <top> 先于 main；F-15：容器/张量字面量常量表
+                    // 是 AI 高频写法，不再拒绝）。
+                    globalDefs_.push_back("llvm.mlir.global internal " +
+                                          globalSym(name, n.name) +
+                                          "() : !llvm.ptr");
+                    break;
                 default:
                     break; // None：无存储
                 }
@@ -96,7 +123,8 @@ void Gen::precollectGlobals() {
                 auto& fd = static_cast<const FuncDef&>(*stmt);
                 auto f = syms->second->funcs.find(fd.name);
                 if (f == syms->second->funcs.end()) continue;
-                if (fd.isAsync) unsupported(fd.nameRange, "async def");
+                // async def 按普通 def 发射（await 恒等透传，Task 语义
+                // 随 P2 并发落地；与 BC Compiler 声明遍同构，双模一致）。
                 for (const auto& p : f->second.params)
                     if (vkOfType(p) == VK::Bad)
                         unsupported(fd.nameRange,
@@ -208,6 +236,17 @@ void Gen::genFunction(const Module& m, const FuncDef& f) {
                 it->second.tInt = pt->params[0]->kind != Type::Kind::Float;
             it->second.tRank = static_cast<uint8_t>(pt->shape.size());
         }
+    }
+    // List 参数：从签名回填元素 VK——list_get_*/append 的降级分派依赖
+    // lElem，函数参数是跨函数边界后唯一可靠注解来源（缺失会把 List[str]
+    // 参数误当 Int 元素发射，list_get_i 读 char** 全乱）。
+    for (size_t k = 0; k < f.params.size(); ++k) {
+        if (params[k].second != VK::List) continue;
+        auto it = locals_.find(f.params[k].name);
+        const TypePtr& pt = sig->second.params[k];
+        if (it != locals_.end() && pt && pt->kind == Type::Kind::List &&
+            !pt->params.empty())
+            it->second.lElem = static_cast<uint8_t>(vkOfType(pt->params[0]));
     }
     deferStack_.clear(); // Gen 跨函数复用，先清残留（控制流块均显式终结，
                          // 函数体后当前块是唯一隐式返回点）

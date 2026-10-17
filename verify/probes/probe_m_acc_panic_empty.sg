@@ -1,0 +1,4 @@
+def main() -> int:
+    e: List[int] = []
+    print(mean(e))
+    return 0

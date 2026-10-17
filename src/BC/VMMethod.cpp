@@ -13,6 +13,7 @@
 //      int 键遇 float 元素提升 f64（唯一放宽），其余不匹配（检查器拦截）。
 // ============================================================================
 #include "scourge/BC/VM.hpp"
+#include "scourge/BC/VMDetail.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -173,6 +174,19 @@ void VM::callValueMethod(Method m, const Value& self,
                                                    : static_cast<int64_t>(p)));
         return;
     }
+    case Method::StrSlice: {
+        needStr("slice");
+        if (args.size() != 2 || args[0].kind != Value::Kind::Int ||
+            args[1].kind != Value::Kind::Int)
+            panicHere("slice() 需要 2 个 int 参数");
+        int64_t len = static_cast<int64_t>(self.s.size());
+        int64_t a = args[0].i < 0 ? 0 : args[0].i;
+        int64_t b = args[1].i > len ? len : args[1].i;
+        if (a > b) a = b;
+        push(Value::makeStr(self.s.substr(static_cast<size_t>(a),
+                                          static_cast<size_t>(b - a))));
+        return;
+    }
     case Method::StrStartsWith: {
         needStr("startswith");
         if (args.size() != 1 || args[0].kind != Value::Kind::Str)
@@ -231,14 +245,143 @@ void VM::callValueMethod(Method m, const Value& self,
         panicHere("index() 只能用于 str 或列表");
     }
     case Method::ListCount: {
+        // 0.9.9：str 分支——子串非重叠计数（空子串 = len+1，与 Python
+        // 一致）；消息与 AOT sg_str_count 逐字一致。
+        if (self.kind == Value::Kind::Str) {
+            if (args.size() != 1 || args[0].kind != Value::Kind::Str)
+                panicHere("count() 需要 1 个 str 参数");
+            if (args[0].s.empty()) {
+                push(Value::makeInt(static_cast<int64_t>(self.s.size()) + 1));
+                return;
+            }
+            int64_t n = 0;
+            for (size_t p = self.s.find(args[0].s); p != std::string::npos;
+                 p = self.s.find(args[0].s, p + args[0].s.size()))
+                ++n;
+            push(Value::makeInt(n));
+            return;
+        }
         if (self.kind != Value::Kind::List || !self.list)
-            panicHere("count() 只能用于列表");
+            panicHere("count() 只能用于列表或字符串");
         if (args.size() != 1) panicHere("count() 恰好需要 1 个参数");
         int64_t n = 0;
         for (const Value& e : *self.list)
             if (listElemEq(e, args[0])) ++n;
         push(Value::makeInt(n));
         return;
+    }
+    case Method::ListAppend: {
+        // 元素域 str/int/float/bool（0.9.8 扩展标量全域）：VM 列表为
+        // vector<Value>，值直接入列；类型一致性与参数个数已由检查器
+        // 静态保证，此处仅防御非法字节码。
+        if (self.kind != Value::Kind::List || !self.list)
+            panicHere("append() 只能用于列表");
+        if (args.size() != 1)
+            panicHere("append() 恰好需要 1 个参数");
+        self.list->push_back(args[0]);
+        push(Value::makeNone());
+        return;
+    }
+    // ---- Dict 视图方法（0.9.9）：插入序，键值标量域（检查器限域） ----
+    case Method::DictKeys: {
+        if (self.kind != Value::Kind::Dict || !self.dict)
+            panicHere("keys() 只能用于字典");
+        auto out = std::make_shared<std::vector<Value>>();
+        for (const auto& e : self.dict->entries) out->push_back(e.key);
+        push(Value::makeList(std::move(out)));
+        return;
+    }
+    case Method::DictValues: {
+        if (self.kind != Value::Kind::Dict || !self.dict)
+            panicHere("values() 只能用于字典");
+        auto out = std::make_shared<std::vector<Value>>();
+        for (const auto& e : self.dict->entries) out->push_back(e.val);
+        push(Value::makeList(std::move(out)));
+        return;
+    }
+    case Method::DictItems: {
+        if (self.kind != Value::Kind::Dict || !self.dict)
+            panicHere("items() 只能用于字典");
+        auto out = std::make_shared<std::vector<Value>>();
+        for (const auto& e : self.dict->entries) {
+            auto pair = std::make_shared<std::vector<Value>>();
+            pair->push_back(e.key);
+            pair->push_back(e.val);
+            out->push_back(Value::makeTuple(std::move(pair)));
+        }
+        push(Value::makeList(std::move(out)));
+        return;
+    }
+    case Method::DictGet: {
+        if (self.kind != Value::Kind::Dict || !self.dict)
+            panicHere("get() 只能用于字典");
+        if (args.size() != 2) panicHere("get() 恰好需要 2 个参数");
+        // 缺键取缺省值不 panic（Result.unwrap_or 同哲学）；键相等 =
+        // valuesEqual（数值跨类型同键，与 d[k] 同一事实源）
+        for (const auto& e : self.dict->entries)
+            if (valuesEqual(e.key, args[0])) {
+                push(e.val);
+                return;
+            }
+        push(args[1]);
+        return;
+    }
+    case Method::SetAdd: {
+        if (self.kind != Value::Kind::Set || !self.set)
+            panicHere("add() 只能用于集合");
+        if (args.size() != 1) panicHere("add() 恰好需要 1 个参数");
+        // NaN 先查（与 NewSet/构造消息逐字一致；SetData::add 内不设防）
+        if (args[0].kind == Value::Kind::Float && std::isnan(args[0].f))
+            panicHere("集合元素不能为 NaN");
+        self.set->add(args[0]);
+        push(Value::makeNone());
+        return;
+    }
+    case Method::Slice2: {
+        // 切片 s[a:b]（0.9.9）：4 参 [start,end,hasA,hasB] 全 int（编译器
+        // 保证；此处防御非法字节码）。归一公式与 AOT sg_normslice 逐字
+        // 一致：负下标加 len 后钳 0，越界钳 len，b<a 收敛为空切片。
+        if (args.size() != 4 || args[0].kind != Value::Kind::Int ||
+            args[1].kind != Value::Kind::Int || args[2].kind != Value::Kind::Int ||
+            args[3].kind != Value::Kind::Int)
+            panicHere("slice 边界必须是 int");
+        auto norm = [](int64_t a, int64_t b, int64_t hasA, int64_t hasB,
+                       int64_t len) {
+            if (!hasA)
+                a = 0;
+            else if (a < 0) {
+                a += len;
+                if (a < 0) a = 0;
+            }
+            if (!hasB)
+                b = len;
+            else if (b < 0) {
+                b += len;
+                if (b < 0) b = 0;
+            }
+            if (a > len) a = len;
+            if (b > len) b = len;
+            if (b < a) b = a;
+            return std::pair<int64_t, int64_t>{a, b};
+        };
+        if (self.kind == Value::Kind::Str) {
+            auto [a, b] = norm(args[0].i, args[1].i, args[2].i, args[3].i,
+                               static_cast<int64_t>(self.s.size()));
+            push(Value::makeStr(self.s.substr(static_cast<size_t>(a),
+                                              static_cast<size_t>(b - a))));
+            return;
+        }
+        if (self.kind == Value::Kind::List && self.list) {
+            auto [a, b] = norm(args[0].i, args[1].i, args[2].i, args[3].i,
+                               static_cast<int64_t>(self.list->size()));
+            // 浅拷贝子列表：元素句柄共享语义与 VM 列表别名一致。
+            auto out = std::make_shared<std::vector<Value>>(
+                self.list->begin() + static_cast<std::ptrdiff_t>(a),
+                self.list->begin() + static_cast<std::ptrdiff_t>(b));
+            push(Value::makeList(std::move(out)));
+            return;
+        }
+        panicHere("切片只能用于 str 或列表");
     }
     default:
         panicHere("VM 内部错误：未知方法");

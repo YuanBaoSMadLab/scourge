@@ -4,8 +4,8 @@
 # ASCII only: Windows PowerShell 5.1 parses BOM-less ps1 as ANSI.
 # probe_cap writes probe_cap_tmp.txt relative to CWD: both modes are pinned
 # to the same working dir so outputs are comparable; cleaned between runs.
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify_cap"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify_cap"
 $src = "d:\Scourge\verify\cap"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0

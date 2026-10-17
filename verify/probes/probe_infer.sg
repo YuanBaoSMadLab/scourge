@@ -1,0 +1,35 @@
+# Q10：返回类型自动推断（返回注解可选；形参注解仍必需——静态编译的
+# 形参类型事实源）。推断产物与显式注解一致，无运行时开销。
+# 边界：递归 / 前向引用无法自动推断（无类型事实源），需显式注解。
+def fib(n: int) -> int:  # 递归：显式注解（推断不支持递归场景）
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def half(x: float):  # 单一 return：float 推断
+    return x / 2.0
+
+def widen(a: int, b: float):  # int/float 混合 → 宽化 float
+    if a > b:
+        return a
+    return b
+
+def nothing(flag: bool):  # 无 return → None
+    if flag:
+        print("yes")
+
+def main() -> int:
+    print(fib(20))
+    print(half(9.0))
+    print(widen(3, 2.5))
+    print(widen(1, 2.5))
+    nothing(True)
+    nothing(False)
+    return 0
+
+# 期望输出：
+# 6765
+# 4.5
+# 3.0
+# 2.5
+# yes

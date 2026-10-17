@@ -1,0 +1,11 @@
+# 0.9.9 内建探针：str.count 非重叠计数（空子串 = len+1）
+def main() -> int:
+    s = "banana"
+    print(s.count("an"))
+    print(s.count("a"))
+    print(s.count("banana"))
+    print(s.count("z"))
+    print(s.count(""))
+    print("aaa".count("aa"))
+    print("".count(""))
+    return 0

@@ -1,0 +1,27 @@
+# Tuple 注解逐位匹配探针（0.9.9 批3①）：注解 ↔ 字面量逐位一致
+#（错位 E2001 带处方，负例走 verify_b3.ps1 诊断断言）。此处覆盖正例：
+# 嵌套元组注解、重赋值同位一致、下标按位取值。断言式输出保证确定性。
+def main() -> int:
+    t: (int, str) = (1, "a")
+    print(t[0])                    # 1
+    print(t[1])                    # a
+    u: (float, bool, str) = (1.5, True, "hi")
+    print(u[0])                    # 1.5
+    print(u[1])                    # True
+    print(u[2])                    # hi
+    v: (int, (str, bool)) = (3, ("inner", False))
+    print(v[0])                    # 3
+    print(v[1][0])                 # inner
+    print(v[1][1])                 # False
+    # 重赋值：逐位同质即放行
+    t = (2, "b")
+    print(t[0])                    # 2
+    print(t[1])                    # b
+    # 单元素元组（尾逗号）
+    w: (int,) = (9,)
+    print(w[0])                    # 9
+    # int 位 → float 注解位（isConvertible 逐位放宽，与整体判定同源）
+    x: (float, str) = (7, "seven")
+    print(x[0])                    # 7
+    print(x[1])                    # seven
+    return 0

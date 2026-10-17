@@ -1,0 +1,26 @@
+# ============================================================================
+#  t13_modules.sg — 模块系统：import、跨模块函数与常量、.sgi 接口
+#  对应章节：第11章 模块系统
+#  依赖：lib_greet.sg（同目录）
+# ============================================================================
+
+import lib_greet
+
+def main() -> int:
+    # 跨模块函数调用
+    print(lib_greet.scale(3.0))
+    # 默认参数调用须显式给全实参（0.9.1 已知缺口）
+    print(lib_greet.shout("hi", 2))
+    print(lib_greet.shout("hi", 3))
+
+    # 跨模块顶层常量
+    print(lib_greet.GREETING)
+
+    # 模块名即命名空间；点分路径 / from-import / import as 均被显式拒绝
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# 6.0
+# hihi
+# hihihi
+# hello

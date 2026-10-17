@@ -1,0 +1,55 @@
+# ============================================================================
+#  t03_types.sg — 类型系统：内置类型注解、张量形状、动态维、Result
+#  对应章节：第5章 类型系统
+# ============================================================================
+
+def show(a: int, b: float, ok: bool, s: str) -> str:
+    return s + str(a + b) + str(ok)
+
+def takeList(xs: List[str]) -> int:
+    return len(xs)
+
+def takeTensor(m: Tensor[float, (2, 2)]) -> float:
+    return sum(m)
+
+def dynRows(m: Tensor[float, (?, 2)]) -> float:
+    return sum(m)
+
+def makeResult(neg: bool) -> Result[int, str]:
+    if neg:
+        return err("负数")
+    return ok(1)
+
+def main() -> int:
+    print(show(1, 2.5, True, "n="))
+
+    # 非数值字面量列表 → List[str]
+    xs: List[str] = ["a", "b", "c", "d"]
+    print(takeList(xs))
+
+    m: Tensor[float, (2, 2)] = [[1.0, 2.0], [3.0, 4.0]]
+    print(takeTensor(m))
+
+    # 动态维 ?：编译期不校验该维，运行时校验（3 行 x 2 列合法）
+    d: Tensor[float, (?, 2)] = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]
+    print(dynRows(d))
+
+    r: Result[int, str] = makeResult(False)
+    print(r.is_ok(), r.unwrap(0))
+    r2: Result[int, str] = makeResult(True)
+    print(r2.is_ok(), r2.unwrap_or(-7))
+
+    # int -> float 是唯一隐式转换方向；bool 不隐式转 int
+    f: float = 3
+    print(f)
+
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# n=3.5True
+# 4
+# 10.0
+# 21.0
+# True 1
+# False -7
+# 3.0

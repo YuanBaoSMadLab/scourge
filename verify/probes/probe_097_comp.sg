@@ -1,0 +1,5 @@
+# 验证：列表/张量推导式是否存在
+def main() -> int:
+    xs = [i * 2 for i in range(5)]
+    print(xs)
+    return 0

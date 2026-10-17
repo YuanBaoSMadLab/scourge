@@ -1,0 +1,5 @@
+# 探针2：List[int] 能否用空列表构造
+def main() -> int:
+    xs: List[int] = []
+    print(len(xs))
+    return 0

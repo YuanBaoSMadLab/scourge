@@ -508,26 +508,28 @@ void VM::netBuiltin(const std::string& n, std::vector<Value>& a) {
         push(Value::makeInt(static_cast<int64_t>(r)));
         return;
     }
-    if (n == "net_http_get") {
-        need(1);
-        const std::string& url = needStr(0, "URL参数");
+    // GET 全量收取（net_http_get / net_http_get_json 共用；0.9.10 提取，
+    // panic 消息前缀随 api 参数走——与 AOT 侧 sg_net_http_raw 镜像，双模
+    // 逐字一致）。返回原始响应（头 + 体，收至 EOF）。
+    auto httpGetRaw = [&](const std::string& url, const char* api) {
+        const std::string prefix = std::string(api) + "()";
         std::string host, path;
         int port = 80;
         if (!parseHttpUrl(url, host, port, path))
-            panicHere("net_http_get() 仅支持 http://host[:port]/path 形式的"
+            panicHere(prefix + " 仅支持 http://host[:port]/path 形式的"
                       "URL: " + url);
         in_addr addr;
         if (!resolveHost(host, addr))
-            panicHere("net_http_get() 无法解析主机: " + host);
+            panicHere(prefix + " 无法解析主机: " + host);
         SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        if (s == INVALID_SOCKET) panicHere("net_http_get() 创建套接字失败");
+        if (s == INVALID_SOCKET) panicHere(prefix + " 创建套接字失败");
         sockaddr_in sa{};
         sa.sin_family = AF_INET;
         sa.sin_port = htons(static_cast<uint16_t>(port));
         sa.sin_addr = addr;
         if (connect(s, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) {
             closesocket(s);
-            panicHere("net_http_get() 连接失败: " + host + ":" +
+            panicHere(prefix + " 连接失败: " + host + ":" +
                       std::to_string(port));
         }
         std::string req = "GET " + path + " HTTP/1.0\r\nHost: " + host +
@@ -539,7 +541,7 @@ void VM::netBuiltin(const std::string& n, std::vector<Value>& a) {
                          static_cast<int>(req.size() - sent), 0);
             if (r == SOCKET_ERROR) {
                 closesocket(s);
-                panicHere("net_http_get() 请求发送失败");
+                panicHere(prefix + " 请求发送失败");
             }
             sent += static_cast<size_t>(r);
         }
@@ -550,16 +552,126 @@ void VM::netBuiltin(const std::string& n, std::vector<Value>& a) {
             if (r == 0) break;
             if (r == SOCKET_ERROR) {
                 closesocket(s);
-                panicHere("net_http_get() 响应接收失败");
+                panicHere(prefix + " 响应接收失败");
             }
             resp.append(buf, static_cast<size_t>(r));
             if (resp.size() > (1u << 26)) { // 64 MiB 上限防失控
                 closesocket(s);
-                panicHere("net_http_get() 响应超过 64MiB 上限");
+                panicHere(prefix + " 响应超过 64MiB 上限");
             }
         }
         closesocket(s);
-        push(Value::makeStr(std::move(resp)));
+        return resp;
+    };
+    if (n == "net_http_get") {
+        need(1);
+        const std::string& url = needStr(0, "URL参数");
+        push(Value::makeStr(httpGetRaw(url, "net_http_get")));
+        return;
+    }
+    // 0.9.10：HTTP GET → Json Obj {"status": int, "body": str}。分帧最小
+    // 规则集：状态行 HTTP/1.x NNN → headers 小写化查 content-length /
+    // transfer-encoding: chunked → chunked 解码 / CL 截断 / EOF 全量。
+    // 解析逻辑与 BuilderRTHttp.hpp 的 sg_net_http_get_json 镜像（计划明示
+    // 认可两份实现），消息逐字一致由探针锁定。
+    if (n == "net_http_get_json") {
+        need(1);
+        const std::string& url = needStr(0, "URL参数");
+        const std::string prefix = "net_http_get_json()";
+        std::string raw = httpGetRaw(url, "net_http_get_json");
+        // 状态行：HTTP/1.x NNN（前缀校验——1.x 版本号 + 三位状态码）
+        auto isDig = [](char c) { return c >= '0' && c <= '9'; };
+        if (raw.size() < 12 || raw.compare(0, 7, "HTTP/1.") != 0 ||
+            (raw[7] != '0' && raw[7] != '1') || raw[8] != ' ' ||
+            !isDig(raw[9]) || !isDig(raw[10]) || !isDig(raw[11]))
+            panicHere(prefix + " 响应状态行非法");
+        int status = (raw[9] - '0') * 100 + (raw[10] - '0') * 10 +
+                     (raw[11] - '0');
+        // 头部终止符："\r\n\r\n" 首次出现即头区结束
+        size_t hdrEnd = raw.find("\r\n\r\n");
+        if (hdrEnd == std::string::npos)
+            panicHere(prefix + " 响应缺少头部终止符");
+        // header 区逐行解析（名字小写化、值 trim 空白）——镜像 C 侧
+        int64_t contentLen = -1;
+        bool chunked = false;
+        size_t ha = raw.find("\r\n") + 2; // 跳过状态行
+        while (ha < hdrEnd) {
+            size_t e = raw.find("\r\n", ha);
+            size_t hb = (e == std::string::npos || e > hdrEnd) ? hdrEnd : e;
+            std::string line = raw.substr(ha, hb - ha);
+            size_t colon = line.find(':');
+            if (colon != std::string::npos && colon > 0) {
+                std::string name = line.substr(0, colon);
+                for (auto& ch : name)
+                    ch = (ch >= 'A' && ch <= 'Z') ? static_cast<char>(ch - 'A' + 'a') : ch;
+                size_t vb = colon + 1, ve = line.size();
+                while (vb < ve && (line[vb] == ' ' || line[vb] == '\t')) ++vb;
+                while (ve > vb && (line[ve - 1] == ' ' || line[ve - 1] == '\t')) --ve;
+                if (name == "content-length" && contentLen < 0)
+                    contentLen = strtoll(line.c_str() + vb, nullptr, 10);
+                else if (name == "transfer-encoding" &&
+                         line.find("chunked", vb) != std::string::npos &&
+                         line.find("chunked", vb) < ve)
+                    chunked = true;
+            }
+            ha = (e == std::string::npos || e >= hdrEnd) ? hdrEnd : hb + 2;
+        }
+        // body 分帧
+        std::string body;
+        if (chunked) {
+            size_t p = hdrEnd + 4;
+            for (;;) {
+                size_t e = raw.find("\r\n", p);
+                if (e == std::string::npos)
+                    panicHere(prefix + " chunked 分块大小行非法");
+                // hex size，';ext' 扩展截断
+                std::string szLine = raw.substr(p, e - p);
+                size_t semi = szLine.find(';');
+                if (semi != std::string::npos) szLine.resize(semi);
+                uint64_t sz = 0;
+                bool any = !szLine.empty();
+                for (char c : szLine) {
+                    int d = (c >= '0' && c <= '9') ? c - '0'
+                          : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+                          : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+                    if (d < 0) { any = false; break; }
+                    sz = sz * 16 + static_cast<uint64_t>(d);
+                }
+                if (!any) panicHere(prefix + " chunked 分块大小行非法");
+                p = e + 2;
+                if (sz == 0) break;
+                if (p + sz > raw.size())
+                    panicHere(prefix + " chunked 分块数据不完整");
+                body.append(raw, p, static_cast<size_t>(sz));
+                p += sz + 2; // 跳过分块数据后的 CRLF
+            }
+        } else {
+            body = raw.substr(hdrEnd + 4);
+            if (contentLen >= 0 && body.size() > static_cast<size_t>(contentLen))
+                body.resize(static_cast<size_t>(contentLen)); // CL 截断
+        }
+        // Json Obj 构造（net_http_read_request 的 jstr lambda 同款模式）
+        auto jstr = [](std::string v) {
+            Value j;
+            j.kind = Value::Kind::Json;
+            j.json = std::make_shared<JsonData>();
+            j.json->jk = JsonData::JK::Str;
+            j.json->s = std::move(v);
+            return j;
+        };
+        Value out;
+        out.kind = Value::Kind::Json;
+        out.json = std::make_shared<JsonData>();
+        out.json->jk = JsonData::JK::Obj;
+        out.json->obj = std::make_shared<DictData>();
+        Value st;
+        st.kind = Value::Kind::Json;
+        st.json = std::make_shared<JsonData>();
+        st.json->jk = JsonData::JK::Int;
+        st.json->i = status;
+        out.json->obj->set(Value::makeStr("status"), std::move(st));
+        out.json->obj->set(Value::makeStr("body"), jstr(std::move(body)));
+        push(std::move(out));
         return;
     }
     if (n == "sleep") {

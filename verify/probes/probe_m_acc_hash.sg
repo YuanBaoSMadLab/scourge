@@ -1,0 +1,7 @@
+# M 验收：sha256/crc32（NIST "abc" 向量；CRC-32 "123456789"=3421780262）
+def main() -> int:
+    print(sha256("abc"))
+    print(sha256(""))
+    print(crc32("123456789"))
+    print(crc32(""))
+    return 0

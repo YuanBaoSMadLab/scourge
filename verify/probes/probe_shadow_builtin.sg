@@ -1,0 +1,6 @@
+# 探针12：内建名遮蔽测试
+def main() -> int:
+    err = [[1.0], [2.0]]
+    print(err)
+    print(sum(err))
+    return 0

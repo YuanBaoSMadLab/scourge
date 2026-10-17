@@ -1,0 +1,12 @@
+# Q9：同名循环变量复用（Python 重绑定语义，同一函数内）
+def main() -> int:
+    acc = 0
+    for i in range(4):
+        acc += i
+    for i in range(3):  # 复用同名循环变量：合法（Q9 修复）
+        acc += i * 10
+    print(acc)
+    return 0
+
+# 期望输出：
+# 36

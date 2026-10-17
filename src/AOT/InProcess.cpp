@@ -127,19 +127,62 @@ bool convertToLLVMInProcess(const std::string& mlirText,
         return false;
     }
 
-    // 阶段 2h：清除转换后残留的死 cast。one-shot 对桥 cast 的消费者
-    // （memref.load 等）降级时，框架穿透复用既有 unrealized_conversion_cast
-    // （反向 materialization，直取 descriptor 本体），cast 随即失去全部用户；
-    // 而该 op 在 one-shot target 中合法（框架自身 materialization 所需），
-    // 不会被转换清理，残留至 translate 阶段将因无 LLVM 翻译接口而失败。
-    // 纯 op 无副作用，循环清除无用户实例（链式死 cast 迭代至不动点）。
+    // 阶段 2h：清除转换后残留的死 cast。三类：
+    //   1) 无用户：one-shot 对桥 cast 的消费者（memref.load 等）降级时，框架
+    //      穿透复用既有 unrealized_conversion_cast（反向 materialization，
+    //      直取 descriptor 本体），cast 随即失去全部用户；
+    //   2) 恒等 cast（输入输出类型逐一相同）：语义 no-op，用户改指操作数本体；
+    //   3) 往复链：单输入 cast 的输入来自另一 cast 且端点类型相同——
+    //      thread_spawn 的 func.constant 桥（函数类型→!llvm.ptr）经 one-shot
+    //      后，框架为 func.constant 的函数类型结果建反向物化（ptr→函数类型），
+    //      两 cast 首尾相接构成 ptr→函数类型→ptr 往复，等价直连。
+    // 纯 op 无副作用，循环迭代至不动点（折叠/穿透可能级联出新死 cast）。
     for (;;) {
         llvm::SmallVector<mlir::Operation*> dead;
         module->walk([&](mlir::UnrealizedConversionCastOp cast) {
-            if (cast.use_empty()) dead.push_back(cast);
+            if (cast.use_empty()) {
+                dead.push_back(cast);
+                return;
+            }
+            mlir::OperandRange ins = cast.getInputs();
+            mlir::ResultRange outs = cast.getResults();
+            if (ins.size() == outs.size()) {
+                bool id = true;
+                for (unsigned k = 0; k < ins.size(); ++k)
+                    if (ins[k].getType() != outs[k].getType()) {
+                        id = false;
+                        break;
+                    }
+                if (id) {
+                    for (auto [r, v] : llvm::zip(outs, ins))
+                        r.replaceAllUsesWith(v);
+                    dead.push_back(cast);
+                    return;
+                }
+            }
+            if (ins.size() == 1 && outs.size() == 1) {
+                if (auto up =
+                        ins[0].getDefiningOp<mlir::UnrealizedConversionCastOp>()) {
+                    for (unsigned j = 0; j < up.getNumResults(); ++j) {
+                        if (up.getResult(j) != ins[0]) continue;
+                        if (up.getInputs()[j].getType() ==
+                            outs[0].getType()) {
+                            outs[0].replaceAllUsesWith(up.getInputs()[j]);
+                            dead.push_back(cast);
+                        }
+                        break;
+                    }
+                }
+            }
         });
         if (dead.empty()) break;
-        for (mlir::Operation* op : dead) op->erase();
+        for (mlir::Operation* op : dead) {
+            if (auto cast = llvm::dyn_cast<mlir::UnrealizedConversionCastOp>(op))
+                for (auto [r, v] :
+                     llvm::zip(cast.getResults(), cast.getInputs()))
+                    r.replaceAllUsesWith(v);
+            op->erase();
+        }
     }
 
     // 阶段 3：LLVM dialect → LLVM IR（等价 mlir-translate --mlir-to-llvmir）

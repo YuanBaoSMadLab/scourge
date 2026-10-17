@@ -1,0 +1,33 @@
+# O 节冒烟探针：变参 extern（MS x64 AL 义务）+ data_ptr 地址透传。
+# 正式差分探针在 verify/verify_o_wide.ps1（o5），本文件仅快速人验。
+capability ffi
+# 变参 printf 仅 msvcrt.dll 导出（ucrtbase 的 printf 是头文件内联）；
+# fflush 必须同源 msvcrt（fflush(0) 只冲同实例缓冲，混用实例仍乱序）。
+@extern("msvcrt.dll")
+def printf(fmt: str, ...) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def fflush(all: int) -> int:
+    pass
+
+@extern("ucrtbase.dll")
+def memset(dst: int, c: int, n: int) -> int:
+    pass
+
+@extern("ucrtbase.dll")
+def strlen(s: int) -> int:
+    pass
+
+def main() -> int:
+    # 变参：int/float/str 混合（float 走 xmm，AL 必须为 1，否则 %.2f 读垃圾）
+    printf("i=%d f=%.2f s=%s x=%lld\n", 42, 3.5, "hi", -7)
+    fflush(0)
+    # data_ptr：str 地址透传给 strlen（契约：对象存活于变量）
+    s = "hello"
+    print(strlen(data_ptr(s)))
+    # data_ptr：张量缓冲 + memset 往返（24 字节 = 3 个 i64 清零）
+    t = [1, 2, 3]
+    memset(data_ptr(t), 0, 24)
+    print(t[0] + t[1] + t[2])
+    return 0

@@ -1,0 +1,8 @@
+# 验证：import a.b（无 as）→ 规范链 / 首段直达 / 末段宽容 三种写法
+import a.b
+
+def main() -> int:
+    print(str(a.b.get_tag()))   # 规范点分链
+    print(str(a.get_tag()))     # 首段直达（Python 式）
+    print(str(b.get_tag()))     # 末段宽容
+    return 0

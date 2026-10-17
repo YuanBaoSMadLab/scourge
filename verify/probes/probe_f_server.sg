@@ -1,0 +1,14 @@
+capability net
+# F 验收：TCP 服务端闭环（bind/accept/recv/send/close）
+def main() -> int:
+    l: int = net_bind("127.0.0.1", 23462)
+    print(l >= 1)
+    c: int = net_accept(l)
+    print(c >= 1)
+    r: str = net_recv(c, 64)
+    print(r)
+    print(net_send(c, "srv-ok"))
+    net_close(c)
+    net_close(l)
+    print("done")
+    return 0

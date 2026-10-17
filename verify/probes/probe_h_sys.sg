@@ -1,0 +1,54 @@
+# probe_h_sys.sg - sys builtins (0.9.4 H): args/env/time/process/signal
+# Dual-mode probe. verify_sys_h.ps1 passes args [x, --flag, y] and env
+# PROBE_H_VAR to both modes; all output is deterministic (fixed epoch,
+# child stdout silenced via exit codes only).
+capability env, time, proc, signal
+
+def main() -> int:
+    # ---- args() ----
+    a: List[str] = args()
+    print(len(a))
+    for s in a:
+        print(s)
+    # ---- env / has_env / set_env / unset_env ----
+    print(env("PROBE_H_VAR"))
+    print(has_env("PROBE_H_VAR"))
+    print(has_env("PROBE_H_MISSING"))
+    print(set_env("PROBE_H_SET", "v1"))
+    print(env("PROBE_H_SET"))
+    print(set_env("PROBE_H_BAD=x", "v"))
+    unset_env("PROBE_H_SET")
+    print(has_env("PROBE_H_SET"))
+    print(env("PROBE_H_SET"))
+    # ---- epoch / epoch_ms（断言形式，避免逐次不同的原始值） ----
+    print(epoch() > 1700000000)
+    print(epoch_ms() > epoch() * 1000)
+    # ---- localtime / gmtime（固定 epoch；同机同 TZ，双模一致） ----
+    lt: List[int] = localtime(1767225600)
+    print(len(lt))
+    print(lt[0])
+    print(lt[1])
+    print(lt[2])
+    print(lt[3])
+    print(lt[4])
+    print(lt[5])
+    print(lt[6])
+    print(lt[7])
+    gt: List[int] = gmtime(1767225600)
+    print(len(gt))
+    print(gt[0])
+    print(gt[1])
+    print(gt[2])
+    print(gt[3])
+    print(gt[4])
+    print(gt[5])
+    print(gt[6])
+    print(gt[7])
+    # ---- system / spawn_wait（只取退出码，子进程无 stdout 输出） ----
+    print(system("cmd /c exit 7"))
+    print(spawn_wait("cmd", ["/c", "exit", "3"]))
+    # ---- signal（探针不真发 Ctrl+C；仅验证标志初值与 reset） ----
+    print(signal_caught())
+    signal_reset()
+    print(signal_caught())
+    return 0

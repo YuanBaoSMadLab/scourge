@@ -1,0 +1,52 @@
+# ============================================================================
+#  t08_result.sg — 错误即值：Result[T, E] 构造与强制消费
+#  对应章节：第9章 错误处理
+# ============================================================================
+
+def parse(n: int) -> Result[int, str]:
+    if n >= 0:
+        return ok(n)
+    return err("n 必须非负")
+
+def checkedDiv(a: int, b: int) -> Result[float, str]:
+    if b == 0:
+        return err("除数为零")
+    return ok(a / b)
+
+def describe(r: Result[int, str]) -> str:
+    if r.is_ok():
+        return "ok:" + str(r.unwrap(0))
+    return "err:" + str(r.unwrap_or(-1))
+
+def main() -> int:
+    # 绑定即消费；直接丢弃 Result 表达式语句编译期报 E2005
+    r: Result[int, str] = parse(5)
+    print(r.is_ok())
+    print(r.unwrap(0))
+    print(r.unwrap_or(-1))
+
+    r2: Result[int, str] = parse(-1)
+    print(r2.is_ok())
+    print(r2.unwrap_or(-1))
+
+    d: Result[float, str] = checkedDiv(10, 4)
+    print(d.unwrap(0.0))
+
+    # err 分支取回退值，ok 分支取载荷
+    e: Result[int, str] = err("boom")
+    print(e.unwrap(42))
+
+    print(describe(parse(7)))
+    print(describe(parse(-3)))
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# True
+# 5
+# 5
+# False
+# -1
+# 2.5
+# 42
+# ok:7
+# err:-1

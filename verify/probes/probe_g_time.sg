@@ -1,0 +1,3 @@
+def main() -> int:
+    print(time.now())
+    return 0

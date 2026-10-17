@@ -1,5 +1,5 @@
 # Regression: sys builtins (0.9.4 H) dual-mode byte check.
-# Probe: codebuddytest/probe_h_sys.sg
+# Probe: verify/probes/probe_h_sys.sg
 # Passes fixed script args [x, --flag, y] + env PROBE_H_VAR to both modes
 # so args()/env() are deterministic; time uses fixed epoch inputs.
 # ASCII only: Windows PowerShell 5.1 parses BOM-less ps1 as ANSI.
@@ -11,12 +11,12 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-$exe = "d:\Scourge\build\scourge.exe"
-$dir = "d:\Scourge\build\verify"
+$exe = "d:\Scourge\build-rel\scourge.exe"
+$dir = "d:\Scourge\build-rel\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
 [Environment]::SetEnvironmentVariable("PROBE_H_VAR", "probe-value-123", "Process")
 
-$sg = "d:\Scourge\codebuddytest\probe_h_sys.sg"
+$sg = "d:\Scourge\verify\probes\probe_h_sys.sg"
 $stem = [IO.Path]::GetFileNameWithoutExtension($sg)
 Remove-Item "$dir\$stem.*" -Recurse -Force -ErrorAction SilentlyContinue
 

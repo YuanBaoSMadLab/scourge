@@ -1,0 +1,18 @@
+# async AOT 退化探针（0.9.9 批3④）：async def 按普通 def 发射、await
+# 恒等透传（Task 语义随 P2 并发落地）。VM 与 AOT 双模同输出。
+def fetch(x: int) -> int:
+    return x * 2
+
+async def afetch(x: int) -> int:
+    return x + 1
+
+async def outer() -> int:
+    # await 类型透传：await f(x) ≡ f(x)（VM 内同步执行）
+    v = await afetch(10)
+    return await fetch(v)
+
+def main() -> int:
+    print(fetch(3))                # 6
+    print(afetch(5))               # 6（async def 直调）
+    print(outer())                 # 22（await 链透传）
+    return 0

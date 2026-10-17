@@ -1,0 +1,56 @@
+capability ffi
+# ============================================================================
+#  t14_decorators.sg — 装饰器：白名单内七个装饰器的合法形态
+#  对应章节：第12章 装饰器
+# ============================================================================
+
+@pure
+def pureFn(x: int) -> int:
+    """纯函数：无副作用，记录进 .sgi 签名。"""
+    return x * 2
+
+@jit
+def jitFn(x: float) -> float:
+    """热点函数 JIT 升级（前向标注）。"""
+    return x + 1.0
+
+@hardware
+def hwFn(x: int) -> int:
+    """硬件后端标注（前向标注）。"""
+    return x
+
+@extern("c")
+def cAbs(x: int) -> int:
+    pass
+
+@no_runtime
+def noRt(x: int) -> int:
+    """无运行时模式（前向标注）。"""
+    return x
+
+@realtime(deadline_us=1000)
+def rtFn(x: int) -> int:
+    """实时标注（前向标注，关键字参数仅装饰器可用）。"""
+    return x
+
+@irq(7)
+def irqFn() -> int:
+    """中断标注（前向标注）。"""
+    return 0
+
+def main() -> int:
+    print(pureFn(21))
+    print(jitFn(1.5))
+    print(hwFn(5))
+    print(noRt(7))
+    print(rtFn(8))
+    print(irqFn())
+    return 0
+
+# 期望输出（scourge 0.9.1 实测）：
+# 42
+# 2.5
+# 5
+# 7
+# 8
+# 0

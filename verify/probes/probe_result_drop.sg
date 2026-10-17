@@ -1,0 +1,7 @@
+# 探针8：Result 未消费（期望 E2005）
+def make() -> Result[int, str]:
+    return ok(1)
+
+def main() -> int:
+    make()
+    return 0

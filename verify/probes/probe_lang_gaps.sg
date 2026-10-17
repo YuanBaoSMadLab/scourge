@@ -1,0 +1,13 @@
+# 探测通用编程语言常见内建是否具备（预期多数 E2003）
+def main() -> int:
+    a = sin(1.0)            # 三角函数
+    b = cos(1.0)
+    c = tan(1.0)
+    d = random()            # 随机数
+    e = floor(2.5)          # 取整
+    f = round(2.5)
+    g = [3, 1, 2]           # 列表排序
+    g.sort()
+    h = len(g)
+    print(str(a), str(b), str(c), str(d), str(e), str(f), str(g), str(h))
+    return 0

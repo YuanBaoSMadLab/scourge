@@ -1,0 +1,6 @@
+def main() -> int:
+    try:
+        print(1 // 0)
+    except:
+        print("div caught")
+    return 0
