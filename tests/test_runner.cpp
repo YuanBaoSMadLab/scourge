@@ -1001,7 +1001,7 @@ def main() -> int:
         RunResult r = runProgram(R"(def main() -> int:
     a = 1.5
     b = 2.5
-    row = [a, b]
+    row: Tensor[float, (?,)] = [a, b]
     print(row)
     print(sum([a, b, 3]))
     print([[a, 2.0], [3.0, 4.0]] @ [[1.0], [1.0]])

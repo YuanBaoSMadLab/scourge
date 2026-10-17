@@ -1,0 +1,25 @@
+# probe_b8_panic.sg - F-20 callable panic(): caught by try/except (crossing
+# a function call), tail-call dead-block path, execution resumes after
+# recover. Dual-mode probe: stdout byte-identical, exit 0, stderr empty.
+def risky(n: int):
+    if n == 0:
+        panic("boom: n is zero")
+    print("no panic for", n)
+
+def tail_panic():
+    print("tail before")
+    panic("tail boom")
+
+def main() -> int:
+    try:
+        risky(0)
+        print("unreachable after panic")
+    except:
+        print("caught panic")
+    risky(1)
+    try:
+        tail_panic()
+    except:
+        print("caught tail")
+    print("done")
+    return 0

@@ -442,6 +442,13 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
         push(Value::makeResult(Value::makeNone(), false, a[0].s));
         return;
     }
+    // F-20：panic(msg) 可调用终止——panicHere 单一钩子复用（消息与 AOT
+    // sg_panic 逐字一致，try/except 可捕），恒不返回。
+    if (n == "panic") {
+        need(1);
+        if (a[0].kind != Value::Kind::Str) panicHere("panic() 参数必须是 str");
+        panicHere(a[0].s);
+    }
     // abs/sqrt/exp/log：逐元素数学函数（标量或数值张量）。abs 保 dtype，
     // sqrt/exp/log 结果恒为 float（负数的 sqrt/log 依 IEEE 754 得 nan/-inf）。
     if (n == "abs" || n == "sqrt" || n == "exp" || n == "log") {

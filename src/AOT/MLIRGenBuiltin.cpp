@@ -72,6 +72,25 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
     auto need = [&](size_t want) {
         if (c.args.size() != want) unsupported(c.range, "内建 " + name + "() 参数个数");
     };
+    // F-22：List[Tuple[k,v]] → repr 字符串（与 VM stringify 逐字一致）。
+    // 元组槽为句柄位，k/v 位型由静态元素类型经 annTagOf 还原（tag 编码同
+    // etag）；容器槽位（tag 4/-1）编译期拒绝（与容器值字典同先例）。
+    auto formatTuples = [&](Value v, const Expr& arg) -> Value {
+        auto it = types_.find(&arg);
+        if (it == types_.end() || it->second->params.empty() ||
+            it->second->params[0]->kind != Type::Kind::Tuple ||
+            it->second->params[0]->params.size() < 2)
+            unsupported(arg.range, "元组元素列表缺少静态元素类型");
+        int kt = annTagOf(it->second->params[0]->params[0]);
+        int vt = annTagOf(it->second->params[0]->params[1]);
+        if (kt < 0 || kt > 3 || vt < 0 || vt > 3)
+            unsupported(arg.range, "元组元素列表（该元素槽位类型）");
+        std::string ssa = fresh();
+        emit(ssa + " = \"lang.list_format_tuples\"(" + v.ssa + ", " +
+             intConst(kt) + ", " + intConst(vt) +
+             ") : (!llvm.ptr, i64, i64) -> !llvm.ptr");
+        return Value{VK::Str, ssa};
+    };
 
     // IO/网络/系统域分块（MLIRGenBuiltinSys.cpp）：命中即返回；未命中
     // 落回主链。两链名字不相交，分派顺序不影响语义。
@@ -104,11 +123,14 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
                 break;
             case VK::List:
                 // 0.9.4：repr 格式与 VM stringify 逐字一致（sg_list_format）；
-                // 元组元素槽存句柄位（无类型标签）无法 repr——编译期拒绝
-                //（0.9.9，与容器值字典防御同先例）
-                if (v.lElem == static_cast<uint8_t>(VK::Tuple))
-                    unsupported(c.args[k]->range,
-                                "print 元组元素列表（AOT 句柄槽无类型标签）");
+                // 元组元素走 lang.list_format_tuples（F-22，Dict.items()
+                // 打印闭环）。
+                if (v.lElem == static_cast<uint8_t>(VK::Tuple)) {
+                    Value s = formatTuples(v, *c.args[k]);
+                    emit("\"lang.print_str\"(" + s.ssa +
+                         ") : (!llvm.ptr) -> ()");
+                    break;
+                }
                 emit("\"lang.print_list\"(" + v.ssa + ") : (!llvm.ptr) -> ()");
                 break;
             case VK::Dict: {
@@ -187,11 +209,9 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
                                 c.args[0]->range);
         case VK::List:
             // 0.9.9：容器化（repr 与 VM stringify 逐字一致，sg_list_format）；
-            // 元组元素槽存句柄位，无法 repr——编译期拒绝（同 print 先例）
+            // 元组元素走 lang.list_format_tuples（F-22，同 print）。
             if (v.lElem == static_cast<uint8_t>(VK::Tuple))
-                unsupported(c.args[0]->range,
-                            "str 元组元素列表（AOT 句柄槽无类型标签）；"
-                            "请逐元素 str() 后拼接（如 f\"({a}, {b})\"）");
+                return formatTuples(v, *c.args[0]);
             {
                 std::string ssa = fresh();
                 emit(ssa + " = \"lang.list_format\"(" + v.ssa +
@@ -728,6 +748,19 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         emit(ssa + " = \"lang.result_err\"(" + v.ssa +
              ") : (!llvm.ptr) -> !llvm.ptr");
         return Value{VK::Result, ssa, false, 0, static_cast<uint8_t>(VK::Str)};
+    }
+    // F-20：panic(msg) 可调用终止——lang.panic 单一 op（kLowerings →
+    // sg_panic，try/except 可捕）。恒不返回：unreachable 终结当前块后开
+    // 新死块承接后续语句（同 genAssert 兜底理由，函数尾由隐式 return 收口）。
+    if (name == "panic") {
+        need(1);
+        Value m = genExpr(*c.args[0]);
+        if (m.vk != VK::Str)
+            unsupported(c.args[0]->range, "panic() 参数必须是 str");
+        emit("\"lang.panic\"(" + m.ssa + ") : (!llvm.ptr) -> () " + opLoc());
+        terminate("llvm.unreachable");
+        cur_ = newBlock();
+        return Value{VK::None, ""};
     }
     unsupported(c.range, "内建 " + name + "()（该内建）");
 }

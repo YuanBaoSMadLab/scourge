@@ -294,6 +294,10 @@ const OpLower kLowerings[] = {
     {"lang.list_index", "sg_list_index", "pIi", "pIippi", 'i', true},
     {"lang.list_count", "sg_list_count", "pIi", "pIi", 'i', false},
     {"lang.list_format", "sg_list_format", "p", "p", 'p', false},
+    // F-22：List[Tuple] repr（Dict.items() 打印闭环）——元组槽按静态
+    // ktag/vtag 还原（tag 编码同 etag 0-3），与 VM stringify 逐字一致。
+    {"lang.list_format_tuples", "sg_list_format_tuples", "pii", "pii",
+     'p', false},
     {"lang.print_list", "sg_print_list", "p", "p", 'v', false},
     {"lang.print_dict", "sg_print_dict", "p", "p", 'v', false},
     {"lang.str_chr_at", "sg_str_chr_at", "pi", "pippi", 'p', true},

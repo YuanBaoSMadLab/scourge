@@ -194,11 +194,13 @@ private:
     bool inDefer_ = false;          ///< 当前在 defer 块内（禁 return/break/continue/defer）
     ExprTypeMap exprTypes_;         ///< 表达式类型注解表（单一事实源，见上）
     std::unordered_set<const Expr*> promoteF64_; ///< 边界 int→float 提升集
-    /// List 上下文偏好（单发旗标）：赋值目标为 List 注解/既有 List 变量时
-    /// 指向右侧列表字面量，checkListLit 据此把数值字面量按 List[T] 推断
-    /// （默认数值字面量 = Tensor）。检查完表达式立即清空。
-    const Expr* asListLit_ = nullptr;
-    /// Dict 上下文偏好（单发旗标，同 asListLit_ 架构）：赋值/缺省值目标为
+    /// Tensor 上下文偏好（单发旗标）：赋值目标为 Tensor 注解/既有 Tensor
+    /// 变量时指向右侧列表字面量，checkListLit 据此把一维数值字面量按
+    /// Tensor 推断（0.9.10 F-18 A 案：默认数值字面量 = List[T]，嵌套
+    /// [[..]] 恒为张量——AOT SgList 槽位只存标量，嵌套 List 不可表示）。
+    /// 检查完表达式立即清空。
+    const Expr* asTensorLit_ = nullptr;
+    /// Dict 上下文偏好（单发旗标，同 asTensorLit_ 架构）：赋值/缺省值目标为
     /// Dict[K,V] 注解（或既有 Dict 变量）时指向目标类型，checkDictLit
     /// 据此把键/值统一对齐注解（int 元素按槽位提升）——否则字面量自推断
     /// Dict{float,int} 与变量注解 Dict{float,float} 槽位语义脱节，读取侧

@@ -127,6 +127,8 @@ TypePtr TypeChecker::builtinType(const std::string& name) const {
     // ok/err：错误即值的构造出口（P0 内建，标准库 v1 冻结后归入 result 模块）。
     if (name == "print" || name == "str" || name == "len" || name == "sum" ||
         name == "now" || name == "range" || name == "ok" || name == "err" ||
+        // F-20：panic(msg) 可调用终止（语句位恒不返回；与 assert 语句同钩子）
+        name == "panic" ||
         name == "abs" || name == "sqrt" || name == "exp" || name == "log" ||
         name == "max" || name == "min" || name == "transpose" ||
         name == "reshape" ||

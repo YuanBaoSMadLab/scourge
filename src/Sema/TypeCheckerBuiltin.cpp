@@ -266,6 +266,21 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
         // OK 类型为 Unknown 通配，由赋值目标注解特化。
         return makeType(Type::Kind::Result, {tyUnknown(), tyStr()});
     }
+    // F-20：panic(msg) 可调用终止——与 assert 语句同走 lang.panic 单一钩子
+    //（sg_panic，try/except 可捕，消息双模逐字一致）。恒不返回，语句位
+    // tyNone（与 print 同先例）；不入 kPureBuiltins，@pure 内自动拒绝。
+    if (bn == "panic") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "panic() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind != Type::Kind::Str && t->kind != Type::Kind::Err) {
+            fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                 "panic() 参数必须是 str，实际为 " + typeToString(t));
+            return tyErr();
+        }
+        return tyNone();
+    }
     // abs/sqrt/exp/log：逐元素数学函数（标量或数值张量）。
     if (bn == "abs" || bn == "sqrt" || bn == "exp" || bn == "log") {
         if (c.args.size() != 1)

@@ -1,0 +1,39 @@
+# 演示：数据处理方向 —— JSON 数据集按分类聚合统计
+def main() -> int:
+    data: str = "[{\"cat\":\"food\",\"amt\":12.5},{\"cat\":\"book\",\"amt\":30.0},{\"cat\":\"food\",\"amt\":7.5},{\"cat\":\"book\",\"amt\":20.0},{\"cat\":\"tool\",\"amt\":55.0},{\"cat\":\"food\",\"amt\":10.0}]"
+    j: Json = json_decode(data)
+    n: int = j.len()
+    cats: List[str] = []
+    sums: List[float] = []
+    cnts: List[int] = []
+    k: int = 0
+    while k < n:
+        rec: Json = j.at(k)
+        cat: str = rec.get("cat").as_str()
+        amt: float = rec.get("amt").as_float()
+        found: int = -1
+        c: int = 0
+        while c < len(cats):
+            if cats[c] == cat:
+                found = c
+            c = c + 1
+        if found < 0:
+            cats.append(cat)
+            sums.append(amt)
+            cnts.append(1)
+        else:
+            sums[found] = sums[found] + amt
+            cnts[found] = cnts[found] + 1
+        k = k + 1
+    r: int = 0
+    while r < len(cats):
+        avg: float = sums[r] / float(cnts[r])
+        print(cats[r], sums[r], cnts[r], avg)
+        r = r + 1
+    gt: float = 0.0
+    m: int = 0
+    while m < len(sums):
+        gt = gt + sums[m]
+        m = m + 1
+    print("grand_total", gt, "records", n)
+    return 0

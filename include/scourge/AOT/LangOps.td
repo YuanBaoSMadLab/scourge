@@ -374,6 +374,9 @@ def Lang_ListCountOp     : Lang_Op<"list_count"> { let arguments = (ins Lang_Ptr
 // （"[" + 元素 ", " 连接 + "]"；str 带引号转义；bool True/False；浮点最短
 // 往返补 ".0"），print(List) 与 len 同为 AOT 基础设施。
 def Lang_ListFormatOp : Lang_Op<"list_format"> { let arguments = (ins Lang_Ptr:$list); let results = (outs Lang_Ptr:$res); }
+// F-22：List[Tuple] repr（Dict.items() 打印闭环）——ktag/vtag 为静态元素
+// 槽位 tag（编码同 etag 0-3），运行时按位还原与 VM stringify 逐字一致。
+def Lang_ListFormatTuplesOp : Lang_Op<"list_format_tuples"> { let arguments = (ins Lang_Ptr:$list, I64:$ktag, I64:$vtag); let results = (outs Lang_Ptr:$res); }
 def Lang_PrintListOp  : Lang_Op<"print_list"> { let arguments = (ins Lang_Ptr:$val); let results = (outs); }
 def Lang_PrintDictOp  : Lang_Op<"print_dict"> { let arguments = (ins Lang_Ptr:$val); let results = (outs); }
 def Lang_StrChrAtOp   : Lang_Op<"str_chr_at"> { let arguments = (ins Lang_Ptr:$s, I64:$i); let results = (outs Lang_Ptr:$res); }

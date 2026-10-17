@@ -1,0 +1,149 @@
+# 演示：AI·ML 主方向 —— 用 autodiff + nn(Ada m) 训练 MLP 拟合 sin(x)
+import std.autodiff as ad
+import std.nn as nn
+
+def main() -> int:
+    nin: int = 1
+    nhid: int = 24
+    nout: int = 1
+    p1: int = nin * nhid
+    W1: List[float] = []
+    b1: List[float] = []
+    W2: List[float] = []
+    b2: List[float] = []
+    sg: float = 1.2
+    i: int = 0
+    while i < p1:
+        W1.append(sg)
+        sg = -sg
+        i = i + 1
+    sg = 0.2
+    i = 0
+    while i < nhid:
+        b1.append(sg)
+        sg = -sg
+        i = i + 1
+    sg = 1.2
+    i = 0
+    while i < nhid * nout:
+        W2.append(sg)
+        sg = -sg
+        i = i + 1
+    b2.append(0.0)
+
+    xs: List[float] = []
+    ys: List[float] = []
+    nsamp: int = 24
+    s: int = 0
+    while s < nsamp:
+        xv: float = 6.2831853 * float(s) / float(nsamp - 1)
+        xs.append(2.0 * xv / 6.2831853 - 1.0)
+        ys.append(sin(xv))
+        s = s + 1
+
+    mW1: List[float] = []
+    vW1: List[float] = []
+    mb1: List[float] = []
+    vb1: List[float] = []
+    mW2: List[float] = []
+    vW2: List[float] = []
+    mb2: List[float] = []
+    vb2: List[float] = []
+    i = 0
+    while i < p1:
+        mW1.append(0.0)
+        vW1.append(0.0)
+        i = i + 1
+    i = 0
+    while i < nhid:
+        mb1.append(0.0)
+        vb1.append(0.0)
+        i = i + 1
+    i = 0
+    while i < nhid * nout:
+        mW2.append(0.0)
+        vW2.append(0.0)
+        i = i + 1
+    mb2.append(0.0)
+    vb2.append(0.0)
+
+    lr: float = 0.04
+    epochs: int = 20000
+    t: int = 0
+    e: int = 0
+    while e < epochs:
+        loss_sum: float = 0.0
+        s = 0
+        while s < nsamp:
+            T: List[float] = ad.tape()
+            ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
+            ids2: List[int] = nn.params(T, W2, b2, nhid, nout)
+            xn: List[int] = []
+            xn.append(ad.const(T, xs[s]))
+            hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
+            ht: List[int] = []
+            h: int = 0
+            while h < nhid:
+                ht.append(ad.tanh_(T, hn[h]))
+                h = h + 1
+            on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
+            yt: List[float] = []
+            yt.append(ys[s])
+            loss: int = nn.mse(T, on, yt, 1)
+            ids: List[int] = []
+            a: int = 0
+            while a < len(ids1):
+                ids.append(ids1[a])
+                a = a + 1
+            a = 0
+            while a < len(ids2):
+                ids.append(ids2[a])
+                a = a + 1
+            g: List[float] = nn.gather_grads(T, loss, ids, p1 + nhid + nhid * nout + nout)
+            t = t + 1
+            g1: List[float] = []
+            g1b: List[float] = []
+            g2: List[float] = []
+            g2b: List[float] = []
+            j: int = 0
+            while j < p1:
+                g1.append(g[j])
+                j = j + 1
+            j = 0
+            while j < nhid:
+                g1b.append(g[p1 + j])
+                j = j + 1
+            j = 0
+            while j < nhid * nout:
+                g2.append(g[p1 + nhid + j])
+                j = j + 1
+            g2b.append(g[p1 + nhid + nhid * nout])
+            nn.adam(W1, g1, mW1, vW1, lr, t, p1)
+            nn.adam(b1, g1b, mb1, vb1, lr, t, nhid)
+            nn.adam(W2, g2, mW2, vW2, lr, t, nhid * nout)
+            nn.adam(b2, g2b, mb2, vb2, lr, t, nout)
+            loss_sum = loss_sum + ad.value(T, loss)
+            s = s + 1
+        if e == 0 or e == 2000 or e == 4000 or e == 7999:
+            print("epoch", e, "loss", loss_sum / float(nsamp))
+        e = e + 1
+
+    print("--- predict sin(x) ---")
+    s = 0
+    while s < nsamp:
+        T: List[float] = ad.tape()
+        ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
+        ids2: List[int] = nn.params(T, W2, b2, nhid, nout)
+        xn: List[int] = []
+        xn.append(ad.const(T, xs[s]))
+        hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
+        ht: List[int] = []
+        h: int = 0
+        while h < nhid:
+            ht.append(ad.tanh_(T, hn[h]))
+            h = h + 1
+        on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
+        pred: float = ad.value(T, on[0])
+        print("x", xs[s], "true", ys[s], "pred", pred)
+        s = s + 1
+    return 0

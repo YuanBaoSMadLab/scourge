@@ -212,12 +212,28 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                                      const std::string& qual) {
                 auto mod = std::make_shared<Type>(Type::Kind::Module);
                 mod->name = qual;
-                if (!scope_.declare(bind, VarSym{mod, s.range}))
-                    diag_.error(Errc::E2007_DuplicateDefinition, file_,
-                                s.range,
-                                "顶层名 '" + bind +
-                                    "' 重复定义（import 绑定与既有名冲突；"
-                                    "可用 as 别名或全限定形式）");
+                if (!scope_.declare(bind, VarSym{mod, s.range})) {
+                    // F-19：同包多模块 import 合并命名空间——同名绑定已存在
+                    // 且同包（首段相同）时宽容跳过（import std.autodiff 后再
+                    // import std.nn 不再 E2007；兄弟模块成员经包根回退解析，
+                    // 见 checkAttr/qualifiedModuleName/foldModuleKey）。跨包
+                    // 同名仍拒绝（真冲突）。
+                    size_t dot = qual.find('.');
+                    std::string pkg =
+                        dot == std::string::npos ? qual : qual.substr(0, dot);
+                    const VarSym* ex = scope_.find(bind);
+                    bool samePkg =
+                        ex && ex->type &&
+                        ex->type->kind == Type::Kind::Module &&
+                        ex->type->name.substr(
+                            0, ex->type->name.find('.')) == pkg;
+                    if (!samePkg)
+                        diag_.error(Errc::E2007_DuplicateDefinition, file_,
+                                    s.range,
+                                    "顶层名 '" + bind +
+                                        "' 重复定义（import 绑定与既有名冲突；"
+                                        "可用 as 别名或全限定形式）");
+                }
             };
             if (!im.isFrom) {
                 if (imports_.count(full)) {
@@ -328,7 +344,7 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                                 " = <初值>");
                 break;
             }
-            // Dict/Set 上下文偏好（单发旗标，同 asListLit_）：注解为
+            // Dict/Set 上下文偏好（单发旗标，同 asTensorLit_）：注解为
             // Dict[K,V]/Set[T] 时字面量键/值/元素统一对齐注解（checkDictLit /
             // checkSetLit 消费，检查完清空）。dictAnn/setAnn 必须存活到
             // checkExpr 之后——旗标是裸指针，若把 resolveTypeExpr 的返回值塞
@@ -359,14 +375,15 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                 if (tupleAnn->kind == Type::Kind::Tuple)
                     tupleTarget_ = tupleAnn.get();
             }
-            // List 上下文偏好（单发旗标，同语句级 asListLit_）：注解为
-            // List[...] 时数值列表字面量按 List[T] 推断而非默认 Tensor
-            // （checkListLit 消费，检查完清空；模块级无既有变量重赋值路径）。
+            // Tensor 上下文偏好（单发旗标，F-18 A 案，同语句级 asTensorLit_）：
+            // 注解为 Tensor 时一维数值列表字面量按 Tensor 推断（默认已改为
+            // List[T]；checkListLit 消费，检查完清空；模块级无既有变量
+            // 重赋值路径）。
             if (a.value->kind == Expr::Kind::ListLit && a.ann &&
-                a.ann->kind == TypeExpr::Kind::Named && a.ann->name == "List")
-                asListLit_ = a.value.get();
+                a.ann->kind == TypeExpr::Kind::Tensor)
+                asTensorLit_ = a.value.get();
             TypePtr vt = checkExpr(*a.value);
-            asListLit_ = nullptr;
+            asTensorLit_ = nullptr;
             dictTarget_ = nullptr;
             setTarget_ = nullptr;
             tupleTarget_ = nullptr;

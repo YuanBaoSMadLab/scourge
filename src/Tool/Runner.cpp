@@ -63,9 +63,13 @@ RunOutcome runOnce(const std::filesystem::path& inPath, bool useCache,
     for (const auto& name : order)
         panicPaths.push_back(session.loadedModulePath(name));
 
-    // 源指纹：工具链标签 + 依赖层序逐模块（模块名、路径、归一化源文本）。
+    // 源指纹：编译器自体指纹 + 工具链标签 + 依赖层序逐模块（模块名、路径、
+    // 归一化源文本）。自体指纹（selfTag）使重编后的旧 .sgbc 全量失效——
+    // 此前缺失导致语义变更重编后旧缓存仍命中，产生双模分歧（对齐
+    // Builder.cpp mainObjKey 同款，单一事实源见 Common/Version.hpp）。
     // 指纹在检查之前计算——命中即可跳过检查与字节码编译（增量收益主体）。
     uint64_t hash = bc::fnv1a64(kScourgeVersionLabel);
+    hash = bc::fnv1a64(selfTag(), hash);
     for (const auto& name : order) {
         hash = bc::fnv1a64(name, hash);
         hash = bc::fnv1a64(session.loadedModulePath(name), hash);

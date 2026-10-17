@@ -291,8 +291,17 @@ std::string TypeChecker::qualifiedModuleName(const Expr& base) const {
             cur.compare(cur.size() - suffix.size(), suffix.size(), suffix) ==
                 0)
             continue;
+        std::string prev = cur;
         cur += suffix;
-        if (!imports_.count(cur)) return {};
+        if (!imports_.count(cur)) {
+            // F-19：同包多模块 import 合并命名空间——下钻段缺失时回退包根
+            //（首段）重试，兄弟模块成员经此解析（与 checkAttr 同序）。
+            size_t dot = prev.find('.');
+            if (dot == std::string::npos) return {};
+            std::string alt = prev.substr(0, dot) + suffix;
+            if (!imports_.count(alt)) return {};
+            cur = alt;
+        }
     }
     return cur;
 }

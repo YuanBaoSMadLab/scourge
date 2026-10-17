@@ -1,0 +1,46 @@
+# 演示：网络方向 —— 多路由 HTTP JSON API 服务
+capability net
+
+def send(conn: int, status: int, body: str) -> None:
+    net_http_write_response(conn, status, "application/json; charset=utf-8", body)
+
+def main() -> int:
+    l: int = net_bind("127.0.0.1", 18099)
+    if l < 1:
+        print("bind-failed")
+        return 1
+    print("server-up port=18099")
+    i: int = 0
+    while i < 4:
+        c: int = net_accept(l)
+        req: Json = net_http_read_request(c)
+        if req.is_null():
+            net_close(c)
+            continue
+        path: str = req.get("path").as_str()
+        method: str = req.get("method").as_str()
+        if path == "/":
+            send(c, 200, "{\"service\":\"scourge-demo\",\"version\":\"0.9.10\",\"routes\":[\"/\",\"/health\",\"/echo\",\"/sum\"]}")
+        elif path == "/health":
+            send(c, 200, "{\"status\":\"ok\"}")
+        elif path == "/echo":
+            send(c, 200, "{\"echo\":\"" + req.get("body").as_str() + "\"}")
+        elif path == "/sum":
+            try:
+                raw: str = req.get("body").as_str()
+                arr: Json = json_decode(raw)
+                total: float = 0.0
+                k: int = 0
+                while k < arr.len():
+                    total = total + arr.at(k).as_float()
+                    k = k + 1
+                send(c, 200, "{\"sum\":" + format("{}", total) + "}")
+            except:
+                send(c, 400, "{\"error\":\"bad-json-array\"}")
+        else:
+            send(c, 404, "{\"error\":\"not-found\"}")
+        net_close(c)
+        i = i + 1
+    net_close(l)
+    print("server-down")
+    return 0

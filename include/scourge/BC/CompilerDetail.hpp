@@ -23,6 +23,8 @@ struct CompileAbort {};
 
 inline constexpr const char* builtinNames[] = {
     "print",     "str",   "len", "sum",       "now",   "range", "ok", "err",
+    // F-20：可调用 panic（与 MLIRGen builtinNames 同表）
+    "panic",
     "abs",       "sqrt",  "exp", "log",       "max",   "min",
     "transpose", "reshape", "data_ptr",
     // v0.9.3 标量数学/随机/排序（与 MLIRGen builtinNames 同表）

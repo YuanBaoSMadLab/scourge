@@ -1,0 +1,7 @@
+using "platforms/cpus/stm32f4.repl"
+
+// Cortex-M reset always fetches the initial SP/PC from address 0x00000000,
+// but this platform only maps FLASH at 0x08000000. Provide a boot alias so the
+// reset sequence reads a valid vector table and the firmware actually starts.
+bootAlias: Memory.MappedMemory @ sysbus 0x00000000
+    size: 0x100000

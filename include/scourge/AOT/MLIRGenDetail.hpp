@@ -121,6 +121,25 @@ inline VK vkOfAnnName(const std::string& n) {
     return VK::Bad;
 }
 
+/// 注解类型 → 槽位 tag（unifyNumeric 之外的漂移源：读取侧按注解位还原，
+/// 存储必须按注解槽位提升；与字典 ktag/vtag、List etag 同编码）。不可作
+/// 槽位种类 → -1。原 MLIRGenLit.cpp 静态助手，F-22 打印元组元素列表
+/// 复用，上移共享（单一事实源）。
+inline int annTagOf(const TypePtr& t) {
+    switch (t->kind) {
+    case Type::Kind::Int: return 0;
+    case Type::Kind::Float: return 1;
+    case Type::Kind::Str: return 2;
+    case Type::Kind::Bool: return 3;
+    case Type::Kind::List:
+    case Type::Kind::Dict:
+    case Type::Kind::Set:
+    case Type::Kind::Tensor:
+    case Type::Kind::Result: return 4;
+    default: return -1;
+    }
+}
+
 // ============================================================================
 // 算子注册表：运算符 → 各降级路径元数据（单一事实源）
 // ----------------------------------------------------------------------------
@@ -276,6 +295,8 @@ inline std::string escapeMlirStr(const std::string& text) {
 /// 内建函数名（与 Compiler::builtinNames 同表）。
 inline const char* builtinNames[] = {
     "print",    "str",  "len", "sum",       "now",   "range", "ok", "err",
+    // F-20：可调用 panic（与 BC::Compiler builtinNames 同表）
+    "panic",
     "abs",      "sqrt", "exp", "log",       "max",   "min",
     "transpose", "reshape",
     // 0.9.6 O 节 FFI 宽类型域（与 BC::Compiler builtinNames 同表）

@@ -49,21 +49,20 @@ void TypeChecker::checkStmt(const Stmt& s) {
                             " = <初值>");
             break;
         }
-        // List 上下文偏好（单发旗标）：注解为 List[...] 或重赋值既有 List
-        // 变量时，数值列表字面量按 List[T] 推断而非默认 Tensor（0.9.3：
-        // List 数值元素；checkListLit 消费旗标，检查完立即清空）。
+        // Tensor 上下文偏好（单发旗标，F-18 A 案）：注解为 Tensor 或重赋值
+        // 既有 Tensor 变量时，一维数值列表字面量按 Tensor 推断（默认已改为
+        // List[T]；checkListLit 消费旗标，检查完立即清空）。
         if (a.value->kind == Expr::Kind::ListLit &&
             a.target->kind == Expr::Kind::Name) {
             auto& n0 = static_cast<const Name&>(*a.target);
-            bool listCtx = a.ann && a.ann->kind == TypeExpr::Kind::Named &&
-                           a.ann->name == "List";
-            if (!listCtx) {
+            bool tensorCtx = a.ann && a.ann->kind == TypeExpr::Kind::Tensor;
+            if (!tensorCtx) {
                 if (const VarSym* pre = scope_.find(n0.name))
-                    listCtx = pre->type->kind == Type::Kind::List;
+                    tensorCtx = pre->type->kind == Type::Kind::Tensor;
             }
-            if (listCtx) asListLit_ = a.value.get();
+            if (tensorCtx) asTensorLit_ = a.value.get();
         }
-        // Dict/Set 上下文偏好（单发旗标，同 asListLit_）：注解为
+        // Dict/Set 上下文偏好（单发旗标，同 asTensorLit_）：注解为
         // Dict[K,V]/Set[T] 或既有 Dict/Set 变量重赋值时，字面量键/值/元素
         // 统一对齐目标（checkDictLit / checkSetLit 消费，检查完清空）。
         // dictAnn/setAnn 存活到 checkExpr 之后，理由同上。
@@ -121,7 +120,7 @@ void TypeChecker::checkStmt(const Stmt& s) {
             }
         }
         TypePtr vt = checkExpr(*a.value);
-        asListLit_ = nullptr;
+        asTensorLit_ = nullptr;
         dictTarget_ = nullptr;
         setTarget_ = nullptr;
         tupleTarget_ = nullptr;

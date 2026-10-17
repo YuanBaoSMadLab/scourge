@@ -1,4 +1,4 @@
-# 验证：min/max 张量归约 + reversed/sorted 对 List[int] 的可用性（C-D P0-2/P1-1）
+# 验证：min/max 列表归约 + reversed/sorted 对 List[int] 的可用性（C-D P0-2/P1-1；A 案后 t 为 List[float]，行为不变）
 def main() -> int:
     t = [3.0, 1.0, 2.0]
     print(min(t))

@@ -58,19 +58,6 @@
 
 namespace fs = std::filesystem;
 
-// OS 头（selfTag 取编译器自身路径用）。注意：BuilderRT*.hpp 的原始字符串
-// 内嵌的是生成给用户程序的 C 运行时源码，其中的 #include 是字符串文本——
-// 编译器自身的 OS 头只能放在这里。
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <unistd.h>
-#endif
-
 namespace scourge {
 
 namespace {
@@ -166,30 +153,6 @@ std::string clangTag(const fs::path& clang) {
     uint64_t mtime = ec ? 0 : static_cast<uint64_t>(t.time_since_epoch().count());
     return clang.string() + "|" + std::to_string(sizeV) + "|" +
            std::to_string(mtime);
-}
-
-/// 编译器自体指纹：自身可执行文件路径 + 大小 + 修改时间。作为 mainObjKey
-/// 的指纹源（对齐 clangTag 模式）：任何 TU 重编 → 重链 → 指纹变化 → obj
-/// 缓存全量失效，无需逐 TU 登记时间戳。路径取值失败时降级为空路径——
-/// 大小/mtime 退化为 0，指纹仍稳定（仅失去失效灵敏度，不产生错误命中）。
-std::string selfTag() {
-    std::string path;
-#ifdef _WIN32
-    char buf[MAX_PATH];
-    DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) path.assign(buf, n);
-#else
-    char buf[4096];
-    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
-    if (n > 0) path.assign(buf, static_cast<size_t>(n));
-#endif
-    std::error_code ec;
-    uintmax_t size = fs::file_size(path, ec);
-    uint64_t sizeV = ec ? 0 : static_cast<uint64_t>(size);
-    ec.clear();
-    auto t = fs::last_write_time(path, ec);
-    uint64_t mtime = ec ? 0 : static_cast<uint64_t>(t.time_since_epoch().count());
-    return path + "|" + std::to_string(sizeV) + "|" + std::to_string(mtime);
 }
 
 /// main.obj 缓存键（五重一致性，对齐 .sgbc 五重校验）：格式版本、

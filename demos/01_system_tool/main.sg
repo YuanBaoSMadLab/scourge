@@ -1,0 +1,46 @@
+# 演示：系统工具方向 —— 目录源文件行数/词数统计器
+capability io
+
+def main() -> int:
+    names_l: List[str] = list_dir(".")
+    fnames: List[str] = []
+    flines: List[int] = []
+    fwords: List[int] = []
+    total_lines: int = 0
+    total_words: int = 0
+    n: int = len(names_l)
+    i: int = 0
+    while i < n:
+        name: str = names_l[i]
+        keep: bool = name.endswith(".sg") or name.endswith(".md") or name.endswith(".txt")
+        if keep:
+            try:
+                s: str = read_text(name)
+            except:
+                s = ""
+            lines: List[str] = s.split("\n")
+            lc: int = len(lines)
+            words: int = 0
+            m: int = 0
+            while m < lc:
+                ws: List[str] = lines[m].split(" ")
+                p: int = 0
+                while p < len(ws):
+                    if len(ws[p]) > 0:
+                        words = words + 1
+                    p = p + 1
+                m = m + 1
+            fnames.append(name)
+            flines.append(lc)
+            fwords.append(words)
+            total_lines = total_lines + lc
+            total_words = total_words + words
+        i = i + 1
+    r: int = 0
+    while r < len(fnames):
+        print(fnames[r], flines[r], fwords[r])
+        r = r + 1
+    print("TOTAL files", len(fnames), "lines", total_lines, "words", total_words)
+    if len(fnames) > 0:
+        print("avg_lines_per_file", total_lines / len(fnames))
+    return 0

@@ -1,0 +1,133 @@
+# 演示：AI·ML 主方向 —— 用 autodiff + nn 训练 MLP 解决 XOR 分类
+import std.autodiff as ad
+import std.nn as nn
+
+def main() -> int:
+    nin: int = 2
+    nhid: int = 4
+    nout: int = 1
+    p1: int = nin * nhid
+    W1: List[float] = []
+    b1: List[float] = []
+    W2: List[float] = []
+    b2: List[float] = []
+    sg: float = 0.7
+    i: int = 0
+    while i < p1:
+        W1.append(sg)
+        sg = -sg
+        i = i + 1
+    sg = 0.2
+    i = 0
+    while i < nhid:
+        b1.append(sg)
+        sg = -sg
+        i = i + 1
+    sg = 0.7
+    i = 0
+    while i < nhid * nout:
+        W2.append(sg)
+        sg = -sg
+        i = i + 1
+    b2.append(0.0)
+
+    xs0: List[float] = []
+    xs1: List[float] = []
+    yt: List[float] = []
+    xs0.append(0.0)
+    xs1.append(0.0)
+    yt.append(0.0)
+    xs0.append(0.0)
+    xs1.append(1.0)
+    yt.append(1.0)
+    xs0.append(1.0)
+    xs1.append(0.0)
+    yt.append(1.0)
+    xs0.append(1.0)
+    xs1.append(1.0)
+    yt.append(0.0)
+    nsamp: int = 4
+
+    lr: float = 0.15
+    epochs: int = 8000
+    e: int = 0
+    while e < epochs:
+        loss_sum: float = 0.0
+        s: int = 0
+        while s < nsamp:
+            T: List[float] = ad.tape()
+            ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
+            ids2: List[int] = nn.params(T, W2, b2, nhid, nout)
+            xn: List[int] = []
+            xn.append(ad.const(T, xs0[s]))
+            xn.append(ad.const(T, xs1[s]))
+            hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
+            ht: List[int] = []
+            h: int = 0
+            while h < nhid:
+                ht.append(ad.tanh_(T, hn[h]))
+                h = h + 1
+            on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
+            yy: List[float] = []
+            yy.append(yt[s])
+            loss: int = nn.mse(T, on, yy, 1)
+            ids: List[int] = []
+            a: int = 0
+            while a < len(ids1):
+                ids.append(ids1[a])
+                a = a + 1
+            a = 0
+            while a < len(ids2):
+                ids.append(ids2[a])
+                a = a + 1
+            g: List[float] = nn.gather_grads(T, loss, ids, p1 + nhid + nhid * nout + nout)
+            j: int = 0
+            while j < p1:
+                W1[j] = W1[j] - lr * g[j]
+                j = j + 1
+            j = 0
+            while j < nhid:
+                b1[j] = b1[j] - lr * g[p1 + j]
+                j = j + 1
+            off: int = p1 + nhid
+            j = 0
+            while j < nhid * nout:
+                W2[j] = W2[j] - lr * g[off + j]
+                j = j + 1
+            b2[0] = b2[0] - lr * g[off + nhid * nout]
+            loss_sum = loss_sum + ad.value(T, loss)
+            s = s + 1
+        if e == 0 or e == 2000 or e == 4000 or e == 5999:
+            print("epoch", e, "loss", loss_sum / float(nsamp))
+        e = e + 1
+
+    print("--- XOR evaluation ---")
+    correct: int = 0
+    s = 0
+    while s < nsamp:
+        T: List[float] = ad.tape()
+        ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
+        ids2: List[int] = nn.params(T, W2, b2, nhid, nout)
+        xn: List[int] = []
+        xn.append(ad.const(T, xs0[s]))
+        xn.append(ad.const(T, xs1[s]))
+        hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
+        ht: List[int] = []
+        h: int = 0
+        while h < nhid:
+            ht.append(ad.tanh_(T, hn[h]))
+            h = h + 1
+        on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
+        pred: float = ad.value(T, on[0])
+        cls: int = 0
+        if pred >= 0.5:
+            cls = 1
+        tgt: int = 0
+        if yt[s] >= 0.5:
+            tgt = 1
+        if cls == tgt:
+            correct = correct + 1
+        print("in", xs0[s], xs1[s], "pred", pred, "class", cls, "target", tgt)
+        s = s + 1
+    print("accuracy", correct, "/", nsamp)
+    return 0

@@ -308,6 +308,77 @@ char* sg_list_format(SgList* l) {
 
 void sg_print_list(SgList* l) { fputs(sg_list_format(l), stdout); }
 
+/* F-22：List[Tuple[k,v]] repr（Dict.items() 打印闭环，与 VM stringify 逐字
+ * 一致）：外层列表 i64 槽存 2 元组句柄（SgList*，sg_dict_items 同构），k/v
+ * 位按静态 tag 还原 repr（tag 编码同 etag：int=0 float=1 str=2 bool=3；
+ * 容器槽位由编译器编译期拒绝，运行时不可达）。两遍分配同 sg_list_format。 */
+static size_t sg_tpl_bound(const SgList* t, int idx, int tag) {
+    int64_t slot = ((const int64_t*)t->data)[idx];
+    switch (tag) {
+    case 1: return 64;
+    case 2: return 2 * strlen((const char*)(uintptr_t)slot) + 10;
+    case 3: return 5;
+    default: return 20;
+    }
+}
+
+static void sg_tpl_write(char** wp, const SgList* t, int idx, int tag) {
+    char* w = *wp;
+    int64_t slot = ((const int64_t*)t->data)[idx];
+    char buf[64];
+    switch (tag) {
+    case 1: {
+        double dv;
+        memcpy(&dv, &slot, sizeof dv);
+        snprintf(buf, sizeof buf, "%s", sg_fmt_f64(dv));
+        memcpy(w, buf, strlen(buf));
+        w += strlen(buf);
+        break;
+    }
+    case 2:
+        sg_list_escape((const char*)(uintptr_t)slot, &w);
+        break;
+    case 3:
+        memcpy(w, slot ? "True" : "False", slot ? 4 : 5);
+        w += slot ? 4 : 5;
+        break;
+    default:
+        snprintf(buf, sizeof buf, "%lld", (long long)slot);
+        memcpy(w, buf, strlen(buf));
+        w += strlen(buf);
+    }
+    *wp = w;
+}
+
+char* sg_list_format_tuples(SgList* l, int64_t ktag, int64_t vtag) {
+    int64_t n = l->len;
+    size_t total = 2;
+    for (int64_t k = 0; k < n; ++k) {
+        if (k) total += 2; /* ", " */
+        total += 4;        /* "(" ")" */
+        const SgList* t = (const SgList*)(uintptr_t)((int64_t*)l->data)[k];
+        total += sg_tpl_bound(t, 0, (int)ktag);
+        total += 2; /* ", " 元组分隔 */
+        total += sg_tpl_bound(t, 1, (int)vtag);
+    }
+    char* out = (char*)malloc(total + 1);
+    if (!out) exit(1);
+    char* w = out;
+    *w++ = '[';
+    for (int64_t k = 0; k < n; ++k) {
+        if (k) { *w++ = ','; *w++ = ' '; }
+        const SgList* t = (const SgList*)(uintptr_t)((int64_t*)l->data)[k];
+        *w++ = '(';
+        sg_tpl_write(&w, t, 0, (int)ktag);
+        *w++ = ','; *w++ = ' ';
+        sg_tpl_write(&w, t, 1, (int)vtag);
+        *w++ = ')';
+    }
+    *w++ = ']';
+    *w = 0;
+    return out;
+}
+
 /* s.slice(a, b)：字节区间 [a, b)，两端 clamp 到 [0, len]，a >= b 恒空串
  * （与 VM StrSlice 语义逐字一致）。结果 arena 持有（程序生命周期）。 */
 const char* sg_str_slice(const char* s, int64_t a, int64_t b, const char* fn,

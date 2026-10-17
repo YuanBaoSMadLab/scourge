@@ -1,0 +1,20 @@
+# probe_b8_import.sg - F-19 same-package multi-module import merge (no
+# alias): import std.autodiff + import std.nn in one file must compile (no
+# E2007) and resolve members through all forms: last-segment binding
+# (autodiff.f / nn.f), canonical std.<mod>.f chain (package-root fallback),
+# and suffix rewrite. Expected output (constant): 1.1 x3.
+import std.autodiff
+import std.nn
+
+def main() -> int:
+    T = autodiff.tape()
+    W: List[float] = [0.5]
+    b: List[float] = [0.1]
+    ids = nn.params(T, W, b, 1, 1)
+    o = nn.linear(T, ids, [2.0], 1, 1)
+    print(autodiff.value(T, o[0]))
+    print(std.autodiff.value(T, o[0]))
+    ids2 = std.nn.params(T, W, b, 1, 1)
+    o2 = std.nn.linear(T, ids2, [2.0], 1, 1)
+    print(std.autodiff.value(T, o2[0]))
+    return 0

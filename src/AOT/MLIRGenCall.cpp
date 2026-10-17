@@ -72,8 +72,17 @@ std::string Gen::foldModuleKey(const Expr& base) const {
             cur.compare(cur.size() - suffix.size(), suffix.size(), suffix) ==
                 0)
             continue;
+        std::string prev = cur;
         cur += suffix;
-        if (!s_.registry().count(cur)) return {};
+        if (!s_.registry().count(cur)) {
+            // F-19：同包多模块合并命名空间——下钻段缺失时回退包根（首段）
+            // 重试（与检查器 qualifiedModuleName 同构同序）。
+            size_t dot = prev.find('.');
+            if (dot == std::string::npos) return {};
+            std::string alt = prev.substr(0, dot) + suffix;
+            if (!s_.registry().count(alt)) return {};
+            cur = alt;
+        }
     }
     return cur;
 }

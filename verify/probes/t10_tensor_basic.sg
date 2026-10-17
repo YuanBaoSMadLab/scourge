@@ -6,7 +6,7 @@
 def main() -> int:
     # 字面量构造（编译期常量）
     a = [[1.0, 2.0], [3.0, 4.0]]        # Tensor[float, (2, 2)]
-    b = [1, 2, 3, 4]                     # Tensor[int, (4,)]——一维数值列表即张量
+    b: Tensor[int, (4,)] = [1, 2, 3, 4]  # A 案：一维数值字面量默认 List，张量需显式注解
     print(a)
     print(b)
 
@@ -20,7 +20,7 @@ def main() -> int:
 
     # 运行时构造（元素含变量）——与字面量张量完全同质
     x = 1.5
-    row = [x, 2.0]                       # Tensor[float, (2,)]
+    row: Tensor[float, (2,)] = [x, 2.0]  # 运行时构造（元素含变量），注解定张量
     mm = [[x, 2.0], [3.0, x]]            # Tensor[float, (2, 2)]
     rows = [row, [3.0, 4.0]]             # 行拼接升维
     print(row)
@@ -28,11 +28,12 @@ def main() -> int:
     print(rows)
 
     # dtype 推断：任一元素含浮点 → float 张量
-    mixed = [1, 2.0]                     # Tensor[float, (2,)]
+    mixed: Tensor[float, (2,)] = [1, 2.0] # int/float 混排统一 float
     print(mixed)
 
-    # 浮点最短往返表示；整数浮点补 .0
-    print([1.0, 0.5, 1.0e-3, 1.0 / 3.0])
+    # 浮点最短往返表示；整数浮点补 .0（A 案：裸字面量参数默认 List，先注解构造张量）
+    f4: Tensor[float, (4,)] = [1.0, 0.5, 1.0e-3, 1.0 / 3.0]
+    print(f4)
 
     # int 张量与 float 张量是不同类型（无隐式混合）
     i2: Tensor[int, (2,)] = [7, 8]

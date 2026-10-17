@@ -31,8 +31,8 @@ def main() -> int:
     # 双双段错误（已知缺口 Q1，probe_seg_a1.sg 为最小复现），故写初值。
     count: int = 0
 
-    # 数值中括号字面量恒为张量（Tensor[int, (3)]），
-    # 不能赋给 List[int]（E2001）；List 装非数值元素。
+    # A 案（0.9.10）：一维数值字面量默认 List[T]，张量需显式 Tensor 注解。
+    # List 装非数值元素无需注解（元素类型决定推断）。
     xs: List[str] = ["a", "b", "c"]
 
     print(x)

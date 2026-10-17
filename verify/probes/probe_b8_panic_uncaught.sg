@@ -1,0 +1,8 @@
+# probe_b8_panic_uncaught.sg - F-20 uncaught panic(): exit 1 with canonical
+# stderr "panic: <msg> at <fn> (<file>:<line>)", byte-identical dual-mode.
+def boom():
+    panic("uncaught boom")
+
+def main() -> int:
+    boom()
+    return 0

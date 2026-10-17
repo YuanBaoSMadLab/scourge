@@ -18,8 +18,16 @@ TypePtr TypeChecker::checkListLit(const Expr& e) {
     if (ll.elems.empty()) return tyUnknown(); // 赋值上下文报 E2002
 
     // 递归推断：数值/张量嵌套 → 张量字面量；其余 → List[T]。
+    // 嵌套行是内层 ListLit——A 案默认已翻转为 List，若不干预外层将收不到
+    // Tensor 行而整体塌成 List[List]（AOT 不可表示）。故检查元素时对
+    // ListLit 行临时置张量上下文（保存/恢复外层旗标，支持任意深度嵌套）。
     std::vector<TypePtr> ts;
-    for (const auto& el : ll.elems) ts.push_back(checkExpr(*el));
+    const Expr* savedTensorCtx = asTensorLit_;
+    for (const auto& el : ll.elems) {
+        if (el->kind == Expr::Kind::ListLit) asTensorLit_ = el.get();
+        ts.push_back(checkExpr(*el));
+    }
+    asTensorLit_ = savedTensorCtx;
 
     bool allNumeric = true, allTensor = true;
     std::vector<int64_t> rowShape;
@@ -40,16 +48,16 @@ TypePtr TypeChecker::checkListLit(const Expr& e) {
         }
     }
 
-    if (allNumeric && &e == asListLit_) {
-        // List 注解/重赋值上下文：数值字面量按 List[T] 推断（int/float 混排
-        // 统一为 float，与下方 List 路径及 AOT genListLit 的元素统一一致）。
-        // checkedAsTensor 保持 false——编译器/AOT 均据此走 NewList。
+    // F-18 A 案（0.9.10）：一维数值字面量默认 List[T]——训练语料里
+    // [1,2,3] 恒是列表；Tensor 上下文（Tensor 注解 / 既有 Tensor 变量
+    // 重赋值，asTensorLit_ 旗标）或嵌套字面量才推断为张量。int/float
+    // 混排统一为 float，int 元素打 Q3 提升标记（与 AOT genListLit 按
+    // 元素种类统一对齐；VM 路径经 promoteF64_ 集合插 IntToFloat）。
+    if (allNumeric && &e != asTensorLit_) {
         TypePtr elem = tyInt();
         for (auto& t : ts)
             if (t->kind == Type::Kind::Float) elem = tyFloat();
         if (elem->kind == Type::Kind::Float) {
-            // int 元素做 float 提升标记（Q3 边界，与 AOT genListLit 按元素
-            // 种类统一对齐）：VM 路径经 promoteF64_ 集合插 IntToFloat。
             for (size_t i = 0; i < ts.size(); ++i)
                 if (ts[i]->kind == Type::Kind::Int)
                     promoteF64_.insert(ll.elems[i].get());
@@ -533,6 +541,19 @@ TypePtr TypeChecker::checkAttr(const Expr& e) {
             auto mod = std::make_shared<Type>(Type::Kind::Module);
             mod->name = sub;
             return mod;
+        }
+        // F-19：同包多模块合并命名空间——子模块链缺失时回退包根（首段）
+        // 重试：import std.autodiff + import std.nn 后 "std" 首段绑定指向
+        // 首个导入模块，兄弟模块 std.nn 经此可达。回退目标必须真实导入过
+        //（imports_），无幻影访问。
+        size_t dot = base->name.find('.');
+        if (dot != std::string::npos) {
+            std::string alt = base->name.substr(0, dot) + '.' + at.name;
+            if (imports_.count(alt)) {
+                auto mod = std::make_shared<Type>(Type::Kind::Module);
+                mod->name = alt;
+                return mod;
+            }
         }
         return fail(Errc::E2003_UnknownName, e.range,
                     "模块 '" + base->name + "' 没有成员 '" + at.name + "'");

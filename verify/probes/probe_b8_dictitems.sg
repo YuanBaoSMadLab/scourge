@@ -1,0 +1,14 @@
+# probe_b8_dictitems.sg - F-22 AOT print/str of List[Tuple] (Dict.items()
+# loop closure). Scalar k/v tag combos (str/int, int/float, str/bool) plus
+# empty dict. Dual-mode byte-identical with VM stringify repr.
+def main() -> int:
+    d: Dict[str, int] = {"a": 1, "b": 2}
+    print(d.items())
+    print(str(d.items()))
+    d2: Dict[int, float] = {1: 1.5, 2: 2.5}
+    print(d2.items())
+    d3: Dict[str, bool] = {"x": True, "y": False}
+    print(d3.items())
+    e: Dict[str, int] = {}
+    print(e.items())
+    return 0

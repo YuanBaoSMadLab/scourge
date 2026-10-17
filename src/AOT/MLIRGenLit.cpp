@@ -645,23 +645,6 @@ static int kvTagOf(const std::vector<Value>& xs, bool isKey) {
     return -1;
 }
 
-/// 注解类型 → 槽位 tag（unifyNumeric 之外的漂移源：读取侧按注解位还原，
-/// 存储必须按注解槽位提升）。不可作槽位种类 → -1。
-static int annTagOf(const TypePtr& t) {
-    switch (t->kind) {
-    case Type::Kind::Int: return 0;
-    case Type::Kind::Float: return 1;
-    case Type::Kind::Str: return 2;
-    case Type::Kind::Bool: return 3;
-    case Type::Kind::List:
-    case Type::Kind::Dict:
-    case Type::Kind::Set:
-    case Type::Kind::Tensor:
-    case Type::Kind::Result: return 4;
-    default: return -1;
-    }
-}
-
 Value Gen::genDictLit(const DictLit& dl) {
     std::vector<Value> ks, vs;
     ks.reserve(dl.pairs.size());
