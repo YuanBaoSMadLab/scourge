@@ -1,16 +1,19 @@
 <div align="center">
 
+<img src="scourge.png" alt="Scourge" width="140"/>
+
 # Scourge
 
 **为 AI 代理时代设计的确定性验证型语言**
 
-一份源码，两种执行：VM 直跑与 AOT 原生编译，行为逐字节一致。
+一份源码，两种执行：VM 直跑与 AOT 原生编译，行为逐字节一致——从云端的 AI 代理，到口袋里的单片机。
 
 [![Version](https://img.shields.io/badge/version-0.1.0-2563eb)](#版本)
 [![C++](https://img.shields.io/badge/C%2B%2B-23-00599C)](CMakeLists.txt)
 [![MLIR](https://img.shields.io/badge/codegen-LLVM%20%2B%20MLIR-8A2BE2)](#架构)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-64748b)](#30-秒上手)
 [![MCP](https://img.shields.io/badge/MCP-native-16a34a)](#mcp-为-ai-代理而生)
+[![Embedded](https://img.shields.io/badge/bare_metal-STM32F4-4a7c59)](#仓库结构)
 
 **简体中文** ｜ [English](README_EN.md)
 
@@ -22,7 +25,7 @@
 
 Scourge 把"确定性"作为第一原则：同一段 `.sg` 源码，经 `sg run` 在字节码虚拟机上执行，与经 `sg build` 降级为 MLIR → LLVM IR → 原生可执行文件，**运行结果逐字节一致，panic 消息逐字相同**。所有程序在编译期完成类型、形状与契约的全量验证，把运行时事故拦在执行之前。
 
-它同时为机器可消费而设计：静态检查结果可输出结构化 JSON 诊断，内置 MCP（Model Context Protocol）服务器，AI 代理可以像使用人类工具一样使用整套工具链。
+它同时为机器可消费而设计：静态检查结果可输出结构化 JSON 诊断，内置 MCP（Model Context Protocol）服务器，AI 代理可以像使用人类工具一样使用整套工具链。同一套确定性原则也延伸到裸机世界：仓库里带着 STM32F4 裸机运行时、链接脚本与 Renode 仿真配置——AOT 产物可以不依赖任何操作系统，直接落在 Cortex-M 上。
 
 | 特性 | 说明 |
 |---|---|
@@ -31,6 +34,7 @@ Scourge 把"确定性"作为第一原则：同一段 `.sg` 源码，经 `sg run`
 | 确定性错误模型 | 错误即值（`Result[T, E]`）+ 可恢复 panic（`try/except`）双轨 |
 | 张量一等公民 | `Tensor[float, (2, 3)]` 形状进类型系统；张量运算降级到 linalg |
 | 进程内 MLIR | 无外部 `mlir-opt` / `mlir-translate` 依赖，一条命令产出原生可执行 |
+| 裸机嵌入式 | STM32F4 裸机运行时 + Renode 仿真；AOT 产物无 OS 依赖落地 Cortex-M |
 | 中文诊断 | 面向中文开发者的编译期诊断与运行时 panic 消息 |
 | MCP 原生 | 独立 `sgmcp` 入口，stdio JSON-RPC，AI 代理开箱即用 |
 | 自举包管理器 | `sget` 由 Scourge 自身 AOT 编译产出——构建成功即全链冒烟 |
@@ -58,7 +62,7 @@ Windows 提供 Inno Setup 安装包（`Scourge-0.1.0-win-x64-x86-setup.exe` 与 
 **Linux / macOS**
 
 ```bash
-git clone <本仓库> scourge && cd scourge
+git clone https://github.com/YuanBaoSMadLab/scourge.git scourge && cd scourge
 scripts/bootstrap.sh                     # 探测工具链 → 取 MLIR → 构建 → 冒烟
 build-rel/sg run examples/hello.sg
 ```
@@ -66,7 +70,7 @@ build-rel/sg run examples/hello.sg
 **Windows（PowerShell）**
 
 ```powershell
-git clone <本仓库> scourge; cd scourge
+git clone https://github.com/YuanBaoSMadLab/scourge.git scourge; cd scourge
 scripts\bootstrap.ps1                    # 探测工具链 → 取 MLIR → 构建 → 冒烟
 build-rel\sg.exe run examples\hello.sg
 ```
@@ -205,11 +209,13 @@ scripts/          bootstrap 双平台一键构建 · vsenv 链接环境
 firmware/         裸机嵌入式目标（STM32F4：运行时 + Renode 仿真）
 ```
 
-## 愿景与共同研发
+## 愿景：AI 时代的红利，属于确定性
 
-Scourge 的赌注是：**AI 代理大规模写代码的时代，语言本身要成为验证器**。确定性双模执行、编译期全量验证、结构化诊断、MCP 原生——让"AI 写的每一行代码"都经过同一把尺子，而不是靠事后审查兜底。
+两件事正在同时发生：**AI 代理正在成为代码的主要作者**；而 **AI 的下一站是物理世界**——机器人、智能家居、工厂与田野里的每一块芯片。前者需要语言本身成为验证器：代理写的每一行代码都过同一把尺子，结构化诊断让错误可被机器直接定位与修复。后者需要确定性、可控的体积与裸机可用性：设备端的每一字节行为都不该靠运气。
 
-项目处于 0.1.0 早期阶段，语言语义、标准库、工具链、手册均有大量空间，欢迎以 issue、PR、手册修订、示例贡献等任何形式加入共同研发。
+主流语言很少同时认真服务这两个世界。Scourge 想做这个交叉地带的答案：**对 AI，它是代理可直接驱动的验证型语言（MCP 原生）；对嵌入式，它是能落进 Cortex-M 的确定性 AOT**。我们身处的，正是"AI 能力红利"与"万物互联"两条曲线的交汇点——把工具提前造好，等潮水来。
+
+0.1.0 只是起点。我们不宣称替代任何语言，也清楚自己生态尚小、语义仍在收紧（见"诚实的不足"）；但方向是对的，路是可复现的。项目完全开放共同研发——issue、PR、手册修订、示例贡献都欢迎，无论你是语言爱好者、AI 工具链工程师，还是想让高级语言跑进单片机的嵌入式开发者。
 
 如果这个项目对你有价值，欢迎在爱发电支持持续开发：**[https://afdian.com/a/YuanBaoSMadLab](https://afdian.com/a/YuanBaoSMadLab)**
 

@@ -1,16 +1,19 @@
 <div align="center">
 
+<img src="scourge.png" alt="Scourge" width="140"/>
+
 # Scourge
 
 **A deterministic, verification-first language for the AI-agent era**
 
-One source, two execution modes: VM interpretation and AOT native compilation — byte-for-byte identical behavior.
+One source, two execution modes: VM interpretation and AOT native compilation — byte-for-byte identical behavior, from cloud AI agents down to pocket-size microcontrollers.
 
 [![Version](https://img.shields.io/badge/version-0.1.0-2563eb)](#versioning)
 [![C++](https://img.shields.io/badge/C%2B%2B-23-00599C)](CMakeLists.txt)
 [![MLIR](https://img.shields.io/badge/codegen-LLVM%20%2B%20MLIR-8A2BE2)](#architecture)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-64748b)](#quick-start)
 [![MCP](https://img.shields.io/badge/MCP-native-16a34a)](#mcp-built-for-ai-agents)
+[![Embedded](https://img.shields.io/badge/bare_metal-STM32F4-4a7c59)](#repository-layout)
 
 [简体中文](README.md) ｜ **English**
 
@@ -22,7 +25,7 @@ One source, two execution modes: VM interpretation and AOT native compilation �
 
 Scourge treats determinism as a first principle: the same `.sg` source runs on the bytecode VM via `sg run` and compiles to MLIR → LLVM IR → a native executable via `sg build`, with **byte-for-byte identical results and identical panic messages**. Every program is fully verified at compile time — types, tensor shapes, and contracts — so runtime failures are caught before execution ever starts.
 
-It is also designed for machine consumption: the checker emits structured JSON diagnostics, and a built-in MCP (Model Context Protocol) server lets AI agents drive the entire toolchain like any human tool.
+It is also designed for machine consumption: the checker emits structured JSON diagnostics, and a built-in MCP (Model Context Protocol) server lets AI agents drive the entire toolchain like any human tool. The same determinism extends to bare metal: the repo ships an STM32F4 bare-metal runtime, linker scripts, and Renode simulation configs — AOT artifacts can land on a Cortex-M with no operating system underneath.
 
 | Feature | Description |
 |---|---|
@@ -31,6 +34,7 @@ It is also designed for machine consumption: the checker emits structured JSON d
 | Deterministic error model | Errors as values (`Result[T, E]`) plus recoverable panics (`try/except`) |
 | First-class tensors | `Tensor[float, (2, 3)]` — shapes live in the type system; tensor ops lower to linalg |
 | In-process MLIR | No external `mlir-opt` / `mlir-translate`; one command produces a native executable |
+| Bare-metal embedded | STM32F4 bare-metal runtime + Renode simulation; AOT artifacts land on Cortex-M with no OS dependency |
 | Native MCP | Standalone `sgmcp` entry over stdio JSON-RPC — agents work out of the box |
 | Self-hosted package manager | `sget` is itself AOT-compiled by Scourge — bootstrapping is the end-to-end smoke test |
 
@@ -59,7 +63,7 @@ Prerequisites: `cmake ≥ 3.28`, `ninja`, `clang`; the MLIR libraries come from 
 **Linux / macOS**
 
 ```bash
-git clone <this repo> scourge && cd scourge
+git clone https://github.com/YuanBaoSMadLab/scourge.git scourge && cd scourge
 scripts/bootstrap.sh                     # toolchain check → fetch MLIR → build → smoke test
 build-rel/sg run examples/hello.sg
 ```
@@ -67,7 +71,7 @@ build-rel/sg run examples/hello.sg
 **Windows (PowerShell)**
 
 ```powershell
-git clone <this repo> scourge; cd scourge
+git clone https://github.com/YuanBaoSMadLab/scourge.git scourge; cd scourge
 scripts\bootstrap.ps1                    # toolchain check → fetch MLIR → build → smoke test
 build-rel\sg.exe run examples\hello.sg
 ```
