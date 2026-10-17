@@ -15,6 +15,11 @@ void uart_init(void)
   USART2_CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE;
 }
 
+int uart_available(void)
+{
+  return (USART2_SR & USART_SR_RXNE) ? 1 : 0;
+}
+
 void uart_putc(char c)
 {
   if (c == '\n') uart_putc('\r');
@@ -52,4 +57,27 @@ int uart_getline(char* buf, int maxlen)
   }
   buf[i] = 0;
   return i;
+}
+
+void uart_putu(unsigned int v)
+{
+  char tmp[10];
+  int k = 0;
+  if (v == 0) { uart_putc('0'); return; }
+  while (v) { tmp[k++] = (char)('0' + (v % 10u)); v /= 10u; }
+  while (k) uart_putc(tmp[--k]);
+}
+
+void uart_puti(int v)
+{
+  if (v < 0) { uart_putc('-'); uart_putu((unsigned int)(-(long)v)); }
+  else uart_putu((unsigned int)v);
+}
+
+void uart_puthex(unsigned int v, int width)
+{
+  static const char hx[] = "0123456789ABCDEF";
+  int i;
+  for (i = width - 1; i >= 0; i--)
+    uart_putc(hx[(v >> (i * 4)) & 0xFu]);
 }

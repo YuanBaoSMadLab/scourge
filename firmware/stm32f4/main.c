@@ -1,35 +1,50 @@
 #include "hw.h"
 #include "sys.h"
 #include "uart.h"
+#include "filter.h"
+#include "stats.h"
+#include "crc32.h"
+#include "sensor.h"
+#include "shell.h"
 
-static void led_on(void)  { GPIOD_MODER |= (1u << (12 * 2)); GPIOD_BSRR = (1u << 12); }
-static void led_off(void) { GPIOD_MODER |= (1u << (12 * 2)); GPIOD_BSRR = (1u << (12 + 16)); }
+#define SAMPLE_PERIOD_MS 10
 
 int main(void)
 {
+  char line[64];
+  unsigned int last_sample;
+
   sys_init();
   systick_init(1000);
   uart_init();
 
-  uart_puts("STM32F4-DISCO FIRMWARE booting...\r\n");
+  sensor_seed(0xC0FFEE01u);
+  filter_init();
+  stats_reset();
+  (void)crc32((const unsigned char*)"", 0);   /* build CRC table up front */
 
-  int sum = 0;
-  int i;
-  for (i = 1; i <= 100; i++) sum += i;
-  uart_puts("sum(1..100) = ");
-  {
-    char tmp[12]; int n = sum, k = 0;
-    if (n == 0) tmp[k++] = '0';
-    while (n) { tmp[k++] = (char)('0' + n % 10); n /= 10; }
-    while (k) uart_putc(tmp[--k]);
+  shell_banner();
+  shell_prompt();
+
+  led_on();
+  delay_ms(150);
+  led_off();
+
+  last_sample = get_tick();
+  for (;;) {
+    if (shell_auto() && (get_tick() - last_sample) >= SAMPLE_PERIOD_MS) {
+      int raw = sensor_read();
+      int filt = filter_push(raw);
+      stats_push(filt);
+      last_sample = get_tick();
+    }
+
+    if (uart_available()) {
+      int n = uart_getline(line, sizeof(line));
+      if (n > 0) shell_exec(line);
+      shell_prompt();
+    }
+
+    __asm__ volatile ("wfi");
   }
-  uart_puts("\r\n");
-
-  int blink;
-  for (blink = 0; blink < 4; blink++) {
-    led_on(); delay_ms(100); led_off(); delay_ms(100);
-  }
-
-  uart_puts("SMOKE OK\r\n");
-  for (;;) { __asm__ volatile ("wfi"); }
 }

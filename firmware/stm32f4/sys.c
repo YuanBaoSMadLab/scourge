@@ -2,12 +2,38 @@
 #include "sys.h"
 
 static volatile unsigned int tick_ms = 0;
+static int led_state = 0;
 
 void sys_init(void)
 {
   RCC_AHB1ENR |= RCC_AHB1ENR_GPIOAEN | RCC_AHB1ENR_GPIODEN;
   RCC_APB1ENR |= RCC_APB1ENR_USART2EN;
   (void)RCC_CR; (void)RCC_CFGR;
+  led_init();
+}
+
+void led_init(void)
+{
+  GPIOD_MODER |= (1u << (12 * 2));
+  GPIOD_BSRR = (1u << (12 + 16));
+  led_state = 0;
+}
+
+void led_on(void)
+{
+  GPIOD_BSRR = (1u << 12);
+  led_state = 1;
+}
+
+void led_off(void)
+{
+  GPIOD_BSRR = (1u << (12 + 16));
+  led_state = 0;
+}
+
+void led_toggle(void)
+{
+  if (led_state) led_off(); else led_on();
 }
 
 void systick_init(unsigned int hz)

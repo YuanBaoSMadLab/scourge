@@ -1,29 +1,48 @@
-# 演示：AI·ML 主方向 —— 用 autodiff + nn 训练 MLP 解决 XOR 分类
+# 演示：AI·ML 主方向 —— autodiff + nn(Adam) 训练 MLP 做 2D 棋盘非线性分类
+# 在 demo05(XOR 4 点) 基础上升级为 4x4 网格 16 点：类别 = (x1>0) XOR (x2>0)，
+# 即棋盘格决策边界。报告总体准确率 + 分类别准确率 + 逐点预测，展示学到的非线性边界。
 import std.autodiff as ad
 import std.nn as nn
 
+def predict(W1: List[float], b1: List[float], W2: List[float], b2: List[float],
+            nin: int, nhid: int, x0: float, x1: float) -> float:
+    T: List[float] = ad.tape()
+    ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
+    ids2: List[int] = nn.params(T, W2, b2, nhid, 1)
+    xn: List[int] = []
+    xn.append(ad.const(T, x0))
+    xn.append(ad.const(T, x1))
+    hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
+    ht: List[int] = []
+    h: int = 0
+    while h < nhid:
+        ht.append(ad.tanh_(T, hn[h]))
+        h = h + 1
+    on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, 1)
+    return ad.value(T, on[0])
+
 def main() -> int:
     nin: int = 2
-    nhid: int = 4
+    nhid: int = 12
     nout: int = 1
     p1: int = nin * nhid
+
     W1: List[float] = []
     b1: List[float] = []
     W2: List[float] = []
     b2: List[float] = []
-    sg: float = 0.7
     i: int = 0
     while i < p1:
-        W1.append(sg)
-        sg = -sg
+        if i % 2 == 0:
+            W1.append(2.0)
+        else:
+            W1.append(-2.0)
         i = i + 1
-    sg = 0.2
     i = 0
     while i < nhid:
-        b1.append(sg)
-        sg = -sg
+        b1.append(-1.5 + 3.0 * float(i) / float(nhid - 1))
         i = i + 1
-    sg = 0.7
+    sg: float = 0.5
     i = 0
     while i < nhid * nout:
         W2.append(sg)
@@ -31,25 +50,66 @@ def main() -> int:
         i = i + 1
     b2.append(0.0)
 
+    # 4x4 网格数据集，标签 = (x1>0) XOR (x2>0)
     xs0: List[float] = []
     xs1: List[float] = []
-    yt: List[float] = []
-    xs0.append(0.0)
-    xs1.append(0.0)
-    yt.append(0.0)
-    xs0.append(0.0)
-    xs1.append(1.0)
-    yt.append(1.0)
-    xs0.append(1.0)
-    xs1.append(0.0)
-    yt.append(1.0)
-    xs0.append(1.0)
-    xs1.append(1.0)
-    yt.append(0.0)
-    nsamp: int = 4
+    yt: List[int] = []
+    levels: List[float] = []
+    levels.append(-1.5)
+    levels.append(-0.5)
+    levels.append(0.5)
+    levels.append(1.5)
+    a: int = 0
+    while a < 4:
+        b: int = 0
+        while b < 4:
+            x0: float = levels[a]
+            x1: float = levels[b]
+            lab: int = 0
+            p0: int = 0
+            if x0 > 0.0:
+                p0 = 1
+            p1v: int = 0
+            if x1 > 0.0:
+                p1v = 1
+            if p0 != p1v:
+                lab = 1
+            xs0.append(x0)
+            xs1.append(x1)
+            yt.append(lab)
+            b = b + 1
+        a = a + 1
+    nsamp: int = len(xs0)
 
-    lr: float = 0.15
-    epochs: int = 8000
+    mW1: List[float] = []
+    vW1: List[float] = []
+    mb1: List[float] = []
+    vb1: List[float] = []
+    mW2: List[float] = []
+    vW2: List[float] = []
+    mb2: List[float] = []
+    vb2: List[float] = []
+    i = 0
+    while i < p1:
+        mW1.append(0.0)
+        vW1.append(0.0)
+        i = i + 1
+    i = 0
+    while i < nhid:
+        mb1.append(0.0)
+        vb1.append(0.0)
+        i = i + 1
+    i = 0
+    while i < nhid * nout:
+        mW2.append(0.0)
+        vW2.append(0.0)
+        i = i + 1
+    mb2.append(0.0)
+    vb2.append(0.0)
+
+    lr: float = 0.03
+    epochs: int = 12000
+    t: int = 0
     e: int = 0
     while e < epochs:
         loss_sum: float = 0.0
@@ -69,65 +129,72 @@ def main() -> int:
                 h = h + 1
             on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
             yy: List[float] = []
-            yy.append(yt[s])
+            yy.append(float(yt[s]))
             loss: int = nn.mse(T, on, yy, 1)
             ids: List[int] = []
-            a: int = 0
-            while a < len(ids1):
-                ids.append(ids1[a])
-                a = a + 1
-            a = 0
-            while a < len(ids2):
-                ids.append(ids2[a])
-                a = a + 1
+            c: int = 0
+            while c < len(ids1):
+                ids.append(ids1[c])
+                c = c + 1
+            c = 0
+            while c < len(ids2):
+                ids.append(ids2[c])
+                c = c + 1
             g: List[float] = nn.gather_grads(T, loss, ids, p1 + nhid + nhid * nout + nout)
+            t = t + 1
+            g1: List[float] = []
+            g1b: List[float] = []
+            g2: List[float] = []
+            g2b: List[float] = []
             j: int = 0
             while j < p1:
-                W1[j] = W1[j] - lr * g[j]
+                g1.append(g[j])
                 j = j + 1
             j = 0
             while j < nhid:
-                b1[j] = b1[j] - lr * g[p1 + j]
+                g1b.append(g[p1 + j])
                 j = j + 1
-            off: int = p1 + nhid
             j = 0
             while j < nhid * nout:
-                W2[j] = W2[j] - lr * g[off + j]
+                g2.append(g[p1 + nhid + j])
                 j = j + 1
-            b2[0] = b2[0] - lr * g[off + nhid * nout]
+            g2b.append(g[p1 + nhid + nhid * nout])
+            nn.adam(W1, g1, mW1, vW1, lr, t, p1)
+            nn.adam(b1, g1b, mb1, vb1, lr, t, nhid)
+            nn.adam(W2, g2, mW2, vW2, lr, t, nhid * nout)
+            nn.adam(b2, g2b, mb2, vb2, lr, t, nout)
             loss_sum = loss_sum + ad.value(T, loss)
             s = s + 1
-        if e == 0 or e == 2000 or e == 4000 or e == 5999:
+        if e == 0 or e == 3000 or e == 8000 or e == 11999:
             print("epoch", e, "loss", loss_sum / float(nsamp))
         e = e + 1
 
-    print("--- XOR evaluation ---")
+    print("--- checkerboard evaluation (16 points) ---")
     correct: int = 0
+    c0_t: int = 0
+    c0_c: int = 0
+    c1_t: int = 0
+    c1_c: int = 0
     s = 0
     while s < nsamp:
-        T: List[float] = ad.tape()
-        ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
-        ids2: List[int] = nn.params(T, W2, b2, nhid, nout)
-        xn: List[int] = []
-        xn.append(ad.const(T, xs0[s]))
-        xn.append(ad.const(T, xs1[s]))
-        hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
-        ht: List[int] = []
-        h: int = 0
-        while h < nhid:
-            ht.append(ad.tanh_(T, hn[h]))
-            h = h + 1
-        on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
-        pred: float = ad.value(T, on[0])
+        pred: float = predict(W1, b1, W2, b2, nin, nhid, xs0[s], xs1[s])
         cls: int = 0
         if pred >= 0.5:
             cls = 1
-        tgt: int = 0
-        if yt[s] >= 0.5:
-            tgt = 1
+        tgt: int = yt[s]
+        ok: int = 0
         if cls == tgt:
+            ok = 1
             correct = correct + 1
+        if tgt == 0:
+            c0_t = c0_t + 1
+            c0_c = c0_c + ok
+        else:
+            c1_t = c1_t + 1
+            c1_c = c1_c + ok
         print("in", xs0[s], xs1[s], "pred", pred, "class", cls, "target", tgt)
         s = s + 1
     print("accuracy", correct, "/", nsamp)
+    print("class0", c0_c, "/", c0_t)
+    print("class1", c1_c, "/", c1_t)
     return 0

@@ -1,17 +1,50 @@
-# 演示：系统工具方向 —— 目录源文件行数/词数统计器
+# 演示：系统工具方向 —— 源代码度量分析器
+# 扫描目录下 .sg/.md/.txt，统计每个文件的行/词/字节/空行/注释行/代码行，
+# 按行数降序排序，按扩展名聚合，并输出摘要统计（均值/最小/最大/中位数）与行数分布直方图。
 capability io
 
+def is_blank(line: str) -> bool:
+    return len(line.trim()) == 0
+
+def is_comment(line: str) -> bool:
+    t: str = line.trim()
+    return t.startswith("#")
+
+def count_words(line: str) -> int:
+    ws: List[str] = line.split(" ")
+    c: int = 0
+    i: int = 0
+    while i < len(ws):
+        if len(ws[i]) > 0:
+            c = c + 1
+        i = i + 1
+    return c
+
+def ext_of(name: str) -> str:
+    parts: List[str] = name.split(".")
+    if len(parts) >= 2:
+        return parts[len(parts) - 1]
+    return "none"
+
 def main() -> int:
-    names_l: List[str] = list_dir(".")
-    fnames: List[str] = []
+    names: List[str] = list_dir(".")
+
+    fname: List[str] = []
     flines: List[int] = []
     fwords: List[int] = []
-    total_lines: int = 0
-    total_words: int = 0
-    n: int = len(names_l)
+    fbytes: List[int] = []
+    fblank: List[int] = []
+    fcomment: List[int] = []
+    fcode: List[int] = []
+
+    exts: List[str] = []
+    ext_files: List[int] = []
+    ext_lines: List[int] = []
+
+    n: int = len(names)
     i: int = 0
     while i < n:
-        name: str = names_l[i]
+        name: str = names[i]
         keep: bool = name.endswith(".sg") or name.endswith(".md") or name.endswith(".txt")
         if keep:
             try:
@@ -21,26 +54,139 @@ def main() -> int:
             lines: List[str] = s.split("\n")
             lc: int = len(lines)
             words: int = 0
+            blank: int = 0
+            comment: int = 0
             m: int = 0
             while m < lc:
-                ws: List[str] = lines[m].split(" ")
-                p: int = 0
-                while p < len(ws):
-                    if len(ws[p]) > 0:
-                        words = words + 1
-                    p = p + 1
+                ln: str = lines[m]
+                words = words + count_words(ln)
+                if is_blank(ln):
+                    blank = blank + 1
+                elif is_comment(ln):
+                    comment = comment + 1
                 m = m + 1
-            fnames.append(name)
+            code: int = lc - blank - comment
+            fname.append(name)
             flines.append(lc)
             fwords.append(words)
-            total_lines = total_lines + lc
-            total_words = total_words + words
+            fbytes.append(len(s))
+            fblank.append(blank)
+            fcomment.append(comment)
+            fcode.append(code)
+
+            ext: str = ext_of(name)
+            found: int = -1
+            c: int = 0
+            while c < len(exts):
+                if exts[c] == ext:
+                    found = c
+                c = c + 1
+            if found < 0:
+                exts.append(ext)
+                ext_files.append(1)
+                ext_lines.append(lc)
+            else:
+                ext_files[found] = ext_files[found] + 1
+                ext_lines[found] = ext_lines[found] + lc
         i = i + 1
+
+    # 选择排序：按行数降序（对索引数组 order 排序）
+    order: List[int] = []
+    k: int = 0
+    while k < len(fname):
+        order.append(k)
+        k = k + 1
+    a: int = 0
+    while a < len(order):
+        mx: int = a
+        b: int = a + 1
+        while b < len(order):
+            if flines[order[b]] > flines[order[mx]]:
+                mx = b
+            b = b + 1
+        if mx != a:
+            tmp: int = order[a]
+            order[a] = order[mx]
+            order[mx] = tmp
+        a = a + 1
+
+    print("== per-file metrics (sorted by lines desc) ==")
+    print("name lines words bytes blank comment code")
     r: int = 0
-    while r < len(fnames):
-        print(fnames[r], flines[r], fwords[r])
+    while r < len(order):
+        idx: int = order[r]
+        print(fname[idx], flines[idx], fwords[idx], fbytes[idx], fblank[idx], fcomment[idx], fcode[idx])
         r = r + 1
-    print("TOTAL files", len(fnames), "lines", total_lines, "words", total_words)
-    if len(fnames) > 0:
-        print("avg_lines_per_file", total_lines / len(fnames))
+
+    # 摘要统计（对 flines 求 总数/均值/最小/最大/中位数）
+    nf: int = len(flines)
+    total_lines: int = 0
+    total_words: int = 0
+    total_bytes: int = 0
+    mn: int = 0
+    mx2: int = 0
+    s2: int = 0
+    while s2 < nf:
+        total_lines = total_lines + flines[s2]
+        total_words = total_words + fwords[s2]
+        total_bytes = total_bytes + fbytes[s2]
+        if s2 == 0:
+            mn = flines[s2]
+            mx2 = flines[s2]
+        else:
+            if flines[s2] < mn:
+                mn = flines[s2]
+            if flines[s2] > mx2:
+                mx2 = flines[s2]
+        s2 = s2 + 1
+
+    print("== summary ==")
+    print("files", nf)
+    print("total_lines", total_lines)
+    print("total_words", total_words)
+    print("total_bytes", total_bytes)
+    if nf > 0:
+        print("mean_lines", total_lines / float(nf))
+        print("min_lines", mn)
+        print("max_lines", mx2)
+        # 中位数：对行数排序后取中间
+        sl: List[int] = sorted(flines)
+        mid: int = floor(nf / 2)
+        if nf % 2 == 1:
+            print("median_lines", sl[mid])
+        else:
+            print("median_lines", (sl[mid - 1] + sl[mid]) / 2.0)
+
+    # 按扩展名聚合
+    print("== by extension ==")
+    e: int = 0
+    while e < len(exts):
+        avg: float = 0.0
+        if ext_files[e] > 0:
+            avg = ext_lines[e] / float(ext_files[e])
+        print(exts[e], "files", ext_files[e], "lines", ext_lines[e], "avg", avg)
+        e = e + 1
+
+    # 行数分布直方图
+    print("== line-count histogram ==")
+    b0: int = 0
+    b1: int = 0
+    b2: int = 0
+    b3: int = 0
+    h: int = 0
+    while h < nf:
+        L: int = flines[h]
+        if L < 10:
+            b0 = b0 + 1
+        elif L < 50:
+            b1 = b1 + 1
+        elif L < 100:
+            b2 = b2 + 1
+        else:
+            b3 = b3 + 1
+        h = h + 1
+    print("0-9", b0)
+    print("10-49", b1)
+    print("50-99", b2)
+    print("100+", b3)
     return 0

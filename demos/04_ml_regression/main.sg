@@ -1,29 +1,47 @@
-# 演示：AI·ML 主方向 —— 用 autodiff + nn(Ada m) 训练 MLP 拟合 sin(x)
+# 演示：AI·ML 主方向 —— autodiff + nn(Adam) 训练 MLP 回归拟合 sin(x)
+# 在 demo04 基础上加入：训练/验证集划分、学习曲线、训练/验证 RMSE、
+# 密集网格预测的 平均/最大 绝对误差统计——一个完整的回归实验流程。
 import std.autodiff as ad
 import std.nn as nn
 
+def predict(W1: List[float], b1: List[float], W2: List[float], b2: List[float],
+            nin: int, nhid: int, x: float) -> float:
+    T: List[float] = ad.tape()
+    ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
+    ids2: List[int] = nn.params(T, W2, b2, nhid, 1)
+    xn: List[int] = []
+    xn.append(ad.const(T, x))
+    hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
+    ht: List[int] = []
+    h: int = 0
+    while h < nhid:
+        ht.append(ad.tanh_(T, hn[h]))
+        h = h + 1
+    on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, 1)
+    return ad.value(T, on[0])
+
 def main() -> int:
     nin: int = 1
-    nhid: int = 24
+    nhid: int = 32
     nout: int = 1
     p1: int = nin * nhid
+
     W1: List[float] = []
     b1: List[float] = []
     W2: List[float] = []
     b2: List[float] = []
-    sg: float = 1.2
-    i: int = 0
+    i = 0
     while i < p1:
-        W1.append(sg)
-        sg = -sg
+        if i % 2 == 0:
+            W1.append(2.0)
+        else:
+            W1.append(-2.0)
         i = i + 1
-    sg = 0.2
     i = 0
     while i < nhid:
-        b1.append(sg)
-        sg = -sg
+        b1.append(-1.5 + 3.0 * float(i) / float(nhid - 1))
         i = i + 1
-    sg = 1.2
+    sg = 0.5
     i = 0
     while i < nhid * nout:
         W2.append(sg)
@@ -31,15 +49,24 @@ def main() -> int:
         i = i + 1
     b2.append(0.0)
 
+    # 数据集：40 个点，偶数下标作训练、奇数下标作验证
     xs: List[float] = []
     ys: List[float] = []
-    nsamp: int = 24
+    tr: List[int] = []
+    va: List[int] = []
+    nsamp: int = 40
     s: int = 0
     while s < nsamp:
-        xv: float = 6.2831853 * float(s) / float(nsamp - 1)
-        xs.append(2.0 * xv / 6.2831853 - 1.0)
+        xv: float = 3.14159265 * float(s) / float(nsamp - 1)
+        xs.append(2.0 * xv / 3.14159265 - 1.0)
         ys.append(sin(xv))
+        if s % 2 == 0:
+            tr.append(s)
+        else:
+            va.append(s)
         s = s + 1
+    ntr: int = len(tr)
+    nva: int = len(va)
 
     mW1: List[float] = []
     vW1: List[float] = []
@@ -67,19 +94,20 @@ def main() -> int:
     mb2.append(0.0)
     vb2.append(0.0)
 
-    lr: float = 0.04
-    epochs: int = 20000
+    lr: float = 0.02
+    epochs: int = 16000
     t: int = 0
     e: int = 0
     while e < epochs:
         loss_sum: float = 0.0
-        s = 0
-        while s < nsamp:
+        si: int = 0
+        while si < ntr:
+            idx: int = tr[si]
             T: List[float] = ad.tape()
             ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
             ids2: List[int] = nn.params(T, W2, b2, nhid, nout)
             xn: List[int] = []
-            xn.append(ad.const(T, xs[s]))
+            xn.append(ad.const(T, xs[idx]))
             hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
             ht: List[int] = []
             h: int = 0
@@ -88,7 +116,7 @@ def main() -> int:
                 h = h + 1
             on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
             yt: List[float] = []
-            yt.append(ys[s])
+            yt.append(ys[idx])
             loss: int = nn.mse(T, on, yt, 1)
             ids: List[int] = []
             a: int = 0
@@ -123,27 +151,49 @@ def main() -> int:
             nn.adam(W2, g2, mW2, vW2, lr, t, nhid * nout)
             nn.adam(b2, g2b, mb2, vb2, lr, t, nout)
             loss_sum = loss_sum + ad.value(T, loss)
-            s = s + 1
-        if e == 0 or e == 2000 or e == 4000 or e == 7999:
-            print("epoch", e, "loss", loss_sum / float(nsamp))
+            si = si + 1
+        if e == 0 or e == 4000 or e == 8000 or e == 12000 or e == 15999:
+            print("epoch", e, "train_loss", loss_sum / float(ntr))
         e = e + 1
 
-    print("--- predict sin(x) ---")
-    s = 0
-    while s < nsamp:
-        T: List[float] = ad.tape()
-        ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
-        ids2: List[int] = nn.params(T, W2, b2, nhid, nout)
-        xn: List[int] = []
-        xn.append(ad.const(T, xs[s]))
-        hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
-        ht: List[int] = []
-        h: int = 0
-        while h < nhid:
-            ht.append(ad.tanh_(T, hn[h]))
-            h = h + 1
-        on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
-        pred: float = ad.value(T, on[0])
-        print("x", xs[s], "true", ys[s], "pred", pred)
-        s = s + 1
+    # 训练/验证 RMSE
+    sse_tr: float = 0.0
+    si = 0
+    while si < ntr:
+        idx = tr[si]
+        d: float = predict(W1, b1, W2, b2, nin, nhid, xs[idx]) - ys[idx]
+        sse_tr = sse_tr + d * d
+        si = si + 1
+    sse_va: float = 0.0
+    si = 0
+    while si < nva:
+        idx = va[si]
+        d = predict(W1, b1, W2, b2, nin, nhid, xs[idx]) - ys[idx]
+        sse_va = sse_va + d * d
+        si = si + 1
+    print("train_rmse", sqrt(sse_tr / float(ntr)))
+    print("val_rmse", sqrt(sse_va / float(nva)))
+
+    # 密集网格预测误差统计
+    print("--- dense grid [-1,1] x sin(pi*(x+1)/2) ---")
+    grid: int = 21
+    mae: float = 0.0
+    mxe: float = 0.0
+    gi: int = 0
+    while gi < grid:
+        gx: float = -1.0 + 2.0 * float(gi) / float(grid - 1)
+        xv: float = (gx + 1.0) / 2.0 * 3.14159265
+        gt: float = sin(xv)
+        pr: float = predict(W1, b1, W2, b2, nin, nhid, gx)
+        ae: float = pr - gt
+        if ae < 0.0:
+            ae = -ae
+        mae = mae + ae
+        if ae > mxe:
+            mxe = ae
+        if gi % 5 == 0:
+            print("x", gx, "true", gt, "pred", pr, "abserr", ae)
+        gi = gi + 1
+    print("grid_mae", mae / float(grid))
+    print("grid_max_abserr", mxe)
     return 0

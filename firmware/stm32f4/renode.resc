@@ -1,6 +1,0 @@
-using sysbus
-mach create "stm32f4-fw"
-machine LoadPlatformDescription @platforms/cpus/stm32f4.repl
-sysbus LoadELF @/d/Scourge/firmware/stm32f4/firmware.elf
-showAnalyzer sysbus.usart2 "/d/Scourge/firmware/stm32f4/uart_out.log"
-start
