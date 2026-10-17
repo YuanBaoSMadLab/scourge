@@ -359,7 +359,7 @@ Value Gen::emitCallRet(const std::string& sym, const std::vector<Value>& args,
     if (retVK == VK::Tensor && retType &&
         retType->kind == Type::Kind::Tensor) {
         bool tInt = !retType->params.empty() &&
-                    retType->params[0]->kind != Type::Kind::Float;
+                    dtypeIsInt(retType->params[0]);
         return Value{retVK, ssa, tInt,
                      static_cast<uint8_t>(retType->shape.size())};
     }

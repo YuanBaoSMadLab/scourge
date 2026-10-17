@@ -1,0 +1,48 @@
+# 数据类成员补齐探针：Option.some/none + is_none，Result.is_err，
+# Dict.contains / Set.contains（含 float 键 int 查询的数值同级规则）。
+def find(xs: List[int], t: int) -> Option[int]:
+    for x in xs:
+        if x == t:
+            return some(x)
+    return none()
+
+def maybe(b: bool) -> Result[int, str]:
+    if b:
+        return ok(1)
+    return err("bad")
+
+def main() -> int:
+    o: Option[int] = find([1, 2, 3], 2)
+    print(o.is_some())
+    print(o.is_none())
+    print(o.unwrap(-1))
+    p: Option[int] = find([1, 2, 3], 9)
+    print(p.is_none())
+    print(p.unwrap(-1))
+    q: Option[str] = some("yes")
+    print(q.is_some())
+    print(q.unwrap("no"))
+
+    r: Result[int, str] = maybe(False)
+    print(r.is_ok())
+    print(r.is_err())
+    g: Result[int, str] = maybe(True)
+    print(g.is_err())
+
+    d: Dict[str, int] = {"a": 1, "b": 2}
+    print(d.contains("a"))
+    print(d.contains("z"))
+    fd: Dict[float, int] = {1.0: 10}
+    print(fd.contains(1))
+    print(fd.contains(2.0))
+
+    s: Set[int] = {1, 2}
+    print(s.contains(1))
+    print(s.contains(3))
+    fs: Set[float] = {1.5}
+    print(fs.contains(1.5))
+    print(fs.contains(2))
+    ss: Set[str] = {"x"}
+    print(ss.contains("x"))
+    print(ss.contains("y"))
+    return 0

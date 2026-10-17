@@ -22,6 +22,7 @@
 #include <unordered_set>
 
 #include "scourge/Common/Capability.hpp"
+#include "scourge/Sema/DType.hpp"
 
 namespace scourge {
 namespace bc {
@@ -280,7 +281,7 @@ Value VM::tensorBinOp(Bin op, const Value& l, const Value& r) {
     // 结果元素类型：int∘int → int；真除法 "/" 恒为 float（与标量语义一致）。
     const bool lInt = lt ? ta->isInt : (l.kind != Value::Kind::Float);
     const bool rInt = rt ? tb->isInt : (r.kind != Value::Kind::Float);
-    const bool outInt = op != Bin::Div && lInt && rInt;
+    const bool outInt = dtypeElementwiseIsInt(op == Bin::Div, lInt, rInt);
 
     const TensorData& a = lt ? *ta : *tb; // 张量侧（双侧时取左）
     const Value& sc = lt ? r : l;         // 标量侧（双侧时未用）

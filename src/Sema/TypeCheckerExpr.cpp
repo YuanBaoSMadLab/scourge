@@ -7,6 +7,8 @@
 // ============================================================================
 #include "scourge/Sema/TypeChecker.hpp"
 
+#include "scourge/Common/Builtins.hpp"
+
 #include <cmath>
 #include <functional>
 #include <set>
@@ -124,69 +126,13 @@ TypePtr TypeChecker::checkName(const Expr& e) {
 }
 
 TypePtr TypeChecker::builtinType(const std::string& name) const {
-    // ok/err：错误即值的构造出口（P0 内建，标准库 v1 冻结后归入 result 模块）。
-    if (name == "print" || name == "str" || name == "len" || name == "sum" ||
-        name == "now" || name == "range" || name == "ok" || name == "err" ||
-        // F-20：panic(msg) 可调用终止（语句位恒不返回；与 assert 语句同钩子）
-        name == "panic" ||
-        name == "abs" || name == "sqrt" || name == "exp" || name == "log" ||
-        name == "max" || name == "min" || name == "transpose" ||
-        name == "reshape" ||
-        // v0.9.3 标量数学/随机/排序（与 Compiler/MLIRGen builtinNames 同表）
-        name == "sin" || name == "cos" || name == "tan" || name == "asin" ||
-        name == "acos" || name == "atan" || name == "sinh" || name == "cosh" ||
-        name == "tanh" || name == "atan2" || name == "floor" ||
-        name == "ceil" || name == "round" || name == "trunc" ||
-        name == "random" || name == "seed" || name == "sorted" ||
-        // 0.9.4 IO 子系统：函数式文件/目录/标准输入（与 Compiler/MLIRGen 同表）
-        name == "input" || name == "read_text" || name == "write_text" ||
-        name == "append_text" || name == "exists" || name == "list_dir" ||
-        // 0.9.4 F/G 专项：网络客户端（TCP/UDP/HTTP）与睡眠（同表）
-        name == "net_connect" || name == "net_send" || name == "net_recv" ||
-        name == "net_close" || name == "net_udp_send" ||
-        name == "net_http_get" || name == "net_http_get_json" ||
-        name == "sleep" ||
-        name == "net_bind" || name == "net_accept" ||
-        name == "net_set_timeout" ||
-        // 0.9.8 HTTP 服务端（同表）
-        name == "net_http_read_request" || name == "net_http_write_response" ||
-        // 0.9.4 M 专项：标准库广度（统计/倒序/哈希；同表）
-        name == "mean" || name == "var" || name == "std" ||
-        name == "median" ||
-        name == "reversed" || name == "sha256" || name == "crc32" ||
-        // 0.9.4 M 专项：JSON（动态 Json 值；同表）
-        name == "json_decode" ||
-        // 0.9.4 H 专项：系统编程（args/env/时间/进程/信号；同表）
-        name == "args" || name == "env" || name == "has_env" ||
-        name == "set_env" || name == "unset_env" || name == "epoch" ||
-        name == "epoch_ms" || name == "localtime" || name == "gmtime" ||
-        name == "system" || name == "spawn_wait" || name == "signal_caught" ||
-        name == "signal_reset" ||
-        // 0.9.6 O 节 FFI 宽类型域：数据地址导出（同表）
-        name == "data_ptr" ||
-        // 真并发 M1（thread 域；同表）：spawn 静态校验在 checkBuiltinCall
-        name == "thread_spawn" || name == "thread_join" ||
-        name == "lock_new" || name == "lock_acquire" ||
-        name == "lock_release" || name == "channel_new" ||
-        name == "chan_send" || name == "chan_recv" || name == "chan_close" ||
-        // GUI M1+M2（gui 域；同表）：句柄/事件语义在 checkBuiltinCall
-        name == "gui_window" || name == "gui_close" || name == "gui_poll" ||
-        name == "gui_label" || name == "gui_button" || name == "gui_input" ||
-        name == "gui_set_text" || name == "gui_get_text" ||
-        name == "gui_show" || name == "gui_hide" || name == "gui_title" ||
-        // format()：首参字面量时 Parser 已降糖为 str()+concat 链，能到达
-        // 此处的只有非字面量首参/空实参形态（checkBuiltinCall 定向报错）
-        name == "format" ||
-        // 0.9.9 类型转换/码点（同表）
-        name == "int" || name == "float" || name == "ord" ||
-        name == "chr" ||
-        // fmt()：f-string :spec 降糖目标（同表；checkBuiltinCall 静态校验）
-        name == "fmt") {
-        auto t = std::make_shared<Type>(Type::Kind::Builtin);
-        t->name = name;
-        return t;
-    }
-    return nullptr;
+    // 内建名单一事实源（Common/Builtins.hpp）。format 例外：Parser 已把
+    // 字面量首参降糖为 str()+concat，仅非字面量/空实参形态能到此，
+    // checkBuiltinCall 定向报错。
+    if (!isBuiltinName(name) && name != "format") return nullptr;
+    auto t = std::make_shared<Type>(Type::Kind::Builtin);
+    t->name = name;
+    return t;
 }
 
 /// 元组元素两两可比性（==/!= 语义，与 VM valuesEqual / AOT genTupleEq
@@ -395,6 +341,68 @@ TypePtr TypeChecker::checkListComp(const Expr& e) {
     TypePtr et = checkExpr(*c.elem);
     if (et->kind == Type::Kind::Err) return tyErr();
     return makeType(Type::Kind::List, {et});
+}
+
+// ============================================================================
+// 容器类型精化（空字面量延迟推断）
+// ============================================================================
+// 空 List/Dict 字面量先以 List[Unknown]/Dict[?,?] 占位（不立即报错），
+// 由后续首次写入/实参/返回值提供元素类型；作用域收尾仍为 Unknown 才算
+// 无法推断。精化必须同时改写绑定与初值节点的 exprTypes_ 表项——AOT 按
+// 表项定容器位型，只改一处会与 VM 的动态容器语义分歧。
+
+bool TypeChecker::hasUnknownParam(const TypePtr& t) {
+    if (!t) return false;
+    for (const auto& p : t->params)
+        if (p && (p->kind == Type::Kind::Unknown || hasUnknownParam(p)))
+            return true;
+    return false;
+}
+
+void TypeChecker::refineVar(VarSym& sym, const TypePtr& refined,
+                            const Expr* useNode) {
+    sym.type = refined;
+    if (sym.init) exprTypes_[sym.init] = refined;
+    if (useNode) exprTypes_[useNode] = refined;
+}
+
+void TypeChecker::refineExpr(const Expr* node, const TypePtr& refined) {
+    if (node) exprTypes_[node] = refined;
+}
+
+bool TypeChecker::tryRefineContainer(const TypePtr& actual,
+                                     const TypePtr& target,
+                                     const Expr* node) {
+    if (!actual || !target || actual->kind != target->kind) return false;
+    if (!hasUnknownParam(actual) || !isConvertible(actual, target)) return false;
+    // 实参/返回位置多见 Name 节点：仅改节点表项会让绑定仍是占位型，
+    // 作用域收尾误报「无法推断」，故同步精化绑定本身。
+    VarSym* sym = nullptr;
+    if (node && node->kind == Expr::Kind::Name)
+        sym = scope_.findMutable(static_cast<const Name&>(*node).name);
+    if (sym) refineVar(*sym, target, node);
+    else refineExpr(node, target);
+    return true;
+}
+
+bool TypeChecker::reportUnresolvedContainers() {
+    bool reported = false;
+    if (scope_.backLayer().empty()) return reported;
+    for (auto& [name, sym] : scope_.backLayer()) {
+        if (!sym.type) continue;
+        bool isList = sym.type->kind == Type::Kind::List;
+        bool isDict = sym.type->kind == Type::Kind::Dict;
+        if ((!isList && !isDict) || !hasUnknownParam(sym.type)) continue;
+        std::string hint = isList ? name + ": List[int] = ..."
+                                  : name + ": Dict[str, int] = ...";
+        fail(Errc::E2002_CannotInfer, sym.decl,
+             "无法推断 '" + name + "' 的元素类型；请添加类型注解（如 " + hint +
+                 "）");
+        // 置 Err 抑制级联（后续使用不再逐处重复报未知元素）。
+        sym.type = tyErr();
+        reported = true;
+    }
+    return reported;
 }
 
 } // namespace scourge

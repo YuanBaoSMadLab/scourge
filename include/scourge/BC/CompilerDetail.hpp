@@ -10,6 +10,7 @@
 #pragma once
 
 #include "scourge/BC/Compiler.hpp"
+#include "scourge/Common/Builtins.hpp"
 
 #include <cstdint>
 #include <string>
@@ -21,50 +22,8 @@ namespace bc {
 /// 编译中途放弃（诊断已登记）——用异常退栈，compileModule 捕获后报 false。
 struct CompileAbort {};
 
-inline constexpr const char* builtinNames[] = {
-    "print",     "str",   "len", "sum",       "now",   "range", "ok", "err",
-    // F-20：可调用 panic（与 MLIRGen builtinNames 同表）
-    "panic",
-    "abs",       "sqrt",  "exp", "log",       "max",   "min",
-    "transpose", "reshape", "data_ptr",
-    // v0.9.3 标量数学/随机/排序（与 MLIRGen builtinNames 同表）
-    "sin",  "cos",  "tan",   "asin", "acos", "atan", "sinh", "cosh",
-    "tanh", "atan2", "floor", "ceil", "round", "trunc",
-    "random", "seed", "sorted",
-    // 0.9.4 IO 子系统（与 MLIRGen builtinNames 同表）
-    "input", "read_text", "write_text", "append_text", "exists",
-    "list_dir",
-    // 0.9.4 F/G 专项：网络客户端与睡眠（与 MLIRGen builtinNames 同表）
-    "net_connect", "net_send", "net_recv", "net_close", "net_udp_send",
-    "net_http_get", "net_http_get_json", "sleep",
-    "net_bind", "net_accept", "net_set_timeout",
-    // 0.9.8 HTTP 服务端（与 MLIRGen builtinNames 同表）
-    "net_http_read_request", "net_http_write_response",
-    // 0.9.4 H 专项：系统编程（args/env/时间/进程/信号；同表）
-    "args", "env", "has_env", "set_env", "unset_env", "epoch", "epoch_ms",
-    "localtime", "gmtime", "system", "spawn_wait", "signal_caught",
-    "signal_reset",
-    // 0.9.4 M 专项：标准库广度（统计/倒序/哈希；与 MLIRGen builtinNames 同表）
-    "mean", "var", "std", "median", "reversed", "sha256", "crc32",
-    // 0.9.4 M 专项：JSON（动态 Json 值类型）
-    "json_decode",
-    // 0.9.9 类型转换/码点（与 MLIRGen builtinNames 同表）
-    "int", "float", "ord", "chr",
-    // 真并发 M1（thread 域；与 MLIRGen builtinNames 同表）
-    "thread_spawn", "thread_join", "lock_new", "lock_acquire",
-    "lock_release", "channel_new", "chan_send", "chan_recv", "chan_close",
-    // GUI M1+M2（gui 域；与 MLIRGen builtinNames 同表；VM 侧运行到即 panic）
-    "gui_window", "gui_close", "gui_poll", "gui_label", "gui_button",
-    "gui_input", "gui_set_text", "gui_get_text", "gui_show", "gui_hide",
-    "gui_title",
-    // fmt()：f-string :spec 降糖目标（同表）
-    "fmt"};
-
-inline bool isBuiltinName(const std::string& n) {
-    for (const char* b : builtinNames)
-        if (n == b) return true;
-    return false;
-}
+/// 内建名单一事实源（Common/Builtins.hpp）；isBuiltinName 由其提供。
+inline constexpr auto& builtinNames = kBuiltinNames;
 
 /// 与检查器 checkListLit 同规则：非空且元素全为数值字面量（含一元负号、
 /// 嵌套数值列表）的字面量在类型系统中即张量。编译器按同一判定将其编为

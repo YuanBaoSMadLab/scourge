@@ -144,7 +144,7 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
                 if (at->kind == Type::Kind::Unknown ||
                     at->kind == Type::Kind::Module ||
                     at->kind == Type::Kind::Builtin ||
-                    at->kind == Type::Kind::Function) {
+                    at->kind == Type::Kind::Function || hasUnknownParam(at)) {
                     fail(Errc::E2002_CannotInfer, c.args[i]->range,
                          "无法从实参推断参数 " + std::to_string(i + 1) +
                              " 的类型（得到 " + typeToString(at) +
@@ -164,6 +164,9 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
                 fail(Errc::E2001_TypeMismatch, c.args[i]->range,
                      "实参类型不匹配：参数 " + std::to_string(i + 1) + " 期望 " +
                          typeToString(pt) + "，实际 " + typeToString(at));
+            } else {
+                // 空容器占位按形参类型定型（AOT 按实参节点定容器位型）。
+                tryRefineContainer(at, pt, c.args[i].get());
             }
             continue;
         }
@@ -175,6 +178,36 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
                  "实参类型不匹配：参数 " + std::to_string(i + 1) + " 期望 " +
                      typeToString(callee->params[i]) + "，实际 " +
                      typeToString(at));
+        } else {
+            tryRefineContainer(at, callee->params[i], c.args[i].get());
+        }
+    }
+    // 空列表 append 首插定型：接收者 List[Unknown] 按实参元素类型精化。
+    // 与下标写/实参精化同源——后端按节点的容器位型发射，占位不定型则
+    // VM 可跑而 AOT 无元素槽可分派。
+    if (c.callee->kind == Expr::Kind::Attr && c.args.size() == 1) {
+        auto& at = static_cast<const Attr&>(*c.callee);
+        if (at.name == "append") {
+            auto stIt = exprTypes_.find(at.base.get());
+            auto argIt = exprTypes_.find(c.args[0].get());
+            if (stIt != exprTypes_.end() && argIt != exprTypes_.end() &&
+                stIt->second && stIt->second->kind == Type::Kind::List &&
+                stIt->second->params.size() == 1 &&
+                stIt->second->params[0]->kind == Type::Kind::Unknown) {
+                Type::Kind k = argIt->second->kind;
+                if (k == Type::Kind::Int || k == Type::Kind::Float ||
+                    k == Type::Kind::Bool || k == Type::Kind::Str ||
+                    k == Type::Kind::Tuple) {
+                    TypePtr refined = makeType(Type::Kind::List, {argIt->second});
+                    VarSym* sym = nullptr;
+                    if (at.base->kind == Expr::Kind::Name) {
+                        sym = scope_.findMutable(
+                            static_cast<const Name&>(*at.base).name);
+                    }
+                    if (sym) refineVar(*sym, refined, at.base.get());
+                    else refineExpr(at.base.get(), refined);
+                }
+            }
         }
     }
     if (generic) {

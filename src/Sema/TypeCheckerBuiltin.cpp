@@ -85,6 +85,7 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
     if (inPureFn_) {
         static const std::unordered_set<std::string> kPureBuiltins = {
             "str",   "len",  "sum",      "range", "ok",     "err",
+            "some",  "none",
             "abs",   "sqrt", "exp",      "log",   "max",    "min",
             "transpose", "reshape",
             "sin",   "cos",  "tan",      "asin",  "acos",   "atan",
@@ -267,6 +268,24 @@ TypePtr TypeChecker::checkBuiltinCall(const std::string& bn, const Call& c) {
         }
         // OK 类型为 Unknown 通配，由赋值目标注解特化。
         return makeType(Type::Kind::Result, {tyUnknown(), tyStr()});
+    }
+    // Option 显式构造（0.9.9）：some(x) ≡ ok(x)，none() ≡ 空选项（None
+    // 字面量同值）。嵌套 Option 无表示，与 resolveTypeExpr 同规拒绝。
+    if (bn == "some") {
+        if (c.args.size() != 1)
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "some() 恰好需要 1 个参数");
+        TypePtr t = checkExpr(*c.args[0]);
+        if (t->kind == Type::Kind::Option)
+            return fail(Errc::E2001_TypeMismatch, c.args[0]->range,
+                        "Option 不支持嵌套（Option[Option[T]]）；载荷直接用 T");
+        return makeType(Type::Kind::Option, {t});
+    }
+    if (bn == "none") {
+        if (!c.args.empty())
+            return fail(Errc::E2001_TypeMismatch, e.range,
+                        "none() 不需要参数");
+        return tyNone();
     }
     // F-20：panic(msg) 可调用终止——与 assert 语句同走 lang.panic 单一钩子
     //（sg_panic，try/except 可捕，消息双模逐字一致）。恒不返回，语句位

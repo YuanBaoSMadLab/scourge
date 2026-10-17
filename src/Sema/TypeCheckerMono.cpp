@@ -9,6 +9,7 @@
 //  其余阶段见同目录 TypeChecker*.cpp（拆分纪律见 AGENTS.md）。
 // ============================================================================
 #include "scourge/Sema/TypeChecker.hpp"
+#include "scourge/Sema/TypeRegistry.hpp"
 
 namespace scourge {
 
@@ -16,36 +17,10 @@ namespace scourge {
 // 实例键：类型 → 类型码
 // ============================================================================
 
-// 前缀式注入编码：标量单字母，复合类型 = 前缀 + 子类型码递归拼接。
-// 固定前缀 + 固定元数保证不同类型不撞码；键只做实例查重比对，永不解析。
+// 前缀式注入编码，语义见 TypeRegistry（单一事实源）：标量单字母，复合
+// 类型 = 前缀 + 子类型码递归拼接。键只做实例查重比对，永不解析。
 std::string TypeChecker::mangleType(const TypePtr& t) {
-    if (!t) return "?";
-    switch (t->kind) {
-    case Type::Kind::Int: return "i";
-    case Type::Kind::Float: return "f";
-    case Type::Kind::Bool: return "b";
-    case Type::Kind::Str: return "s";
-    case Type::Kind::Bytes: return "y";
-    case Type::Kind::None: return "n";
-    case Type::Kind::Json: return "j";
-    case Type::Kind::Range: return "r";
-    case Type::Kind::List: return "L" + mangleType(t->params[0]);
-    case Type::Kind::Set: return "S" + mangleType(t->params[0]);
-    case Type::Kind::Dict:
-        return "D" + mangleType(t->params[0]) + mangleType(t->params[1]);
-    case Type::Kind::Result:
-        return "R" + mangleType(t->params[0]) + mangleType(t->params[1]);
-    case Type::Kind::Option: return "O" + mangleType(t->params[0]);
-    case Type::Kind::Tensor: {
-        std::string out = "X";
-        out += t->params.empty() ? std::string("?") : mangleType(t->params[0]);
-        for (int64_t d : t->shape) out += "x" + std::to_string(d);
-        return out;
-    }
-    default:
-        // Unknown/Err/Module/Builtin/Function 不应到达（调用点已拒绝）。
-        return "?";
-    }
+    return mangleTypeKey(t);
 }
 
 // ============================================================================
@@ -114,7 +89,10 @@ std::unique_ptr<Expr> cloneExpr(const Expr& e) {
         auto& x = static_cast<const Index&>(e);
         std::vector<ExprPtr> idx;
         idx.reserve(x.indices.size());
-        for (const auto& a : x.indices) idx.push_back(cloneExpr(*a));
+        // 单边切片（s[a:] / s[:b]）的缺省端 indices 槽位为 nullptr，
+        // 与 ListComp.cond 同判空契约——否则实例克隆解引用空指针。
+        for (const auto& a : x.indices)
+            idx.push_back(a ? cloneExpr(*a) : nullptr);
         auto out = std::make_unique<Index>(x.range, cloneExpr(*x.base),
                                            std::move(idx));
         out->isSlice = x.isSlice;

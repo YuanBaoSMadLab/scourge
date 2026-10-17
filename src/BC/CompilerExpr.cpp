@@ -148,6 +148,7 @@ void Compiler::compileExpr(const Expr& e) {
             // 按 self.kind 分派；名称映射须与 Sema checkAttr 签名表一致）。
             Method m;
             if (at.name == "is_ok" || at.name == "is_some") m = Method::IsOk;
+            else if (at.name == "is_err" || at.name == "is_none") m = Method::IsErr;
             else if (at.name == "unwrap") m = Method::Unwrap;
             else if (at.name == "unwrap_or") m = Method::UnwrapOr;
             else if (at.name == "upper") m = Method::StrUpper;

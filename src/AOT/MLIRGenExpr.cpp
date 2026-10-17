@@ -834,8 +834,9 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
             emit(ssa + " = \"lang.tensor_binop_tt\"(" + i32Const(tOp) + ", " +
                  l.ssa + ", " + r.ssa + ")" + attrs +
                  " : (i32, !llvm.ptr, !llvm.ptr) -> !llvm.ptr " + opLoc());
-            // outInt = 非 '/' 且两侧 int（VM tensorBinOp 规则）；形状相等秩不变
-            return Value{VK::Tensor, ssa, tOp != 3 && l.tInt && r.tInt,
+            // 结果 dtype 规则与 VM tensorBinOp 共用 DType 表；形状相等秩不变
+            return Value{VK::Tensor, ssa,
+                         dtypeElementwiseIsInt(tOp == 3, l.tInt, r.tInt),
                          l.tRank};
         }
         Value sc = l.vk == VK::Tensor ? r : l;
@@ -887,7 +888,9 @@ Value Gen::genBinary(const std::string& op, Value l, Value r,
                  si + ", " + vi + ", " + vf + ", " + t.ssa + ")" + attrs +
                  " : (i32, i32, i64, f64, !llvm.ptr) -> !llvm.ptr " + opLoc());
         }
-        return Value{VK::Tensor, ssa, tOp != 3 && t.tInt && sc.vk != VK::Float,
+        return Value{VK::Tensor, ssa,
+                     dtypeElementwiseIsInt(tOp == 3, t.tInt,
+                                           sc.vk != VK::Float),
                      t.tRank};
     }
 

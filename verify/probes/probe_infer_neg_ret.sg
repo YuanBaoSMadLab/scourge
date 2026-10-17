@@ -1,0 +1,7 @@
+# 空容器推断负例：无注解返回空列表 → 返回类型不可知。
+def f():
+    return []
+
+def main() -> int:
+    print(f())
+    return 0

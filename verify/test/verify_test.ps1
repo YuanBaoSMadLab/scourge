@@ -1,4 +1,4 @@
-# Test framework verification (scourge test, Task: property tests + .sgt runner).
+# Test framework verification (sg test, Task: property tests + .sgt runner).
 # ASCII-only script (PS 5.1 safety); probe sources copied from verify\test.
 # mathlib probes are INTENTIONALLY imperfect (they prove the oracle works):
 #   explicit:  test_add_basic pass, test_add_wrong fail, test_oob_panic panic
@@ -10,7 +10,34 @@ $root = 'd:\Scourge\build-rel\verify\test'
 $srcDir = 'd:\Scourge\verify\test'
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-$scourge = 'd:\Scourge\build-rel\scourge.exe'
+# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = $null
+try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
+if (-not $repoRoot) {
+    # Walk up to find CMakeLists.txt as fallback
+    $p = $here
+    while ($p -and -not (Test-Path (Join-Path $p 'CMakeLists.txt'))) {
+        $parent = Split-Path $p -Parent
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    $repoRoot = $p
+}
+$exe = $null
+$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cmd) {
+    # Sanity check: ensure it's Scourge, not ast-grep or some other tool
+    $sgOutArr = & $cmd.Source --help 2>&1
+    $sgHelp = ($sgOutArr -join "`n")
+    $sgExit = $LASTEXITCODE
+    if ($sgExit -eq 0 -and $sgHelp -match 'scourge') {
+        $exe = $cmd.Source
+    }
+}
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+# -------------------------------------------------------------------------------------
 $utf8nb = New-Object System.Text.UTF8Encoding($false)
 
 Copy-Item (Join-Path $srcDir 'mathlib.sg') $root
@@ -37,7 +64,7 @@ function Run-Test([string[]]$testArgs, [string]$tag) {
     if (Test-Path $outF) { Remove-Item -Force $outF }
     if (Test-Path $errF) { Remove-Item -Force $errF }
     $all = @('test') + $testArgs
-    $p = Start-Process -FilePath $scourge -ArgumentList $all -RedirectStandardOutput $outF -RedirectStandardError $errF -Wait -PassThru -NoNewWindow
+    $p = Start-Process -FilePath $exe -ArgumentList $all -RedirectStandardOutput $outF -RedirectStandardError $errF -Wait -PassThru -NoNewWindow
     return @{
         Exit = $p.ExitCode
         Out = [System.IO.File]::ReadAllText($outF, [System.Text.Encoding]::UTF8)

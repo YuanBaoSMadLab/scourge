@@ -7,6 +7,8 @@
 // ============================================================================
 #include "scourge/Sema/TypeChecker.hpp"
 
+#include "scourge/Sema/TypeRegistry.hpp"
+
 #include <cmath>
 #include <functional>
 #include <set>
@@ -15,7 +17,11 @@ namespace scourge {
 
 TypePtr TypeChecker::checkListLit(const Expr& e) {
     auto& ll = static_cast<const ListLit&>(e);
-    if (ll.elems.empty()) return tyUnknown(); // 赋值上下文报 E2002
+    // 空列表：Tensor 上下文沿用 Unknown（注解对齐交给赋值层）；否则以
+    // List[Unknown] 占位，由首次写入/实参/返回值精化元素类型。
+    if (ll.elems.empty())
+        return asTensorLit_ == &e ? tyUnknown()
+                                  : makeType(Type::Kind::List, {tyUnknown()});
 
     // 递归推断：数值/张量嵌套 → 张量字面量；其余 → List[T]。
     // 嵌套行是内层 ListLit——A 案默认已翻转为 List，若不干预外层将收不到
@@ -110,7 +116,16 @@ TypePtr TypeChecker::checkDictLit(const Expr& e) {
             dl.checkedAsSet = true;
             return makeType(Type::Kind::Set, {setTarget_->params[0]});
         }
-        return tyUnknown(); // 空字典 {}：类型由注解推断
+        // 空 {} 在 Dict[K,V] 上下文同理返回新建 Dict 类型：字面量节点必须
+        // 登记真实 Dict 类型——AOT genDictLit 以节点类型定槽位 tag，若落
+        // tyUnknown 则 ktag 误判 i64，str 键哈希退化为指针比较（跨对象
+        // 查键全灭，VM/AOT 双模不一致）。
+        if (dictTarget_ && dictTarget_->params.size() >= 2)
+            return makeType(Type::Kind::Dict,
+                            {dictTarget_->params[0], dictTarget_->params[1]});
+        // 无注解上下文：Dict[Unknown,Unknown] 占位，由后续写入/实参/
+        // 返回值精化键值类型（收尾仍未知则报 E2002）。
+        return makeType(Type::Kind::Dict, {tyUnknown(), tyUnknown()});
     }
 
     std::vector<TypePtr> ks, vs;
@@ -384,11 +399,12 @@ TypePtr TypeChecker::checkAttr(const Expr& e) {
 
     // Result 消费方法（错误即值的显式出口）。
     if (base->kind == Type::Kind::Result) {
-        if (at.name == "is_ok") return makeFunction({}, tyBool());
+        if (at.name == "is_ok" || at.name == "is_err")
+            return makeFunction({}, tyBool());
         if (at.name == "unwrap" || at.name == "unwrap_or")
             return makeFunction({base->params[0]}, base->params[0]);
         return fail(Errc::E2003_UnknownName, e.range,
-                    "Result 只有 is_ok / unwrap / unwrap_or 三个成员，无 '" +
+                    "Result 只有 is_ok / is_err / unwrap / unwrap_or 四个成员，无 '" +
                         at.name + "'");
     }
 
@@ -396,11 +412,12 @@ TypePtr TypeChecker::checkAttr(const Expr& e) {
     // Result[T,None]），执行侧映射同一 Method / lang.result_* 通道，
     // 方法名 is_some 区分语义面。
     if (base->kind == Type::Kind::Option) {
-        if (at.name == "is_some") return makeFunction({}, tyBool());
+        if (at.name == "is_some" || at.name == "is_none")
+            return makeFunction({}, tyBool());
         if (at.name == "unwrap" || at.name == "unwrap_or")
             return makeFunction({base->params[0]}, base->params[0]);
         return fail(Errc::E2003_UnknownName, e.range,
-                    "Option 只有 is_some / unwrap / unwrap_or 三个成员，无 "
+                    "Option 只有 is_some / is_none / unwrap / unwrap_or 四个成员，无 "
                         "'" + at.name + "'");
     }
 
@@ -446,9 +463,10 @@ TypePtr TypeChecker::checkAttr(const Expr& e) {
         // 批 9 F-21 增 Tuple（句柄 ptrtoint 存 i64 槽，items() 同先例）。
         if (at.name == "append") {
             Type::Kind k = elem->kind;
+            // Unknown：空列表占位，元素类型由本次调用精化（checkCall）。
             if (k == Type::Kind::Str || k == Type::Kind::Int ||
                 k == Type::Kind::Float || k == Type::Kind::Bool ||
-                k == Type::Kind::Tuple)
+                k == Type::Kind::Tuple || k == Type::Kind::Unknown)
                 return makeFunction({elem}, tyNone());
         }
     }
@@ -482,11 +500,10 @@ TypePtr TypeChecker::checkAttr(const Expr& e) {
     // 双模同拒，与 print 容器值字典同防御哲学）。
     if (base->kind == Type::Kind::Dict && base->params.size() >= 2) {
         TypePtr kt = base->params[0], vt = base->params[1];
-        auto scalar = [](const TypePtr& t) {
-            return t->kind == Type::Kind::Int || t->kind == Type::Kind::Float ||
-                   t->kind == Type::Kind::Bool || t->kind == Type::Kind::Str;
-        };
-        if (scalar(kt) && scalar(vt)) {
+        // 空字典占位：键类型未定时只放行 contains（不返回依赖 V 的视图）。
+        if (kt->kind == Type::Kind::Unknown && at.name == "contains")
+            return makeFunction({tyUnknown()}, tyBool());
+        if (isScalarType(kt) && isScalarType(vt)) {
             if (at.name == "keys")
                 return makeFunction({}, makeType(Type::Kind::List, {kt}));
             if (at.name == "values")
@@ -496,6 +513,7 @@ TypePtr TypeChecker::checkAttr(const Expr& e) {
                     {},
                     makeType(Type::Kind::List,
                              {makeType(Type::Kind::Tuple, {kt, vt})}));
+            if (at.name == "contains") return makeFunction({kt}, tyBool());
             if (at.name == "get") return makeFunction({kt, vt}, vt);
         }
     }
@@ -503,12 +521,10 @@ TypePtr TypeChecker::checkAttr(const Expr& e) {
     // Set 成员方法（0.9.9）：add 原地插入（NaN panic 消息与构造同款）。
     if (base->kind == Type::Kind::Set && !base->params.empty()) {
         TypePtr et = base->params[0];
-        bool scalar = et->kind == Type::Kind::Int ||
-                      et->kind == Type::Kind::Float ||
-                      et->kind == Type::Kind::Bool ||
-                      et->kind == Type::Kind::Str;
-        if (at.name == "add" && scalar)
-            return makeFunction({et}, tyNone());
+        if (isScalarType(et)) {
+            if (at.name == "add") return makeFunction({et}, tyNone());
+            if (at.name == "contains") return makeFunction({et}, tyBool());
+        }
     }
 
     // 模块成员访问：foo.func / foo.CONST / 包路径中间段 a.b（0.9.6）。

@@ -70,8 +70,8 @@ void Gen::precollectGlobals() {
                 if (vk == VK::Result && gt2 && !gt2->params.empty())
                     g.lElem = static_cast<uint8_t>(vkOfType(gt2->params[0]));
                 if (vk == VK::Tensor && gt2 && gt2->kind == Type::Kind::Tensor) {
-                    if (!gt2->params.empty())
-                        g.tInt = gt2->params[0]->kind != Type::Kind::Float;
+                    g.tInt = dtypeIsInt(gt2->params.empty() ? nullptr
+                                                           : gt2->params[0]);
                     g.tRank = static_cast<uint8_t>(gt2->shape.size());
                 }
                 gm.emplace(n.name, g);
@@ -236,8 +236,8 @@ void Gen::genFunction(const Module& m, const FuncDef& f) {
         auto it = locals_.find(f.params[k].name);
         const TypePtr& pt = sig->second.params[k];
         if (it != locals_.end() && pt && pt->kind == Type::Kind::Tensor) {
-            if (!pt->params.empty())
-                it->second.tInt = pt->params[0]->kind != Type::Kind::Float;
+            it->second.tInt =
+                dtypeIsInt(pt->params.empty() ? nullptr : pt->params[0]);
             it->second.tRank = static_cast<uint8_t>(pt->shape.size());
         }
     }

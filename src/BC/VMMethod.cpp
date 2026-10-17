@@ -222,7 +222,17 @@ void VM::callValueMethod(Method m, const Value& self,
             push(Value::makeBool(false));
             return;
         }
-        panicHere("contains() 只能用于 str 或列表");
+        if (self.kind == Value::Kind::Dict && self.dict) {
+            if (args.size() != 1) panicHere("contains() 恰好需要 1 个参数");
+            push(Value::makeBool(self.dict->find(args[0]) != DictData::kEmpty));
+            return;
+        }
+        if (self.kind == Value::Kind::Set && self.set) {
+            if (args.size() != 1) panicHere("contains() 恰好需要 1 个参数");
+            push(Value::makeBool(self.set->find(args[0]) != SetData::kEmpty));
+            return;
+        }
+        panicHere("contains() 只能用于 str、列表、字典或集合");
     }
     case Method::Index: {
         if (self.kind == Value::Kind::Str) {

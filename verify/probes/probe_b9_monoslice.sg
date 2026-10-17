@@ -1,0 +1,15 @@
+# probe_b9_monoslice: 隐式单态化实例内的单边切片（回归：cloneExpr 判空）。
+# 单边切片 s[:p] / s[p+1:] 的 Index.indices 槽位为 nullptr，实例深克隆
+# 曾因无条件 cloneExpr(*a) 解引用崩溃；双模应一致输出 13 与 4 两行。
+def slicer(parts) -> int:
+    acc = 0
+    for s in parts:
+        p = s.find("|")
+        acc = acc + len(s[:p]) + len(s[p + 1:])
+    return acc
+
+def main() -> int:
+    ks: List[str] = ["000125|main.sg", "000118|readme.md"]
+    print(slicer(ks))
+    print(slicer(["abc|d"]))
+    return 0

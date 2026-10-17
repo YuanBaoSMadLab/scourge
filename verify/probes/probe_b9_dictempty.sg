@@ -1,0 +1,12 @@
+# probe_b9_dictempty: 空字典字面量 + 运行期构造 str 键查键（回归：ktag）。
+# d: Dict[str,int] = {} 的空 {} 曾落 tyUnknown → AOT ktag=0（i64 槽），
+# 跨对象（非同指针）str 键查不到；VM/AOT 应一致输出 1/1/7 三行。
+def main() -> int:
+    d: Dict[str, int] = {}
+    d["k"] = 1
+    s = "k" + ""
+    print(d.get(s, -1))
+    print(d[s])
+    d[s] = d[s] + 6
+    print(d[s])
+    return 0

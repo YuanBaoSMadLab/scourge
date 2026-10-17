@@ -292,7 +292,7 @@ void Gen::genAssign(const Assign& a) {
             Slot slot = allocSlot(VK::Tensor);
             if (!a.ann->params.empty() &&
                 a.ann->params[0]->kind == TypeExpr::Kind::Named)
-                slot.tInt = a.ann->params[0]->name != "float";
+                slot.tInt = dtypeIsIntByName(a.ann->params[0]->name);
             slot.tRank = static_cast<uint8_t>(a.ann->shape.size());
             lt = locals_.emplace(n.name, slot).first;
             storeTo(lt->second, v);

@@ -10,6 +10,8 @@
 //  见同目录 TypeChecker*.cpp（拆分纪律见 AGENTS.md）。
 // ============================================================================
 #include "scourge/Sema/TypeChecker.hpp"
+#include "scourge/Sema/DType.hpp"
+#include "scourge/Sema/TypeRegistry.hpp"
 
 #include <cmath>
 #include <functional>
@@ -155,6 +157,12 @@ std::string TypeChecker::renderContractExpr(const Expr* e) {
 TypePtr TypeChecker::resolveTypeExpr(const TypeExpr& te) {
     if (te.kind == TypeExpr::Kind::Tensor) {
         TypePtr elem = resolveTypeExpr(*te.params[0]);
+        // dtype 白名单由 DType 表给出；放行非法元素会让 AOT 按 int 位型
+        // 生成存储、VM 按 float 读写，双模静默错位。
+        if (elem && elem->kind != Type::Kind::Err && !isDType(elem))
+            return fail(Errc::E2001_TypeMismatch, te.params[0]->range,
+                        "Tensor 元素类型仅支持 int/float，实际为 " +
+                            typeToString(elem));
         std::vector<int64_t> shape;
         for (const auto& d : te.shape)
             shape.push_back(d.isDynamic ? kDyn : d.value);
@@ -176,62 +184,30 @@ TypePtr TypeChecker::resolveTypeExpr(const TypeExpr& te) {
     }
 
     const std::string& n = te.name;
-    auto noParams = [&](TypePtr t) -> TypePtr {
-        if (!te.params.empty()) {
+    const TypeInfo* info = typeInfoByName(n);
+    if (!info || !info->annotatable)
+        return fail(Errc::E2008_UnknownType, te.range, "未知的类型名 '" + n + "'");
+
+    if (info->arity == 0) {
+        if (!te.params.empty())
             return fail(Errc::E2001_TypeMismatch, te.range,
                         n + " 不接受泛型参数");
-        }
-        return t;
-    };
-    if (n == "int") return noParams(tyInt());
-    if (n == "float") return noParams(tyFloat());
-    if (n == "bool") return noParams(tyBool());
-    if (n == "str") return noParams(tyStr());
-    if (n == "bytes") return noParams(makeType(Type::Kind::Bytes));
-    if (n == "None") return noParams(tyNone());
-    if (n == "Json") return noParams(makeType(Type::Kind::Json));
+        return makeType(info->kind);
+    }
+    if (static_cast<int8_t>(te.params.size()) != info->arity)
+        return fail(Errc::E2001_TypeMismatch, te.range,
+                    n + " 需要恰好 " + std::to_string(info->arity) + " 个" +
+                        info->arityHint);
 
-    if (n == "List") {
-        if (te.params.size() != 1)
-            return fail(Errc::E2001_TypeMismatch, te.range,
-                        "List 需要恰好 1 个元素类型参数");
-        return makeType(Type::Kind::List, {resolveTypeExpr(*te.params[0])});
-    }
-    if (n == "Dict") {
-        if (te.params.size() != 2)
-            return fail(Errc::E2001_TypeMismatch, te.range,
-                        "Dict 需要恰好 2 个类型参数（键, 值）");
-        return makeType(Type::Kind::Dict, {resolveTypeExpr(*te.params[0]),
-                                           resolveTypeExpr(*te.params[1])});
-    }
-    if (n == "Set") {
-        if (te.params.size() != 1)
-            return fail(Errc::E2001_TypeMismatch, te.range,
-                        "Set 需要恰好 1 个元素类型参数");
-        return makeType(Type::Kind::Set, {resolveTypeExpr(*te.params[0])});
-    }
-    if (n == "Result") {
-        if (te.params.size() != 2)
-            return fail(Errc::E2001_TypeMismatch, te.range,
-                        "Result 需要恰好 2 个类型参数（成功, 失败）");
-        return makeType(Type::Kind::Result, {resolveTypeExpr(*te.params[0]),
-                                             resolveTypeExpr(*te.params[1])});
-    }
-    if (n == "Option") {
-        if (te.params.size() != 1)
-            return fail(Errc::E2001_TypeMismatch, te.range,
-                        "Option 需要恰好 1 个类型参数");
-        TypePtr p = resolveTypeExpr(*te.params[0]);
-        // 嵌套拒绝（0.9.9 批3）：None 态与 Some(内层 Option) 形态无法
-        // 区分，语义歧义——载荷直接用 T（外层 Option 已可表三层状态）。
-        if (p->kind == Type::Kind::Option)
-            return fail(Errc::E2001_TypeMismatch, te.range,
-                        "Option 不支持嵌套（Option[Option[T]]）；载荷直接"
-                        "用 T");
-        return makeType(Type::Kind::Option, {p});
-    }
-
-    return fail(Errc::E2008_UnknownType, te.range, "未知的类型名 '" + n + "'");
+    std::vector<TypePtr> ps;
+    ps.reserve(te.params.size());
+    for (const auto& p : te.params) ps.push_back(resolveTypeExpr(*p));
+    // 嵌套拒绝（0.9.9 批3）：None 态与 Some(内层 Option) 形态无法区分，
+    // 语义歧义——载荷直接用 T（外层 Option 已可表三层状态）。
+    if (info->kind == Type::Kind::Option && ps[0]->kind == Type::Kind::Option)
+        return fail(Errc::E2001_TypeMismatch, te.range,
+                    "Option 不支持嵌套（Option[Option[T]]）；载荷直接用 T");
+    return makeType(info->kind, std::move(ps));
 }
 
 // ============================================================================

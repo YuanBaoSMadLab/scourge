@@ -271,6 +271,7 @@ enum class Method : uint8_t {
     Slice2,     ///< s[a:b] 切片（0.9.9）：4 参 [start,end,hasA,hasB] 全 int，
                 ///< VM 按 self.kind 分派 str 字节切片 / List 浅拷贝切片；
                 ///< 边界归一公式与 AOT sg_normslice 逐字一致（尾部追加兼容）。
+    IsErr,      ///< is_err（Result）/ is_none（Option）：IsOk 三形态取反。
 };
 
 struct Instr {

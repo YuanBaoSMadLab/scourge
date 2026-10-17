@@ -203,7 +203,9 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                             f.params[k].range,
                             "@extern 参数类型仅支持 int/float/bool/str");
                 }
-                if (sig.ret && !scalarOk(sig.ret->kind) &&
+                // f.retType 可能为空（缺失注解已在上面报 E2002），
+                // 此时 sig.ret 为 Unknown，不能解引用 f.retType->range。
+                if (f.retType && !scalarOk(sig.ret->kind) &&
                     sig.ret->kind != Type::Kind::None)
                     diag_.error(Errc::E1007_UnsupportedFeature, file_,
                                 f.retType->range,
@@ -423,6 +425,9 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
             TypePtr declared;
             if (a.ann) {
                 declared = resolveTypeExpr(*a.ann);
+                // 空容器占位按注解定型（AOT 按字面量节点类型定容器位型）。
+                if (hasUnknownParam(vt) && vt->kind == declared->kind)
+                    exprTypes_[a.value.get()] = declared;
                 if (vt->kind == Type::Kind::Int &&
                     declared->kind == Type::Kind::Float)
                     promoteF64_.insert(a.value.get()); // Q3 边界提升
@@ -455,7 +460,8 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                     declared = vt;
                 }
             }
-            if (!scope_.declare(n.name, VarSym{declared, s.range})) {
+            if (!scope_.declare(n.name,
+                                VarSym{declared, s.range, a.value.get()})) {
                 diag_.error(Errc::E2007_DuplicateDefinition, file_, n.range,
                             "顶层名 '" + n.name + "' 重复定义");
             }

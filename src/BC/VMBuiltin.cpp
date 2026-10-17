@@ -10,6 +10,8 @@
 #include "scourge/BC/VM.hpp"
 #include "scourge/BC/VMDetail.hpp"
 
+#include "scourge/Sema/DType.hpp"
+
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -444,9 +446,14 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
         push(Value::makeRange(a[0].i));
         return;
     }
-    if (n == "ok") {
+    if (n == "ok" || n == "some") {
         need(1);
         push(Value::makeResult(a[0], true));
+        return;
+    }
+    if (n == "none") {
+        need(0);
+        push(Value::makeNone());
         return;
     }
     if (n == "err") {
@@ -486,7 +493,7 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
         }
         if (v.kind == Value::Kind::Tensor && v.tensor) {
             const TensorData& t = *v.tensor;
-            const bool outInt = keepInt && t.isInt;
+            const bool outInt = dtypeUnaryIsInt(keepInt, t.isInt);
             auto td = std::make_shared<TensorData>();
             td->isInt = outInt;
             td->shape = t.shape;

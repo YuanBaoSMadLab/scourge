@@ -153,6 +153,16 @@ void VM::dispatch(Instr in) {
             else
                 push(Value::makeBool(true));
             return;
+        case Method::IsErr:
+            // 与 IsOk 同三形态取反：Result 取 !ok；None 即空选项；裸标量
+            // 即自动包装的 Some。
+            if (self.kind == Value::Kind::Result)
+                push(Value::makeBool(!self.isOk));
+            else if (self.kind == Value::Kind::None)
+                push(Value::makeBool(true));
+            else
+                push(Value::makeBool(false));
+            return;
         case Method::Unwrap:
         case Method::UnwrapOr:
             // 检查器 P0 语义：unwrap(缺省)/unwrap_or(缺省) 同形——必须携带

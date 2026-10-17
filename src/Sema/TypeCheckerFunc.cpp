@@ -43,6 +43,14 @@ ModuleSymbols TypeChecker::check(Module& m) {
     for (auto& d : monoDefs_) m.body.push_back(std::move(d));
     monoDefs_.clear();
 
+    // 模块级容器占位收尾：未定型的空 List/Dict 报 E2002；精化后的类型
+    // 同步进导出表（AOT 全局槽位按 out.globals 定容器位型）。
+    reportUnresolvedContainers();
+    for (const auto& [name, sym] : scope_.backLayer()) {
+        auto g = out.globals.find(name);
+        if (g != out.globals.end() && sym.type) g->second = sym.type;
+    }
+
     // 能力静态门禁（0.9.7）：使用集 ⊄ 声明集 → 每个未声明域一条 E5004，
     // 定位首个使用点。此处是双模共用的主门禁；VM/AOT 的运行时查位只是
     // 纵深防御（正常程序到不了）。
@@ -107,6 +115,10 @@ void TypeChecker::checkFunctionBody(FuncDef& f, FuncSig& sig,
 
     checkStmtList(f.body);
 
+    // 容器占位收尾：仍未定型的空 List/Dict 在此报 E2002（后续 return
+    // 推断据 reported 避免对同一根因重复诊断）。
+    const bool unresolvedReported = reportUnresolvedContainers();
+
     // 返回类型推断（Q10）：统一全部 return 的值类型并回填签名。
     // 递归自引用（Unknown）跳过；数值混返回取宽化（int+float → float，
     // 与 isConvertible 的唯一隐式转换方向一致）；不一致即 E2006。
@@ -134,6 +146,14 @@ void TypeChecker::checkFunctionBody(FuncDef& f, FuncSig& sig,
                             typeToString(vt));
             inferred = tyErr();
             break;
+        }
+        // 空容器占位返回值（return []）无法定型：要求显式注解返回类型。
+        if (!conflict && hasUnknownParam(inferred)) {
+            if (!unresolvedReported)
+                diag_.error(Errc::E2002_CannotInfer, file_, f.nameRange,
+                            "无法推断函数 '" + f.name + "' 的返回类型（返回空容器）；"
+                            "请显式注解返回类型（如 -> List[int]）");
+            inferred = tyErr();
         }
         if (!conflict) {
             sig.ret = inferred;

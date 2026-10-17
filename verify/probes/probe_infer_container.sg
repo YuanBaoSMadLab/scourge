@@ -1,0 +1,50 @@
+# 空容器延迟推断探针：空 List/Dict 由首次写入、append、实参、返回值定型。
+# 双模（VM / AOT）输出必须逐字节一致。
+def takeInts(xs: List[int]) -> int:
+    return len(xs)
+
+def makeList() -> List[int]:
+    return []
+
+def main() -> int:
+    # 1) append 定型
+    a = []
+    a.append(1)
+    a.append(2)
+    print(a)
+
+    # 2) 下标写定型（空列表不能越界写，先 append 占位）
+    b = []
+    b.append(1.0)
+    b[0] = 3.5
+    print(b)
+
+    # 3) 空字典键值定型
+    d = {}
+    d["k"] = 7
+    print(d["k"])
+    print(d)
+
+    # 4) 重赋值定型
+    c = []
+    c = [1, 2, 3]
+    print(c)
+
+    # 5) 实参定型
+    e = []
+    print(takeInts(e))
+
+    # 6) 返回值定型
+    print(makeList())
+
+    # 7) 字符串列表
+    s = []
+    s.append("hi")
+    print(s)
+
+    # 8) 布尔列表
+    t = []
+    t.append(True)
+    print(t)
+
+    return 0

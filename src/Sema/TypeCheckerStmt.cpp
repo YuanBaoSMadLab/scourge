@@ -127,9 +127,13 @@ void TypeChecker::checkStmt(const Stmt& s) {
 
         if (a.target->kind == Expr::Kind::Name) {
             auto& n = static_cast<const Name&>(*a.target);
-            const VarSym* existing = scope_.find(n.name);
+            VarSym* existing = scope_.findMutable(n.name);
             if (a.ann) {
                 TypePtr declared = resolveTypeExpr(*a.ann);
+                // 空容器占位：字面量节点按注解定型（AOT 按节点类型定容器
+                // 位型，占位 List[Unknown] 会漏掉元素槽语义）。
+                if (hasUnknownParam(vt) && vt->kind == declared->kind)
+                    exprTypes_[a.value.get()] = declared;
                 if (vt->kind == Type::Kind::Int &&
                     declared->kind == Type::Kind::Float)
                     promoteF64_.insert(a.value.get()); // Q3 边界提升
@@ -159,7 +163,14 @@ void TypeChecker::checkStmt(const Stmt& s) {
                                     "，与注解 " + typeToString(declared) +
                                     " 不一致");
                 }
-                if (!existing) scope_.declare(n.name, VarSym{declared, s.range});
+                if (!existing) {
+                    scope_.declare(
+                        n.name, VarSym{declared, s.range, a.value.get()});
+                } else if (hasUnknownParam(existing->type) &&
+                           existing->type->kind == declared->kind) {
+                    // 之前由空容器占位（x = [] 后又 x: List[int] = ...）。
+                    refineVar(*existing, declared, a.target.get());
+                }
                 break;
             }
             if (existing) {
@@ -182,6 +193,11 @@ void TypeChecker::checkStmt(const Stmt& s) {
                                  typeToString(existing->type) + "，不能赋 " +
                                  typeToString(vt));
                     }
+                } else if (hasUnknownParam(existing->type) &&
+                           vt->kind == existing->type->kind &&
+                           !hasUnknownParam(vt)) {
+                    // 空容器占位由本次赋值的具体容器定型（x = []; x = [1]）。
+                    refineVar(*existing, vt, a.target.get());
                 }
             } else {
                 if (vt->kind == Type::Kind::Unknown) {
@@ -190,7 +206,7 @@ void TypeChecker::checkStmt(const Stmt& s) {
                                   "' 的类型；请添加类型注解（如 " + n.name +
                                   ": int = ...）");
                 }
-                scope_.declare(n.name, VarSym{vt, s.range});
+                scope_.declare(n.name, VarSym{vt, s.range, a.value.get()});
             }
         } else if (a.target->kind == Expr::Kind::Index && a.value) {
             // 下标赋值：t[i, ...] = v
@@ -226,24 +242,70 @@ void TypeChecker::checkStmt(const Stmt& s) {
                          "List 下标赋值只支持单索引");
                     break;
                 }
-                if (!isConvertible(vt, base->params[0])) {
+                TypePtr elem = base->params[0];
+                if (elem->kind == Type::Kind::Unknown) {
+                    // 空列表首写定型（元素域与 append 一致：AOT 按 VK 分派
+                    // list_store_*，容器元素无槽位表示）。
+                    Type::Kind k = vt->kind;
+                    if (k == Type::Kind::Int || k == Type::Kind::Float ||
+                        k == Type::Kind::Bool || k == Type::Kind::Str ||
+                        k == Type::Kind::Tuple) {
+                        TypePtr refined = makeType(Type::Kind::List, {vt});
+                        VarSym* sym =
+                            ix.base->kind == Expr::Kind::Name
+                                ? scope_.findMutable(static_cast<const Name&>(
+                                                       *ix.base).name)
+                                : nullptr;
+                        if (sym) refineVar(*sym, refined, ix.base.get());
+                        else refineExpr(ix.base.get(), refined);
+                    } else if (vt->kind != Type::Kind::Err) {
+                        fail(Errc::E2001_TypeMismatch, a.value->range,
+                             "无法从空列表推断元素类型：" + typeToString(vt) +
+                                 " 不是可存储的元素类型；请为列表添加类型注解");
+                    }
+                } else if (!isConvertible(vt, elem)) {
                     fail(Errc::E2001_TypeMismatch, a.value->range,
                          "元素类型不匹配：" + typeToString(vt) + " 无法赋给 " +
-                             typeToString(base->params[0]));
+                             typeToString(elem));
                 }
             } else if (base->kind == Type::Kind::Dict) {
+                TypePtr kt = base->params[0], vtt = base->params[1];
+                TypePtr keyT;
                 if (!ix.indices.empty()) {
-                    TypePtr kt = checkExpr(*ix.indices[0]);
-                    if (!isConvertible(kt, base->params[0])) {
+                    keyT = checkExpr(*ix.indices[0]);
+                    if (kt->kind != Type::Kind::Unknown &&
+                        !isConvertible(keyT, kt)) {
                         fail(Errc::E2001_TypeMismatch, ix.indices[0]->range,
-                             "键类型不匹配：期望 " +
-                                 typeToString(base->params[0]));
+                             "键类型不匹配：期望 " + typeToString(kt));
                     }
                 }
-                if (!isConvertible(vt, base->params[1])) {
+                if (!isConvertible(vt, vtt) && vtt->kind != Type::Kind::Unknown) {
                     fail(Errc::E2001_TypeMismatch, a.value->range,
                          "值类型不匹配：" + typeToString(vt) + " 无法赋给 " +
-                             typeToString(base->params[1]));
+                             typeToString(vtt));
+                }
+                // 空字典首写定型：只接受具体键值（未知占位保留到后续写入）。
+                bool kUnknown = kt->kind == Type::Kind::Unknown;
+                bool vUnknown = vtt->kind == Type::Kind::Unknown;
+                bool kOk = !kUnknown ||
+                           (keyT &&
+                            (keyT->kind == Type::Kind::Int ||
+                             keyT->kind == Type::Kind::Float ||
+                             keyT->kind == Type::Kind::Bool ||
+                             keyT->kind == Type::Kind::Str));
+                bool vOk = !vUnknown ||
+                           (vt->kind != Type::Kind::Unknown &&
+                            vt->kind != Type::Kind::Err);
+                if ((kUnknown || vUnknown) && kOk && vOk) {
+                    TypePtr refined = makeType(
+                        Type::Kind::Dict,
+                        {kUnknown ? keyT : kt, vUnknown ? vt : vtt});
+                    VarSym* sym = ix.base->kind == Expr::Kind::Name
+                                      ? scope_.findMutable(static_cast<
+                                            const Name&>(*ix.base).name)
+                                      : nullptr;
+                    if (sym) refineVar(*sym, refined, ix.base.get());
+                    else refineExpr(ix.base.get(), refined);
                 }
             } else if (base->kind == Type::Kind::Tuple) {
                 // 元组不可变：下标赋值显式拒绝（E2001；与 VM StoreIndex 的
@@ -333,6 +395,10 @@ void TypeChecker::checkStmt(const Stmt& s) {
             fail(Errc::E2001_TypeMismatch, st.iter->range,
                  "for 只能遍历 range、List、dict、Set 或 str，实际为 " +
                      typeToString(it));
+        else if (elem->kind == Type::Kind::Unknown)
+            fail(Errc::E2002_CannotInfer, st.iter->range,
+                 "无法推断 for 迭代源的元素类型；请为容器添加类型注解"
+                 "（如 xs: List[int] = []）");
         // 循环变量声明（Q9，Python 式复用）：与函数层已有同名绑定且类型
         // 相同 → 复用绑定（重绑定语义）；类型不同 → 明确报错。与外层
         // （模块全局/导入名）同名属正常遮蔽，照常声明。
@@ -372,6 +438,9 @@ void TypeChecker::checkStmt(const Stmt& s) {
                 fail(Errc::E2006_ReturnTypeConflict, s.range,
                      "返回类型不匹配：函数声明返回 " + typeToString(fnRet_) +
                          "，实际返回 " + typeToString(vt));
+            } else {
+                // 返回空容器占位 → 按声明的返回类型定型（AOT 按节点定型）。
+                tryRefineContainer(vt, fnRet_, st.value.get());
             }
         }
         break;

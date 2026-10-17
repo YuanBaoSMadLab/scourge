@@ -299,7 +299,16 @@ Value Gen::genListLit(const ListLit& ls) {
     if (es.empty()) {
         std::string ssa = fresh();
         emit(ssa + " = \"lang.list_empty\"() : () -> !llvm.ptr");
-        return Value{VK::List, ssa};
+        Value v{VK::List, ssa};
+        // 空列表占位已由 Sema 精化（List[T]）时回填元素 VK：C 运行时按
+        // etag 分派 list_store_*，lElem 未定型会让首写落入 unsupported。
+        if (auto it = types_.find(&ls); it != types_.end() && it->second &&
+                                     it->second->kind == Type::Kind::List &&
+                                     !it->second->params.empty()) {
+            VK ev = vkOfType(it->second->params[0]);
+            if (ev != VK::Bad) v.lElem = static_cast<uint8_t>(ev);
+        }
+        return v;
     }
 
     // 元素统一：与检查器 checkListLit 一致——任一 Float → 全 f64；

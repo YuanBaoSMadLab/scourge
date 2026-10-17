@@ -151,6 +151,18 @@ Value Gen::genCall(const Call& c) {
                      ") : (!llvm.ptr) -> i1");
                 return Value{VK::Bool, ssa};
             }
+            if (at.name == "is_err" || at.name == "is_none") {
+                if (!c.args.empty())
+                    unsupported(c.range, "is_err()/is_none() 不需要参数");
+                Value self = genExpr(*at.base);
+                std::string ok = fresh();
+                emit(ok + " = \"lang.result_is_ok\"(" + self.ssa +
+                     ") : (!llvm.ptr) -> i1");
+                std::string ssa = fresh();
+                emit(ssa + " = arith.xori " + ok + ", " + boolReg(true) +
+                     " : i1");
+                return Value{VK::Bool, ssa};
+            }
             if (at.name == "unwrap" || at.name == "unwrap_or") {
                 if (c.args.size() != 1)
                     unsupported(c.range,
@@ -486,6 +498,19 @@ Value Gen::genCall(const Call& c) {
                 return Value{VK::List, ssa, false, 0,
                              static_cast<uint8_t>(VK::Tuple)};
             }
+            if (nm == "contains") {
+                if (c.args.size() != 1)
+                    unsupported(c.range, "contains() 参数个数");
+                Value k = genExpr(*c.args[0]);
+                if (kvk == VK::Float && k.vk == VK::Int) k = promoteF64(k);
+                else if (k.vk != kvk)
+                    unsupported(c.args[0]->range,
+                                "contains() 键类型与字典不符");
+                std::string ssa = fresh();
+                emit(ssa + " = \"lang.dict_in\"(" + self.ssa + ", " +
+                     dictToBits(k) + ") : (!llvm.ptr, i64) -> i1 " + opLoc());
+                return Value{VK::Bool, ssa};
+            }
             if (nm == "get") {
                 // 缺键取缺省值不 panic（VM DictGet 同哲学）；键/值按
                 // 注解域提升位型，返回值按值域还原。
@@ -514,6 +539,22 @@ Value Gen::genCall(const Call& c) {
             bt != types_.end() && bt->second &&
             bt->second->kind == Type::Kind::Set) {
             Value self = genExpr(*at.base);
+            if (at.name == "contains") {
+                if (c.args.size() != 1)
+                    unsupported(c.range, "contains() 参数个数");
+                VK evk = bt->second->params.empty()
+                             ? VK::Bad
+                             : vkOfType(bt->second->params[0]);
+                Value v = genExpr(*c.args[0]);
+                if (evk == VK::Float && v.vk == VK::Int) v = promoteF64(v);
+                else if (v.vk != evk)
+                    unsupported(c.args[0]->range,
+                                "contains() 元素类型与集合不符");
+                std::string ssa = fresh();
+                emit(ssa + " = \"lang.set_in\"(" + self.ssa + ", " +
+                     dictToBits(v) + ") : (!llvm.ptr, i64) -> i1 " + opLoc());
+                return Value{VK::Bool, ssa};
+            }
             if (at.name == "add") {
                 if (c.args.size() != 1)
                     unsupported(c.range, "add() 参数个数");

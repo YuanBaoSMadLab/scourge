@@ -3,6 +3,7 @@
 //  Scourge 编译器 — 语义类型系统实现
 // ============================================================================
 #include "scourge/Sema/Type.hpp"
+#include "scourge/Sema/TypeRegistry.hpp"
 
 namespace scourge {
 
@@ -44,14 +45,9 @@ bool isConvertible(const TypePtr& from, const TypePtr& to) {
         return true;
 
     // 结构类型：同种别 + 参数逐一可转换（Tensor 另有形状规则）。
-    static const Type::Kind kStructural[] = {
-        Type::Kind::List, Type::Kind::Dict, Type::Kind::Set,
-        Type::Kind::Tuple, Type::Kind::Result, Type::Kind::Option,
-        Type::Kind::Tensor};
-    for (Type::Kind k : kStructural) {
-        if (from->kind != k || to->kind != k) continue;
+    if (isStructuralType(from->kind) && from->kind == to->kind) {
         if (from->params.size() != to->params.size()) return false;
-        if (k == Type::Kind::Tensor) {
+        if (from->kind == Type::Kind::Tensor) {
             if (from->shape.size() != to->shape.size()) return false;
             for (size_t i = 0; i < from->shape.size(); ++i) {
                 if (to->shape[i] != kDyn && to->shape[i] != from->shape[i])
@@ -91,26 +87,21 @@ bool unifyShape(const std::vector<int64_t>& a, const std::vector<int64_t>& b,
 
 std::string typeToString(const TypePtr& t) {
     if (!t) return "<null>";
-    switch (t->kind) {
-    case Type::Kind::Int: return "int";
-    case Type::Kind::Float: return "float";
-    case Type::Kind::Bool: return "bool";
-    case Type::Kind::Str: return "str";
-    case Type::Kind::Bytes: return "bytes";
-    case Type::Kind::None: return "None";
-    case Type::Kind::Range: return "range";
-    case Type::Kind::Err: return "<错误>";
-    case Type::Kind::Unknown: return "<未知>";
-    case Type::Kind::Module: return "module " + t->name;
-    case Type::Kind::Builtin: return "builtin " + t->name;
-    case Type::Kind::List:
-        return "List[" + typeToString(t->params[0]) + "]";
-    case Type::Kind::Dict:
-        return "Dict[" + typeToString(t->params[0]) + ", " +
-               typeToString(t->params[1]) + "]";
-    case Type::Kind::Set:
-        return "Set[" + typeToString(t->params[0]) + "]";
-    case Type::Kind::Tuple: {
+    const TypeInfo& info = typeInfo(t->kind);
+    switch (info.format) {
+    case TypeFormat::Keyword:
+    case TypeFormat::Unresolved:
+        return info.name;
+    case TypeFormat::Module:
+        return std::string("module ") + t->name;
+    case TypeFormat::Builtin:
+        return std::string("builtin ") + t->name;
+    case TypeFormat::Unary:
+        return std::string(info.name) + "[" + typeToString(t->params[0]) + "]";
+    case TypeFormat::Binary:
+        return std::string(info.name) + "[" + typeToString(t->params[0]) +
+               ", " + typeToString(t->params[1]) + "]";
+    case TypeFormat::Tuple: {
         // 元组类型串 = 源码字面量形态（空 ()；单元素无尾逗号——类型串仅
         // 诊断用，与值 repr 的 "(1,)" 形态无对齐要求）。
         std::string s = "(";
@@ -120,14 +111,7 @@ std::string typeToString(const TypePtr& t) {
         }
         return s + ")";
     }
-    case Type::Kind::Json:
-        return "Json";
-    case Type::Kind::Option:
-        return "Option[" + typeToString(t->params[0]) + "]";
-    case Type::Kind::Result:
-        return "Result[" + typeToString(t->params[0]) + ", " +
-               typeToString(t->params[1]) + "]";
-    case Type::Kind::Tensor: {
+    case TypeFormat::Tensor: {
         std::string s = "Tensor[" + typeToString(t->params[0]) + ", (";
         for (size_t i = 0; i < t->shape.size(); ++i) {
             if (i) s += ", ";
@@ -137,7 +121,7 @@ std::string typeToString(const TypePtr& t) {
         s += ")]";
         return s;
     }
-    case Type::Kind::Function: {
+    case TypeFormat::Function: {
         // params = [参数…] + 末位返回
         std::string s = "Fn[(";
         for (size_t i = 0; i + 1 < t->params.size(); ++i) {
@@ -145,8 +129,7 @@ std::string typeToString(const TypePtr& t) {
             s += typeToString(t->params[i]);
         }
         s += ") -> " +
-             typeToString(t->params.empty() ? tyNone()
-                                            : t->params.back()) +
+             typeToString(t->params.empty() ? tyNone() : t->params.back()) +
              "]";
         return s;
     }

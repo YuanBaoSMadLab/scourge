@@ -1,0 +1,18 @@
+# dtype 表化探针：张量元素 dtype 元数据（Sema 校验 / AOT tInt 回填）
+# 与逐元素结果 dtype 规则（VM tensorBinOp / AOT tOp 共用同一张表）。
+def main() -> int:
+    i: Tensor[int, (2,)] = [10, 20]
+    f: Tensor[float, (2,)] = [0.5, 0.25]
+
+    print(i + i)      # int∘int → int
+    print(i * i)
+    print(i / i)      # 真除法恒 float
+    print(i + f)      # int∘float → float
+    print(i * 2)      # 标量广播 int → int
+    print(i / 2)      # 标量真除法 → float
+    print(f + 1)      # float 张量∘int 标量 → float
+    print(abs(i - i)) # abs 保 int
+    print(abs(f - f)) # abs 保 float
+    print(sqrt(i))    # sqrt 恒 float
+    print(sqrt(f))
+    return 0

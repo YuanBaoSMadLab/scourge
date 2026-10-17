@@ -411,7 +411,8 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
             std::string ssa = fresh();
             emit(ssa + " = \"lang.tensor_un\"(" + i32Const(uop->fnid) + ", " +
                  v.ssa + ") : (i32, !llvm.ptr) -> !llvm.ptr " + opLoc());
-            return Value{VK::Tensor, ssa, uop->fnid == 0 && v.tInt, v.tRank};
+            return Value{VK::Tensor, ssa, dtypeUnaryIsInt(uop->fnid == 0, v.tInt),
+                         v.tRank};
         }
         if (v.vk != VK::Int && v.vk != VK::Float)
             unsupported(c.args[0]->range, name + "() 仅支持数值");
@@ -709,8 +710,10 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         unsupported(c.args[0]->range,
                     "data_ptr() 仅支持 Tensor[int]/Tensor[float]/str");
     }
-    // ok / err（Result 构造；检查器已强制恰好 1 参）
-    if (name == "ok") {
+    // ok / err（Result 构造；检查器已强制恰好 1 参）。some 与 ok 同构
+    //（Option[T] ≡ Result[T,None]）；none 是 None 值，落 Option 槽时由
+    // boxOption 归一为失败态句柄。
+    if (name == "ok" || name == "some") {
         need(1);
         Value v = genExpr(*c.args[0]);
         std::string ssa = fresh();
@@ -748,6 +751,10 @@ Value Gen::genBuiltinCall(const std::string& name, const Call& c) {
         emit(ssa + " = \"lang.result_err\"(" + v.ssa +
              ") : (!llvm.ptr) -> !llvm.ptr");
         return Value{VK::Result, ssa, false, 0, static_cast<uint8_t>(VK::Str)};
+    }
+    if (name == "none") {
+        need(0);
+        return Value{VK::None, ""};
     }
     // F-20：panic(msg) 可调用终止——lang.panic 单一 op（kLowerings →
     // sg_panic，try/except 可捕）。恒不返回：unreachable 终结当前块后开

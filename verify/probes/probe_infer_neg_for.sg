@@ -1,0 +1,5 @@
+# 空容器推断负例：for 迭代空列表字面量 → 元素类型不可知。
+def main() -> int:
+    for v in []:
+        print(v)
+    return 0

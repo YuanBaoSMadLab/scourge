@@ -102,6 +102,9 @@ private:
     struct VarSym {
         TypePtr type;
         SourceRange decl;
+        /// 声明处初值节点（无初值为空）：类型精化时需同步回写该节点的
+        /// exprTypes_ 表项，否则 AOT 仍按旧（Unknown）容器位型发射。
+        const Expr* init = nullptr;
     };
     class Scope {
     public:
@@ -118,11 +121,23 @@ private:
             }
             return nullptr;
         }
+        /// 可写查找（类型精化用）：命中层内的绑定由调用方原地替换类型。
+        VarSym* findMutable(const std::string& name) {
+            for (auto it = stack_.rbegin(); it != stack_.rend(); ++it) {
+                auto f = it->find(name);
+                if (f != it->end()) return &f->second;
+            }
+            return nullptr;
+        }
         /// 仅查最内层（函数层）绑定——for 循环变量复用判定用：
         /// 与外层（模块全局/导入名）同名属正常遮蔽，不算冲突。
         const VarSym* findInBack(const std::string& name) const {
             auto f = stack_.back().find(name);
             return f == stack_.back().end() ? nullptr : &f->second;
+        }
+        /// 最内层全部绑定（作用域收尾扫描未定型容器用）。
+        std::unordered_map<std::string, VarSym>& backLayer() {
+            return stack_.back();
         }
     private:
         std::vector<std::unordered_map<std::string, VarSym>> stack_;
@@ -172,6 +187,22 @@ private:
     /// 迭代器类型 → 元素类型（for 语句与列表推导式共用；覆盖 range/List/
     /// str/Dict/Set，不支持返回 Err，报错措辞由调用方定夺）。
     TypePtr iterElemOf(const TypePtr& it) const;
+
+    // ---- 容器类型精化（空字面量延迟推断） --------------------------------------
+    /// 递归判定类型是否含 Unknown 参数（空容器 List[Unknown]/Dict[?,?] 标志）。
+    static bool hasUnknownParam(const TypePtr& t);
+    /// 原地精化变量绑定：替换类型，并把声明初值/使用节点在 exprTypes_
+    /// 中的表项同步为新类型——后端按表发射，三处必须同源。
+    void refineVar(VarSym& sym, const TypePtr& refined, const Expr* useNode);
+    /// 无变量绑定的节点（字面量接收者、调用实参）直接覆写表项。
+    void refineExpr(const Expr* node, const TypePtr& refined);
+    /// 实参/返回值位置按目标类型精化容器字面量；仅当同 kind、实际含
+    /// Unknown、且可转换时生效。返回是否精化成功。
+    bool tryRefineContainer(const TypePtr& actual, const TypePtr& target,
+                            const Expr* node);
+    /// 作用域收尾扫描：最内层仍含 Unknown 的 List/Dict 报 E2002 并置 Err。
+    /// 返回是否报告过（函数返回类型推断据此避免同根重复诊断）。
+    bool reportUnresolvedContainers();
 
     // ---- 契约静态验证（调用点） -------------------------------------------------
     struct ConstVal {
