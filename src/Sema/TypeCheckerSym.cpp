@@ -104,44 +104,46 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
             sig.vis = sawPriv   ? Vis::Private
                       : sawInter ? Vis::Internal
                                  : Vis::Public;
+            // @extern 需在参数循环前裁决：无注解参数的处方消息与其余函数
+            // 不同（FFI 调用约定要求完整签名，不走隐式单态化）。
+            bool isExtern = false;
+            for (const auto& d : f.decorators) isExtern |= (d.name == "extern");
+            bool anyUnannotated = false;
             bool sawDefault = false;
             for (const auto& p : f.params) {
+                bool unAnn = false;
                 if (!p.type) {
-                    // 参数注解必填：.sgi 接口先行消费依赖完整签名（第六章第 3 条）。
-                    diag_.error(Errc::E2002_CannotInfer, file_, p.range,
-                                "参数 '" + p.name +
-                                    "' 缺少类型注解；函数签名必须完整");
-                    sig.params.push_back(tyErr());
-                    continue;
+                    if (isExtern) {
+                        diag_.error(Errc::E2002_CannotInfer, file_, p.range,
+                                    "@extern 函数参数 '" + p.name +
+                                        "' 类型必须显式注解（FFI 调用约定"
+                                        "需要完整签名）");
+                        sig.params.push_back(tyErr());
+                    } else {
+                        // 批 9-③：参数注解可选——Unknown 占位成泛型模板，
+                        // 调用点按实参类型隐式单态化（模块内调用）。
+                        sig.params.push_back(tyUnknown());
+                        unAnn = true;
+                    }
+                } else {
+                    sig.params.push_back(resolveTypeExpr(*p.type));
                 }
-                TypePtr t = resolveTypeExpr(*p.type);
-                sig.params.push_back(t);
                 // 缺省值边界 int→float 提升（Q3：与函数体注解赋值同规则）。
                 if (p.defaultValue) {
-                    // Dict/Set 上下文偏好：缺省值容器字面量对齐参数注解。
-                    if (p.defaultValue->kind == Expr::Kind::DictLit &&
-                        t->kind == Type::Kind::Dict && t->params.size() >= 2)
-                        dictTarget_ = t.get();
-                    if (p.defaultValue->kind == Expr::Kind::DictLit &&
-                        t->kind == Type::Kind::Set && t->params.size() >= 1)
-                        setTarget_ = t.get();
-                    if (p.defaultValue->kind == Expr::Kind::SetLit &&
-                        t->kind == Type::Kind::Set && t->params.size() >= 1)
-                        setTarget_ = t.get();
-                    TypePtr dv = checkExpr(*p.defaultValue);
-                    dictTarget_ = nullptr;
-                    setTarget_ = nullptr;
-                    if (dv->kind == Type::Kind::Int &&
-                        t->kind == Type::Kind::Float)
-                        promoteF64_.insert(p.defaultValue.get());
+                    // 缺省值即注解：未注解参数由缺省值定型（Python 式），
+                    // 此后该参数不再是泛型位。
+                    TypePtr dv = checkParamDefault(p, sig.params.back());
+                    if (unAnn) sig.params.back() = dv;
                     sawDefault = true;
                 } else if (sawDefault) {
                     diag_.error(Errc::E2001_TypeMismatch, file_, p.range,
                                 "无默认值参数不能跟在有默认值参数之后");
                 } else {
                     ++sig.requiredArgs;
+                    anyUnannotated |= unAnn;
                 }
             }
+            sig.hasUnannotated = anyUnannotated;
             if (!f.retType) {
                 // 返回类型推断（Q10，与文档对齐）：由函数体 return 语句统一
                 // 推导（checkFunction 完成后回填）；递归自引用以 Unknown 通配。
@@ -153,8 +155,6 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
             // @extern（0.9.4 H 专项）：签名限定——返回类型必须显式注解，
             // 参数/返回仅标量域（int/float/bool/str，返回可 none），拒绝
             // 缺省参数；函数体由外部动态库提供（双模后端均不发射）。
-            bool isExtern = false;
-            for (const auto& d : f.decorators) isExtern |= (d.name == "extern");
             if (isExtern) {
                 sig.isExtern = true;
                 sig.isVariadic = f.isVariadic;
@@ -275,6 +275,17 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                             // FuncSig 复制进 localFuncs_：checkCall 的 Name
                             // 分支自动获得签名/缺省参数/@pure/retPending。
                             FuncSig cp = f->second.copy();
+                            if (cp.hasUnannotated) {
+                                // 批 9-③ 边界：隐式单态化仅限定义模块内部
+                                // ——跨模块走 .sgi 接口面，签名必须完整。
+                                diag_.error(Errc::E2001_TypeMismatch, file_,
+                                            s.range,
+                                            "导入函数 '" + item.name +
+                                                "' 存在未注解参数——隐式"
+                                                "单态化仅限定义模块内部调用；"
+                                                "请在其定义处显式标注参数类型");
+                                continue;
+                            }
                             cp.name = bind;
                             localFuncs_[bind] = std::move(cp);
                             std::vector<TypePtr> ps = f->second.params;
@@ -452,6 +463,30 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                         kTopLevelOnlyMsg);
         }
     }
+}
+
+// ============================================================================
+// 缺省值检查（收集期与单态化实例补查共用）
+// ============================================================================
+
+TypePtr TypeChecker::checkParamDefault(const Param& p, const TypePtr& t) {
+    // Dict/Set 上下文偏好：缺省值容器字面量对齐参数注解。
+    if (p.defaultValue->kind == Expr::Kind::DictLit && t &&
+        t->kind == Type::Kind::Dict && t->params.size() >= 2)
+        dictTarget_ = t.get();
+    if (p.defaultValue->kind == Expr::Kind::DictLit && t &&
+        t->kind == Type::Kind::Set && t->params.size() >= 1)
+        setTarget_ = t.get();
+    if (p.defaultValue->kind == Expr::Kind::SetLit && t &&
+        t->kind == Type::Kind::Set && t->params.size() >= 1)
+        setTarget_ = t.get();
+    TypePtr dv = checkExpr(*p.defaultValue);
+    dictTarget_ = nullptr;
+    setTarget_ = nullptr;
+    // 边界 int→float 提升（Q3：与函数体注解赋值同规则）。
+    if (t && dv->kind == Type::Kind::Int && t->kind == Type::Kind::Float)
+        promoteF64_.insert(p.defaultValue.get());
+    return dv;
 }
 
 } // namespace scourge

@@ -5,7 +5,8 @@ def memset(dst: int, c: int, n: int) -> int:
     pass
 
 def main() -> int:
-    t = [1, 2, 3]
+    # F-18 A 案后张量须显式注解（批 8 漏改补齐）
+    t: Tensor[int, (3,)] = [1, 2, 3]
     memset(data_ptr(t), 0, 24)
     print(t[0] + t[1] + t[2])
     return 0

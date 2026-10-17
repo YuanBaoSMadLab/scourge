@@ -75,7 +75,16 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
                     "@pure 函数内禁止调用非纯函数 '" + nm +
                         "'（被调函数未标注 @pure）");
     }
-    if (calleeSig && calleeSig->retPending) {
+    // 批 9-③：泛型被调（存在未注解必填参数）不走 retPending 拒绝——
+    // 返回类型由实例体按 Q10 推断；跨模块泛型调用在接口面直接拒绝。
+    const bool generic = calleeSig && calleeSig->hasUnannotated;
+    if (generic && c.callee->kind == Expr::Kind::Attr) {
+        return fail(Errc::E2001_TypeMismatch, c.callee->range,
+                    "导入函数 '" + static_cast<const Attr&>(*c.callee).name +
+                        "' 存在未注解参数——隐式单态化仅限定义模块内部调用；"
+                        "请在其定义处显式标注参数类型");
+    }
+    if (calleeSig && calleeSig->retPending && !generic) {
         // Q10 边界：被调函数返回类型推断未完成（本模块内递归 / 前向引用）。
         // 推断期无类型事实源，静态规则要求显式注解（与 Rust 同理）。
         std::string nm;
@@ -108,6 +117,10 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
                         std::to_string(c.args.size()));
     }
     // 实参类型检查只遍历调用点提供的实参（Q2：缺失尾部实参由默认值补位）。
+    // 泛型被调：未注解参数位以实参类型具体化，逐参类型码拼接即实例键。
+    std::vector<TypePtr> monoParams;
+    std::string monoKey;
+    bool monoFeasible = generic;
     for (size_t i = 0; i < c.args.size(); ++i) {
         TypePtr at = checkExpr(*c.args[i]);
         if (varCallee && i >= nParams) {
@@ -119,6 +132,41 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
                          typeToString(at));
             continue;
         }
+        if (generic) {
+            const TypePtr& pt = calleeSig->params[i];
+            if (pt->kind == Type::Kind::Unknown) {
+                if (at->kind == Type::Kind::Err) {
+                    // 错误占位：级联抑制，不再追加诊断。
+                    monoParams.push_back(at);
+                    monoFeasible = false;
+                    continue;
+                }
+                if (at->kind == Type::Kind::Unknown ||
+                    at->kind == Type::Kind::Module ||
+                    at->kind == Type::Kind::Builtin ||
+                    at->kind == Type::Kind::Function) {
+                    fail(Errc::E2002_CannotInfer, c.args[i]->range,
+                         "无法从实参推断参数 " + std::to_string(i + 1) +
+                             " 的类型（得到 " + typeToString(at) +
+                             "）；请为该形参显式标注类型");
+                    monoParams.push_back(tyErr());
+                    monoFeasible = false;
+                    continue;
+                }
+                monoParams.push_back(at);
+                monoKey += mangleType(at);
+                continue;
+            }
+            monoParams.push_back(pt);
+            if (at->kind == Type::Kind::Int && pt->kind == Type::Kind::Float)
+                promoteF64_.insert(c.args[i].get()); // Q3 边界提升（实参）
+            if (!isConvertible(at, pt)) {
+                fail(Errc::E2001_TypeMismatch, c.args[i]->range,
+                     "实参类型不匹配：参数 " + std::to_string(i + 1) + " 期望 " +
+                         typeToString(pt) + "，实际 " + typeToString(at));
+            }
+            continue;
+        }
         if (at->kind == Type::Kind::Int &&
             callee->params[i]->kind == Type::Kind::Float)
             promoteF64_.insert(c.args[i].get()); // Q3 边界提升（实参）
@@ -128,6 +176,11 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
                      typeToString(callee->params[i]) + "，实际 " +
                      typeToString(at));
         }
+    }
+    if (generic) {
+        // 缺失尾参（有缺省值）：类型已在收集期由缺省值定型，非泛型位。
+        for (size_t i = c.args.size(); i < calleeSig->params.size(); ++i)
+            monoParams.push_back(calleeSig->params[i]);
     }
 
     // 本模块/导入函数的 requires 静态验证
@@ -147,6 +200,17 @@ TypePtr TypeChecker::checkCall(const Expr& e) {
         }
     }
 
+    // 批 9-③：泛型分派——实例查/建 + 被调名改写为实例符号（Sema 是实例
+    // 命名的唯一事实源，BC/AOT 按名解析自然命中实例，后端零改动）。
+    if (generic) {
+        if (!monoFeasible) return tyErr();
+        Name* rn = c.callee->kind == Expr::Kind::Name
+                       ? static_cast<Name*>(const_cast<Expr*>(c.callee.get()))
+                       : nullptr;
+        return monoDispatch(*calleeSig,
+                            rn ? rn->name : std::string(),
+                            std::move(monoParams), monoKey, e, rn);
+    }
     return callee->params.back();
 }
 } // namespace scourge

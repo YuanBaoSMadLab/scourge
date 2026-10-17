@@ -24,6 +24,10 @@ ModuleSymbols TypeChecker::check(Module& m) {
     out.name = m.name;
     declaredCaps_ = 0; // 每模块重置：声明/使用都是模块局部的
     capUses_.clear();
+    // 隐式单态化（批 9-③）：实例注册目标与克隆体所有权，逐模块重置。
+    curOut_ = &out;
+    monoDefs_.clear();
+    monoDepth_ = 0;
 
     scope_.push(); // 模块作用域
     collectTopLevel(m, out);
@@ -32,6 +36,12 @@ ModuleSymbols TypeChecker::check(Module& m) {
         if (stmt->kind == Stmt::Kind::FuncDef)
             checkFunction(static_cast<FuncDef&>(*stmt), out);
     }
+
+    // 单态化实例并入模块体：BC/AOT 遍历模块体按名编译实例（泛型模板
+    // 已被后端跳过，调用点已被改写为实例符号）。主体检查已收尾，此时
+    // 追加不干扰上文的模块体遍历。
+    for (auto& d : monoDefs_) m.body.push_back(std::move(d));
+    monoDefs_.clear();
 
     // 能力静态门禁（0.9.7）：使用集 ⊄ 声明集 → 每个未声明域一条 E5004，
     // 定位首个使用点。此处是双模共用的主门禁；VM/AOT 的运行时查位只是
@@ -52,8 +62,21 @@ ModuleSymbols TypeChecker::check(Module& m) {
 void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols& out) {
     auto it = localFuncs_.find(f.name);
     if (it == localFuncs_.end()) return; // 签名阶段已报错
+    // 泛型模板（存在未注解必填参数）本体不检查——C++ 模板语义：类型事实
+    // 全部由调用点实例化产生，未被调用的模板体不做类型检查。
+    if (it->second.hasUnannotated) return;
+    checkFunctionBody(f, it->second, out);
+}
 
-    fnRet_ = it->second.ret;
+void TypeChecker::checkFunctionBody(FuncDef& f, FuncSig& sig,
+                                    ModuleSymbols& out) {
+    // 上下文保存（重入）：单态化实例可在调用者体检查中途嵌套实例化，
+    // 返回后调用者的返回类型/循环深度/return 收集必须原样恢复。
+    TypePtr savedRet = std::move(fnRet_);
+    auto savedPending = std::move(pendingReturns_);
+    const int savedLoop = loopDepth_;
+
+    fnRet_ = sig.ret;
     pendingReturns_.clear();
     scope_.push();
     loopDepth_ = 0;
@@ -62,14 +85,21 @@ void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols& out) {
     const bool prevInFunc = inFunc_;
     inFunc_ = true; // defer 仅函数体顶层合法（模块顶层无退出点）
     const bool prevPure = inPureFn_;
-    inPureFn_ = it->second.isPure; // K 专项：@pure 函数体启用纯度强制
+    inPureFn_ = sig.isPure; // K 专项：@pure 函数体启用纯度强制
     for (size_t i = 0; i < f.params.size(); ++i) {
         if (!scope_.declare(f.params[i].name,
-                            VarSym{it->second.params[i], f.params[i].range})) {
+                            VarSym{sig.params[i], f.params[i].range})) {
             diag_.error(Errc::E2007_DuplicateDefinition, file_,
                         f.params[i].range,
                         "参数 '" + f.params[i].name + "' 重复");
         }
+    }
+    // 实例克隆体的缺省值补查：exprTypes_ 按节点指针缓存类型，克隆体的
+    // 缺省值是独立 AST 节点（AOT 调用点缺省填充按 sig.def 取 AST 求类型）。
+    if (sig.isMonoInst) {
+        for (size_t i = 0; i < f.params.size(); ++i)
+            if (f.params[i].defaultValue)
+                checkParamDefault(f.params[i], sig.params[i]);
     }
 
     // 契约定义侧：类型必须为 bool；不可静态验证子句降级告警（W3001）。
@@ -80,7 +110,7 @@ void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols& out) {
     // 返回类型推断（Q10）：统一全部 return 的值类型并回填签名。
     // 递归自引用（Unknown）跳过；数值混返回取宽化（int+float → float，
     // 与 isConvertible 的唯一隐式转换方向一致）；不一致即 E2006。
-    if (it->second.retPending) {
+    if (sig.retPending) {
         TypePtr inferred = tyNone(); // 无 return / 全裸 return → None
         bool any = false, conflict = false;
         for (const auto& [expr, vt] : pendingReturns_) {
@@ -106,9 +136,9 @@ void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols& out) {
             break;
         }
         if (!conflict) {
-            it->second.ret = inferred;
-            it->second.retPending = false;
-            out.funcs[f.name] = it->second; // 导出同步（.sgi/跨模块消费）
+            sig.ret = inferred;
+            sig.retPending = false;
+            out.funcs[f.name] = sig; // 导出同步（实例按实例符号名入注册表）
             // 推断为 float 的 int 返回值补记边界提升（Q3 双模一致）。
             if (inferred->kind == Type::Kind::Float) {
                 for (const auto& [expr, vt] : pendingReturns_)
@@ -122,6 +152,9 @@ void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols& out) {
     inAsyncFn_ = prevAsync;
     inFunc_ = prevInFunc;
     inPureFn_ = prevPure;
+    fnRet_ = std::move(savedRet);
+    pendingReturns_ = std::move(savedPending);
+    loopDepth_ = savedLoop;
 }
 
 void TypeChecker::checkContractDefs(const FuncDef& f) {

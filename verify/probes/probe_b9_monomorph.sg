@@ -1,0 +1,42 @@
+# 批 9-③ 隐式单态化探针：参数注解可选——同一函数按调用点实参类型
+# 实例化多份特化（int/float/str/List[float] 逐一生效，同类调用复用同
+# 实例），带缺省值的未注解参数由缺省值定型（Python 式）。双模逐位一致。
+# 期望输出：
+# i 7
+# f 6.5
+# s hi-hi
+# m 3.5
+# L 1.5
+# d 15
+# 0
+# 0
+# 0
+# 0
+# 0
+# 0
+
+def add(a, b):
+    return a + b
+
+def show(tag, x):
+    print(tag, x)
+    return 0
+
+def mix(x, y: float):
+    return x + y
+
+def first_of(lst):
+    return lst[0]
+
+def g(x, y=10):
+    return x + y
+
+def main() -> int:
+    print(show("i", add(3, 4)))
+    print(show("f", add(1.5, 5.0)))
+    print(show("s", add("hi", "-hi")))
+    print(show("m", mix(1, 2.5)))
+    xs: List[float] = [1.5, 2.5, 3.5]
+    print(show("L", first_of(xs)))
+    print(show("d", g(5)))
+    return 0

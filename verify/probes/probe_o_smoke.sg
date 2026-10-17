@@ -27,7 +27,8 @@ def main() -> int:
     s = "hello"
     print(strlen(data_ptr(s)))
     # data_ptr：张量缓冲 + memset 往返（24 字节 = 3 个 i64 清零）
-    t = [1, 2, 3]
+    # F-18 A 案后一维数值字面量默认 List，张量须显式注解（批 8 漏改补齐）
+    t: Tensor[int, (3,)] = [1, 2, 3]
     memset(data_ptr(t), 0, 24)
     print(t[0] + t[1] + t[2])
     return 0

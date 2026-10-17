@@ -43,6 +43,13 @@ struct FuncSig {
     bool isExtern = false;   ///< @extern：动态库外部函数（体不发射，H 专项）
     bool isVariadic = false; ///< 参数表尾 ...（仅 @extern 合法，O 节 FFI 宽类型域）
     Vis vis = Vis::Public;   ///< @private/@internal（0.9.6 L 节）
+    /// 存在未注解必填参数（批 9-③ 隐式单态化）：签名以 Unknown 占位成
+    /// 泛型模板，类型事实由调用点按实参组合实例化产生；仅限定义模块内部
+    /// 调用（.sgi 接口面不含——跨模块签名必须完整）。
+    bool hasUnannotated = false;
+    /// 隐式单态化实例（名字 = 模板基名 + "__" + 类型键）：模块内部实现
+    /// 符号，Vis::Private + .sgi 跳过；进注册表供双模后端按名编译。
+    bool isMonoInst = false;
 
     /// 契约子句引用（表达式借用自 AST，生命周期由 Module 持有保证）。
     struct ContractRef {
@@ -124,6 +131,25 @@ private:
     // ---- 主流程 ---------------------------------------------------------------
     void collectTopLevel(Module& m, ModuleSymbols& out);
     void checkFunction(FuncDef& f, ModuleSymbols& out);
+    /// 以给定签名检查函数体（checkFunction 与单态化实例共用的主体；
+    /// 上下文保存/恢复保证调用者体检查中途的嵌套实例化可重入）。
+    void checkFunctionBody(FuncDef& f, FuncSig& sig, ModuleSymbols& out);
+    /// 缺省值检查（收集期与实例补查共用单一事实源）：容器字面量对齐参数
+    /// 注解 + int→float 边界提升，返回缺省值表达式类型。
+    TypePtr checkParamDefault(const Param& p, const TypePtr& t);
+    /// 泛型调用点分派（批 9-③）：查/建实例、以具体参数类型检查实例体、
+    /// 返回实例返回类型；成功时把 *rewriteCallee 改写为实例符号
+    ///（Sema 是实例命名的唯一事实源，BC/AOT 按名解析零改动）。
+    TypePtr monoDispatch(const FuncSig& tmpl, const std::string& base,
+                         std::vector<TypePtr> concrete, const std::string& key,
+                         const Expr& call, Name* rewriteCallee);
+    /// 类型 → 实例名类型码（前缀式注入编码：i/f/b/s/n/y/j/r 标量，
+    /// L/S/D/T/R/O/X 复合递归；仅作实例键比对，永不解析回类型）。
+    static std::string mangleType(const TypePtr& t);
+    /// FuncDef 深克隆：exprTypes_ 按节点指针缓存类型，同一模板的多个
+    /// 实例不得共享 AST 节点——每实例一份独立克隆。
+    static std::unique_ptr<FuncDef> cloneFuncDef(const FuncDef& src,
+                                                 const std::string& newName);
     void checkStmtList(const StmtList& list);
     void checkNested(const StmtList& list); ///< 嵌套块检查（blockDepth_ 供 defer 顶层限制）
     void checkStmt(const Stmt& s);
@@ -229,6 +255,12 @@ private:
         SourceRange range;
     };
     std::vector<CapUse> capUses_;
+
+    // ---- 隐式单态化状态（批 9-③）----------------------------------------------
+    ModuleSymbols* curOut_ = nullptr; ///< check() 期间的导出符号表（实例注册目标）
+    /// 实例克隆体所有权；check 收尾并入 m.body，双模后端遍历模块体按名编译。
+    std::vector<std::unique_ptr<FuncDef>> monoDefs_;
+    int monoDepth_ = 0; ///< 实例化深度（防无限泛型递归，如 f(x) = f([x])）
 };
 
 } // namespace scourge

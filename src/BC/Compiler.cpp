@@ -368,6 +368,13 @@ bool Compiler::compileModule(const Module& m) {
     for (const auto& stmt : m.body) {
         if (stmt->kind != Stmt::Kind::FuncDef) continue;
         auto& f = static_cast<const FuncDef&>(*stmt);
+        // 泛型模板（批 9-③）不进函数表也不编译：本体无具体类型可编译，
+        // 调用点已被检查器改写为实例符号（实例是普通具体类型函数）。
+        if (auto rt = registry_.find(m.name); rt != registry_.end()) {
+            if (auto st = rt->second->funcs.find(f.name);
+                st != rt->second->funcs.end() && st->second.hasUnannotated)
+                continue;
+        }
         defs.push_back(&f);
         std::vector<Value> defaults;
         uint32_t required = 0;

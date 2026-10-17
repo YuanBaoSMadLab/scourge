@@ -54,6 +54,9 @@ std::string generateSgi(const SourceMgr& src, const Module& m,
             auto it = syms.funcs.find(f.name);
             if (it == syms.funcs.end()) break;
             const FuncSig& sig = it->second;
+            // 批 9-③：泛型模板与单态化实例不属接口契约面——模板签名不
+            // 完整（跨模块消费会在依赖方报错），实例是模块内部实现符号。
+            if (sig.hasUnannotated || sig.isMonoInst) continue;
             // @private 仅模块内部可见，不属于接口契约面（0.9.6 L 节）；
             // @internal 保留——依赖方仍需其签名，包内限制由检查器门禁。
             if (sig.vis == Vis::Private) continue;

@@ -57,6 +57,7 @@ add_library(scourge_core STATIC
     src/Sema/TypeCheckerFunc.cpp src/Sema/TypeCheckerStmt.cpp
     src/Sema/TypeCheckerExpr.cpp src/Sema/TypeCheckerLit.cpp
     src/Sema/TypeCheckerCall.cpp src/Sema/TypeCheckerBuiltin.cpp
+    src/Sema/TypeCheckerMono.cpp
     src/Interface/SgiGen.cpp
     src/BC/Compiler.cpp src/BC/CompilerExpr.cpp src/BC/CompilerStmt.cpp
     src/BC/VM.cpp src/BC/VMBuiltin.cpp src/BC/VMDispatch.cpp

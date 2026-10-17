@@ -123,6 +123,8 @@ void Gen::precollectGlobals() {
                 auto& fd = static_cast<const FuncDef&>(*stmt);
                 auto f = syms->second->funcs.find(fd.name);
                 if (f == syms->second->funcs.end()) continue;
+                // 泛型模板（批 9-③）：无具体 VK 可检，调用点按实例发射。
+                if (f->second.hasUnannotated) continue;
                 // async def 按普通 def 发射（await 恒等透传，Task 语义
                 // 随 P2 并发落地；与 BC Compiler 声明遍同构，双模一致）。
                 for (const auto& p : f->second.params)
@@ -198,6 +200,8 @@ void Gen::genFunction(const Module& m, const FuncDef& f) {
     if (ft == s_.registry().end()) return;
     auto sig = ft->second->funcs.find(f.name);
     if (sig == ft->second->funcs.end()) return;
+    if (sig->second.hasUnannotated)
+        return; // 泛型模板（批 9-③）：不发射本体，调用点按实例发射
     if (sig->second.isExtern)
         return; // @extern：函数体不发射（调用点走 lang.extern_call，H 专项）
 
