@@ -54,7 +54,7 @@ Build hygiene: `sg build` outputs go to `<source dir>/out/`; intermediates and c
 
 ## Installers
 
-Windows ships Inno Setup installers (`Scourge-0.1.0-win-x64-x86-setup.exe` and `Scourge-0.1.0-win-arm64-setup.exe`; the latter carries x64 binaries that run under the Windows-on-ARM compatibility layer). You can opt into **adding Scourge to the system PATH** during setup; after install, `sg run` / `sg check` / `sg repl` / `sgmcp` / `sget` work with zero configuration — the `std/` standard library is resolved relative to the compiler's install layout, no environment variables needed. Linux gets `scourge-0.1.0-linux-x86_64.tar.gz`, a source release: extract and run `scripts/bootstrap.sh` for a one-command build.
+Windows ships Inno Setup installers (`Scourge-0.1.0-win-x64-x86-setup.exe` and `Scourge-0.1.0-win-arm64-setup.exe`; the latter carries x64 binaries that run under the Windows-on-ARM compatibility layer). You can opt into **adding Scourge to the system PATH** during setup; after install, `sg run` / `sg check` / `sg repl` / `sgmcp` / `sget` work with zero configuration — the `std/` standard library is resolved relative to the compiler's install layout, no environment variables needed. Linux gets `scourge-0.1.0-linux-x86_64-bin.tar.gz`, a binary release: extract and run — no environment variables, `std/` resolved from the package layout (requires glibc ≥ 2.39; native on Ubuntu 24.04 / Debian trixie). Source builds via `bootstrap.sh` below still work.
 
 ## Quick Start
 

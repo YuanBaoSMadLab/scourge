@@ -15,6 +15,7 @@
 #include "scourge/Tool/BuilderShared.hpp"
 #include "scourge/Tool/Session.hpp"
 
+#include <cstring>
 #include <fstream>
 #include <sstream>
 

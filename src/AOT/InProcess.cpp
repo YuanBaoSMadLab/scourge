@@ -46,6 +46,7 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/ModuleTranslation.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Config/llvm-config.h" // LLVM_VERSION_MAJOR（pass 名版本 shim）
 #include "llvm/IR/InstrTypes.h" // CallBase（returns_twice 调用点 fixup 用）
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -118,8 +119,15 @@ bool convertToLLVMInProcess(const std::string& mlirText,
     pm.addPass(scourge::aot::createLangToLinalgPass(gpuMode));
     pm.addPass(scourge::aot::createLangToLLVMPass(gpuMode, capMask));
     pm.addPass(mlir::createConvertLinalgToLoopsPass());
+    // 阶段 2f：scf → cf。pass 创建函数名跨版本不同：LLVM 18 为
+    // createConvertSCFToCFPass（手动声明），≥19 方言 def 更名后由 tblgen
+    // 生成 createSCFToControlFlowPass；单点版本 shim，语义同一 pass。
     pm.addPass(mlir::createLowerAffinePass());
+#if LLVM_VERSION_MAJOR >= 19
     pm.addPass(mlir::createSCFToControlFlowPass());
+#else
+    pm.addPass(mlir::createConvertSCFToCFPass());
+#endif
     pm.addPass(mlir::createConvertToLLVMPass());
     if (mlir::failed(pm.run(module->getOperation()))) {
         diag = diagBuf.empty() ? "MLIR → LLVM dialect 转换失败（无诊断）"

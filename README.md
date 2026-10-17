@@ -53,7 +53,7 @@ Scourge 把"确定性"作为第一原则：同一段 `.sg` 源码，经 `sg run`
 
 ## 安装包
 
-Windows 提供 Inno Setup 安装包（`Scourge-0.1.0-win-x64-x86-setup.exe` 与 `Scourge-0.1.0-win-arm64-setup.exe`，后者为 x64 二进制经 Windows on ARM 兼容层运行），安装时可勾选**加入系统 PATH**；安装后 `sg run` / `sg check` / `sg repl` / `sgmcp` / `sget` 零配置可用——`std/` 标准库随编译器安装布局解析，无需任何环境变量。Linux 提供 `scourge-0.1.0-linux-x86_64.tar.gz` 源码发行包，解压后 `scripts/bootstrap.sh` 一键构建。
+Windows 提供 Inno Setup 安装包（`Scourge-0.1.0-win-x64-x86-setup.exe` 与 `Scourge-0.1.0-win-arm64-setup.exe`，后者为 x64 二进制经 Windows on ARM 兼容层运行），安装时可勾选**加入系统 PATH**；安装后 `sg run` / `sg check` / `sg repl` / `sgmcp` / `sget` 零配置可用——`std/` 标准库随编译器安装布局解析，无需任何环境变量。Linux 提供 `scourge-0.1.0-linux-x86_64-bin.tar.gz` 二进制包，解压即用（要求 glibc ≥ 2.39，Ubuntu 24.04 / Debian trixie 原生兼容），`std/` 标准库随包解析，无需环境变量；偏好源码构建仍走下方 `bootstrap.sh`。
 
 ## 30 秒上手
 

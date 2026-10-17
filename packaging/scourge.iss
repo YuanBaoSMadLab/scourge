@@ -14,6 +14,11 @@
 #define Staging "staging"
 #define OutDir "..\release\installer"
 
+; ARCH 默认 x64-x86；arm64 包用 ISCC /DARCH=arm64 传入
+#ifndef ARCH
+#define ARCH "x64-x86"
+#endif
+
 #if ARCH == "arm64"
 #define OutName "Scourge-" + Version + "-win-arm64-setup"
 #else

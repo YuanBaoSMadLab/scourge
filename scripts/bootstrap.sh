@@ -117,16 +117,28 @@ elif [ -f "$MLIR_ROOT/LLVM_VERSION.txt" ]; then
 fi
 
 echo "[bootstrap] cmake 配置（build-rel）"
+# 编译器选择：优先真 g++（--version 自报 g++ 才算；macOS 的 g++ 是 clang
+# 别名自然回落）。原因：clang 对 LLVM 18.1.x AliasAnalysis.h 的内联构造
+# 函数做急切实例化——计算异常规范要求完整 AAResults::Concept，而发行版
+# 头文件只有前向声明（LLVM 23 才把构造函数移出线外），Ubuntu 24.04 的
+# llvm-18 + clang 组合编译 scourge_aot 必挂；GCC 13 惰性处理无此问题，
+# 且 LLVM 上游 CI 本就覆盖 GCC 13。
+C_COMPILER=clang; CXX_COMPILER=clang++
+if command -v g++ >/dev/null && g++ --version 2>/dev/null | head -n1 | grep -q 'g++'; then
+    C_COMPILER=gcc; CXX_COMPILER=g++
+    echo "[bootstrap] 编译器: gcc/g++（clang 对发行版 LLVM 18 头有异常规范急切实例化问题）"
+fi
 cmake -S "$REPO_ROOT" -B "$REPO_ROOT/build-rel" \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+    -DCMAKE_C_COMPILER="$C_COMPILER" -DCMAKE_CXX_COMPILER="$CXX_COMPILER" \
     -DSCOURGE_LLVM_ROOT="$MLIR_ROOT" \
     -G Ninja
 
 echo "[bootstrap] 构建（-j$JOBS）"
 # 三件套：sg（主编译器）+ sgmcp（MCP 独立入口）+ sget（包管理器自举，
-# 其 AOT 全链成功本身就是 sg build 能力的冒烟）；scourge_tests 为 CTest 单测。
-cmake --build "$REPO_ROOT/build-rel" -j"$JOBS" --target scourge sgmcp sget scourge_tests
+# 其 AOT 全链成功本身就是 sg build 能力的冒烟；目标名 sget_bootstrap 避开
+# Linux 下目标名与产物文件名同名冲突）；scourge_tests 为 CTest 单测。
+cmake --build "$REPO_ROOT/build-rel" -j"$JOBS" --target scourge sgmcp sget_bootstrap scourge_tests
 
 BIN="$REPO_ROOT/build-rel"
 echo "[bootstrap] 冒烟"

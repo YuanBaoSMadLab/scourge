@@ -1,10 +1,12 @@
 # Copyright (c) 2026 Scourge Project. All rights reserved.
 cmake_minimum_required(VERSION 3.28)
 
+# 启用 C：LLVMConfig.cmake 的 FindTerminfo 走 check_c_source_compiles，
+# 纯 CXX 工程在 Linux 上配置期直接报 "C needs to be enabled"。
 project(scourge
     VERSION 0.1.0
     DESCRIPTION "Scourge：为 AI 代理时代设计的确定性验证型语言（P2 外部协作接口）"
-    LANGUAGES CXX)
+    LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -196,6 +198,9 @@ add_custom_target(scourge_lang_gen DEPENDS ${SCOURGE_LANG_GEN_OUTPUTS})
 add_dependencies(scourge_aot scourge_lang_gen)
 target_include_directories(scourge_aot PRIVATE "${SCOURGE_LANG_GEN}")
 
+# MLIRRegisterAllExtensions 是 LLVM ≥19 的聚合注册库；18 的 registerAllExtensions
+# 为头文件 inline 函数（InitAllExtensions.h），其引用散落在各扩展/转换库中，
+# 需逐一列出（符号→库映射经 nm -gA 对发行版 libMLIR*.a 核实）。
 target_link_libraries(scourge_aot PRIVATE
     MLIRIR MLIRParser MLIRPass MLIRTransformUtils
     MLIRFuncDialect MLIRArithDialect MLIRControlFlowDialect MLIRLLVMDialect
@@ -203,8 +208,20 @@ target_link_libraries(scourge_aot PRIVATE
     MLIRLinalgTransforms MLIRSCFToControlFlow MLIRAffineToStandard
     MLIRMemRefToLLVM MLIRIndexToLLVM
     MLIRConvertToLLVMPass MLIRTargetLLVM
-    MLIRLLVMToLLVMIRTranslation MLIRBuiltinToLLVMIRTranslation
-    MLIRRegisterAllExtensions)
+    MLIRLLVMToLLVMIRTranslation MLIRBuiltinToLLVMIRTranslation)
+if(LLVM_VERSION_MAJOR VERSION_GREATER_EQUAL 19)
+    target_link_libraries(scourge_aot PRIVATE MLIRRegisterAllExtensions)
+else()
+    target_link_libraries(scourge_aot PRIVATE
+        MLIRComplexToLLVM MLIRMathToLLVM MLIRNVVMToLLVM MLIRUBToLLVM
+        MLIRFuncAllExtensions
+        MLIRAffineTransformOps MLIRBufferizationTransformOps MLIRFuncTransformOps
+        MLIRGPUTransformOps MLIRLinalgTransformOps MLIRMemRefTransformOps
+        MLIRNVGPUTransformOps MLIRSCFTransformOps MLIRSparseTensorTransformOps
+        MLIRTensorTransformOps MLIRVectorTransformOps
+        MLIRTransformDebugExtension MLIRTransformLoopExtension
+        MLIRTransformPDLExtension)
+endif()
 target_link_libraries(scourge PRIVATE scourge_aot)
 
 # ---------------------------------------------------------------------------
@@ -226,7 +243,10 @@ if(SCOURGE_BOOTSTRAP_SGET)
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/sget"
         COMMENT "sget: 自举构建包管理器（sg build examples/sget/main.sg）"
         VERBATIM)
-    add_custom_target(sget ALL DEPENDS "${SCOURGE_SGET_OUT}")
+    # 目标名 sget_bootstrap：Linux 下产物名无后缀（sget），若目标也叫 sget，
+    # CMake 生成的 phony 规则会与 CUSTOM_COMMAND 输出规则同名冲突（ninja
+    # "multiple rules generate sget"）；Windows 产物带 .exe 后缀故从未触发。
+    add_custom_target(sget_bootstrap ALL DEPENDS "${SCOURGE_SGET_OUT}")
 endif()
 
 add_executable(scourge_tests tests/test_runner.cpp src/Tool/Repl.cpp

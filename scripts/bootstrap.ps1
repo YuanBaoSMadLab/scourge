@@ -111,9 +111,10 @@ cmake @CMakeArgs
 
 Write-Host "[bootstrap] build (-j$Jobs)"
 # three deliverables: sg (compiler) + sgmcp (standalone MCP entry) + sget
-# (bootstrapped package manager -- its success is itself the AOT smoke test);
+# (bootstrapped package manager -- its success is itself the AOT smoke test;
+# target name sget_bootstrap avoids the Linux target/file name clash);
 # scourge_tests = CTest unit tests.
-cmake --build (Join-Path $RepoRoot "build-rel") -j $Jobs --target scourge sgmcp sget scourge_tests
+cmake --build (Join-Path $RepoRoot "build-rel") -j $Jobs --target scourge sgmcp sget_bootstrap scourge_tests
 
 Write-Host "[bootstrap] smoke"
 $Bin = Join-Path $RepoRoot "build-rel"
