@@ -46,6 +46,7 @@ def main() -> int:
     # ---- 3. bindgen 生成（C++ 代理 + 纯 C 直通两路）----
     Remove-Item "$pkg\demo_cpp\shim", "$pkg\demo_cpp\demo_cpp.sg" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item "$pkg\mathx\mathx.sg" -Force -ErrorAction SilentlyContinue
+    Remove-Item "$pkg\sqlite3\shim", "$pkg\sqlite3\sqlite3.sg" -Recurse -Force -ErrorAction SilentlyContinue
     $g = & "$bg\bindgen.exe" --all $pkg 2>&1
     if ($LASTEXITCODE -ne 0) { Fail "bindgen --all ($g)"; Pop-Location; exit 1 }
     if (-not (Test-Path "$pkg\demo_cpp\shim\shim.cpp") -or
@@ -87,7 +88,35 @@ def main() -> int:
         Pass "mathx 直通双模（msvcrt）"
     } else { Fail "mathx 双模 ($vm4 | $aot4)" }
 
-    # ---- 7. sget bind 集成 ----
+    # ---- 7. sqlite3 真实生态包（vendored amalgamation，C 源分叉编译）----
+    Push-Location "$pkg\sqlite3\shim"
+    $cb2 = & cmd /c build_shim.bat 2>&1
+    Pop-Location
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$pkg\sqlite3\bin\sqlite3_shim.dll")) {
+        Fail "sqlite3 shim 编译 ($cb2)"; Pop-Location; exit 1
+    }
+    Pass "sqlite3 shim 编译（C 驱动预编 sqlite3.c + clang++ 链代理）"
+
+    # 注意：sqlite3_demo.sg 是手写源（非生成物），AOT 输出用不同 stem，
+    # 清理通配不得覆盖源码；VM 跑 --no-cache 不留 .sgbc 缓存。
+    Remove-Item "$pkg\sqlite3\sqlite3_demo_run*", "$pkg\sqlite3\sqlite3_demo.db" -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue
+    Copy-Item "$pkg\sqlite3\bin\sqlite3_shim.dll" "$pkg\sqlite3\" -Force
+    Push-Location "$pkg\sqlite3"
+    $vm6 = & $sg run --no-cache sqlite3_demo.sg 2>&1
+    & $sg build sqlite3_demo.sg -o sqlite3_demo_run.exe *> $null
+    $aot6 = & .\sqlite3_demo_run.exe 2>&1
+    Pop-Location
+    # bind_double 走混合签名定参（MS x64 位置分配）：avg = 8.25 即
+    # double 实参经 xmm1 正确抵达被调方的端到端证据（该回归由
+    # verify/probes/probe_ffi_mixed.sg 单元级锁死，此处为整库级佐证）。
+    if (($vm6 -join "`n") -eq ($aot6 -join "`n") -and ($aot6 -join "`n") -match "row: 2 beta 7\.25" -and
+        ($aot6 -join "`n") -match "avg = 8\.25" -and ($aot6 -join "`n") -match "sqlite3 demo ok") {
+        Pass "sqlite3 双模闭环（真实 C 库 + 混合签名 bind_double）"
+    } else { Fail "sqlite3 双模 ($vm6 | $aot6)" }
+    Remove-Item "$pkg\sqlite3\sqlite3_demo_run*", "$pkg\sqlite3\sqlite3_demo.db" -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue
+    Remove-Item "$pkg\sqlite3\sqlite3_shim.dll" -Force -ErrorAction SilentlyContinue
+
+    # ---- 8. sget bind 集成 ----
     $sgetDir = "$root\examples\sget"
     & $sg build "$sgetDir\main.sg" -o "$sgetDir\sget.exe" *> $null
     Push-Location $sgetDir

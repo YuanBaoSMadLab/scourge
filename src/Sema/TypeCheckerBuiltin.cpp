@@ -24,9 +24,13 @@ namespace scourge {
 // "fmt"）同一事实源（此处静态拒绝，执行侧不必设防）：
 //   * Int：type 仅 d（精度无意义，Python 同拒）；Float：f/e/g/%/空；
 //   * Str/Bool：fill/align + width/.prec（cpPad 全支持）；type 仅 s/空。
+//   * width ≤ 1000000、prec ≤ 100：执行侧缓冲/填充按此上界设计（AOT
+//     与裸机 fmt 运行时同值；超大值只会导致巨量分配或缓冲截断）。
 // 返回空串 = 合法；否则为原因短语（拼入 E1007 消息）。
 // ============================================================================
 static std::string validateFmtSpec(const std::string& s, Type::Kind k) {
+    constexpr long long kMaxFmtWidth = 1000000;
+    constexpr long long kMaxFmtPrec = 100;
     bool numeric = k == Type::Kind::Int || k == Type::Kind::Float;
     size_t i = 0;
     const size_t n = s.size();
@@ -41,13 +45,21 @@ static std::string validateFmtSpec(const std::string& s, Type::Kind k) {
         static_cast<unsigned char>(s[i + 1]))) {
         ++i; // 零填充旗标（后随宽度）；裸 "0" 属宽度 0
     }
-    while (i < n && std::isdigit(static_cast<unsigned char>(s[i]))) ++i;
+    long long width = 0;
+    while (i < n && std::isdigit(static_cast<unsigned char>(s[i]))) {
+        width = width * 10 + (s[i++] - '0');
+        if (width > kMaxFmtWidth) return "宽度上限为 1000000";
+    }
     bool hadPrec = false;
     if (i < n && s[i] == '.') {
         ++i;
         if (i >= n || !std::isdigit(static_cast<unsigned char>(s[i])))
             return "'.prec' 后必须有精度位数";
-        while (i < n && std::isdigit(static_cast<unsigned char>(s[i]))) ++i;
+        long long prec = 0;
+        while (i < n && std::isdigit(static_cast<unsigned char>(s[i]))) {
+            prec = prec * 10 + (s[i++] - '0');
+            if (prec > kMaxFmtPrec) return "精度上限为 100";
+        }
         hadPrec = true;
     }
     char type = 0;

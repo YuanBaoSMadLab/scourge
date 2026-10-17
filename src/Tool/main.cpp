@@ -287,7 +287,22 @@ int cmdBuild(const std::vector<std::string>& args) {
     bool gpuMode = false;
     bool useCache = true;
     bool explicitSysroot = false; // 显式 --sysroot：一键交叉不覆盖
+    bool freestanding = false;    // --freestanding：裸机通道
+    std::string board;            // --board <预设名>
+    // 手工板级参数（预设展开后回填：显式参数 > 预设 > 默认）
+    BareOpts manual;
+    unsigned manualSet = 0; // 位标：0 kind 1 base 2 shift 3 clk 4 baud
+                            //      5 load 6 stack 7 map
     CrossOpts xo;
+    auto parseUll = [](const std::string& s, unsigned long long& out) {
+        try {
+            size_t idx = 0;
+            out = std::stoull(s, &idx, s.rfind("0x", 0) == 0 ? 16 : 0);
+            return idx == s.size();
+        } catch (...) {
+            return false;
+        }
+    };
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "-o" && i + 1 < args.size()) {
             outFile = args[++i];
@@ -308,22 +323,94 @@ int cmdBuild(const std::vector<std::string>& args) {
             xo.march = args[++i]; /* -march（armv7-a、rv64gc…） */
         } else if (args[i] == "--static") {
             xo.staticLink = true; /* 静态链接（交叉 POSIX 必需） */
+        } else if (args[i] == "--freestanding") {
+            freestanding = true; /* 裸机通道（无 libc；crt 内置） */
+        } else if (args[i] == "--board" && i + 1 < args.size()) {
+            board = args[++i]; /* 板级预设（隐含 --freestanding） */
+        } else if (args[i] == "--uart-kind" && i + 1 < args.size()) {
+            manual.uartKind = args[++i]; /* 16550 | pl011 */
+            manualSet |= 1 << 0;
+        } else if (args[i] == "--uart-base" && i + 1 < args.size()) {
+            parseUll(args[++i], manual.uartBase);
+            manualSet |= 1 << 1;
+        } else if (args[i] == "--uart-shift" && i + 1 < args.size()) {
+            manual.uartShift = std::atoi(args[++i].c_str());
+            manualSet |= 1 << 2;
+        } else if (args[i] == "--uart-clk" && i + 1 < args.size()) {
+            parseUll(args[++i], manual.uartClk);
+            manualSet |= 1 << 3;
+        } else if (args[i] == "--baud" && i + 1 < args.size()) {
+            manual.baud = std::atoi(args[++i].c_str());
+            manualSet |= 1 << 4;
+        } else if (args[i] == "--load-base" && i + 1 < args.size()) {
+            parseUll(args[++i], manual.loadBase);
+            manualSet |= 1 << 5;
+        } else if (args[i] == "--stack" && i + 1 < args.size()) {
+            parseUll(args[++i], manual.stackSize);
+            manualSet |= 1 << 6;
+        } else if (args[i] == "--map" && i + 1 < args.size()) {
+            /* MMU 1GB 块属性 "0,1,1,0"（1=normal 0=device） */
+            std::string m = args[++i];
+            for (int gb = 0; gb < 4 && !m.empty(); ++gb) {
+                manual.mapGb[gb] = m[0] == '1';
+                size_t comma = m.find(',');
+                m = comma == std::string::npos ? "" : m.substr(comma + 1);
+            }
+            manualSet |= 1 << 7;
         } else {
             inFile = args[i];
         }
     }
-    if (inFile.empty() || args.size() > 15) {
+    if (inFile.empty() || args.size() > 40) {
         std::cerr << "用法: scourge build [--gpu] [--no-cache] "
                      "[--target <triple>|--target=<triple>] "
                      "[--sysroot <dir>] [--cpu <c>] [--march <a>] [--static] "
+                     "[--freestanding] [--board <name>] [--uart-* ...] "
                      "<file.sg> [-o out]\n";
         return 2;
     }
 
+    // ---- 裸机通道判定：--freestanding / --board / *-none-eabi triple。
+    //      预设先行展开，显式 --uart-* 等手工参数最后覆盖（参数优先于预设，
+    //      这里以"预设后回填默认、用户已设字段不覆盖"语义实现）。 ----
+    if (board.empty() && !xo.target.empty() &&
+        xo.target.find("-none-eabi") != std::string::npos) {
+        freestanding = true; /* bare triple 即裸机（musl 通道用 linux-*） */
+    }
+    if (!board.empty()) {
+        std::string err = applyBarePreset(board, xo.bare, xo.cpu);
+        if (!err.empty()) {
+            std::cerr << err << "\n";
+            return 1;
+        }
+        if (xo.target.empty()) xo.target = "aarch64-none-eabi";
+        freestanding = true;
+    }
+    if (freestanding) {
+        // 显式手工参数最后回填（覆盖预设；未指定的字段保持预设/默认值）
+        if (manualSet & (1 << 0)) xo.bare.uartKind = manual.uartKind;
+        if (manualSet & (1 << 1)) xo.bare.uartBase = manual.uartBase;
+        if (manualSet & (1 << 2)) xo.bare.uartShift = manual.uartShift;
+        if (manualSet & (1 << 3)) xo.bare.uartClk = manual.uartClk;
+        if (manualSet & (1 << 4)) xo.bare.baud = manual.baud;
+        if (manualSet & (1 << 5)) xo.bare.loadBase = manual.loadBase;
+        if (manualSet & (1 << 6)) xo.bare.stackSize = manual.stackSize;
+        if (manualSet & (1 << 7))
+            for (int gb = 0; gb < 4; ++gb)
+                xo.bare.mapGb[gb] = manual.mapGb[gb];
+        if (xo.target.empty()) {
+            std::cerr << "--freestanding 需要 --target <triple>（当前仅 "
+                         "aarch64-none-eabi）或 --board <预设>\n";
+            return 2;
+        }
+        xo.bare.enabled = true;
+        xo.bare.board = board;
+    }
+
     // ---- 一键交叉（0.9.9）：POSIX triple 自动补齐 musl 静态链接与 sysroot
     // 定位——交叉不再要求记全 --target/--sysroot/--static 三件套。显式
-    // --sysroot 优先（不覆盖，Builder 照旧校验其完整性）。 ----
-    if (!xo.target.empty() &&
+    // --sysroot 优先（不覆盖，Builder 照旧校验其完整性）。裸机通道不走此路。 ----
+    if (!xo.target.empty() && !xo.bare.enabled &&
         xo.target.find("windows") == std::string::npos &&
         xo.target.find("mingw") == std::string::npos) {
         xo.staticLink = true; // musl 静态产物零依赖（Builder 对交叉同此约束）
@@ -360,12 +447,18 @@ int cmdBuild(const std::vector<std::string>& args) {
     fs::path outPath =
         outFile.empty()
             ? inPath.parent_path() /
-                  (inPath.stem().string()
+                  (inPath.stem().string() +
+                   (xo.bare.enabled ? "" :
 #ifdef _WIN32
-                   + ".exe"
+                                      ".exe"
+#else
+                                      ""
 #endif
-                   )
+                   ))
             : fs::path(outFile);
+    if (xo.bare.enabled && outFile.empty()) {
+        outPath = inPath.parent_path() / (inPath.stem().string() + ".elf");
+    }
     BuildOutcome r = buildOnce(inPath, outPath, gpuMode, useCache, xo);
     // 失败文本走 stderr——stdout 只承载构建结果报告。
     if (!r.log.empty()) std::cerr << r.log;
@@ -390,6 +483,8 @@ int cmdBuild(const std::vector<std::string>& args) {
         }
         std::cout << "已生成 " << r.exe.string()
                   << (r.fromCache ? "（AOT 缓存命中，仅链接）\n" : "\n");
+        if (!r.bin.empty())
+            std::cout << "已生成 " << r.bin.string() << "（raw bin）\n";
     }
     return r.exitCode;
 }
@@ -420,11 +515,15 @@ int main(int argc, char** argv) {
             << "  interface [--out <f>] <file>        生成 .sgi 接口文件\n"
             << "  run [--no-cache] [--watch] <file>   编译执行（.sgbc 缓存；--watch 保存即重跑）\n"
             << "  build [--gpu] [--no-cache] [--target <triple>|--target=<triple>] [--sysroot <dir>]\n"
-            << "        [--cpu <c>] [--march <a>] [--static] <file>\n"
+            << "        [--cpu <c>] [--march <a>] [--static]\n"
+            << "        [--freestanding] [--board <name>] [--uart-kind/-base/-shift/-clk] [--baud <b>]\n"
+            << "        [--load-base <hex>] [--stack <n>] [--map <0,1,1,0>] <file>\n"
             << "                                    AOT 构建：MLIR → LLVM IR → 原生可执行\n"
             << "                                      （<stem>.sgbuild/obj 增量缓存；交叉编译\n"
             << "                                      目标：*linux-gnu 走 musl 静态 sysroot，\n"
-            << "                                      POSIX triple 自动补 --static 并定位 sysroot）\n"
+            << "                                      POSIX triple 自动补 --static 并定位 sysroot；\n"
+            << "                                      裸机：--freestanding/--board 出 ELF+bin，\n"
+            << "                                      预设 qemu-virt-a64 / rk3588）\n"
             << "  repl                                会话式求值（REPL；会话内 :help 查看命令）\n"
             << "  test [--json] [--seed N] [--runs N] <file>\n"
             << "                                      测试框架：<stem>.sgt 显式测试 +\n"

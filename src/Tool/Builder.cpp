@@ -54,6 +54,7 @@
 #include "scourge/BC/Serialize.hpp"
 #include "scourge/Common/Capability.hpp"
 #include "scourge/Common/Version.hpp"
+#include "scourge/Tool/BuilderShared.hpp"
 #include "scourge/Tool/Session.hpp"
 
 namespace fs = std::filesystem;
@@ -61,6 +62,12 @@ namespace fs = std::filesystem;
 namespace scourge {
 
 namespace {
+
+// 外部命令捕获/字面量转义/工具链指纹/LLVM 定位在 BuilderShared.hpp
+// （Builder.cpp 与 BuilderBare.cpp 单一事实源共用）。
+using bshared::clangTag;
+using bshared::cStringLiteral;
+using bshared::runCapture;
 
 // ----------------------------------------------------------------------------
 // 内嵌 C 运行时：字符串常量按功能域分块至 include/scourge/Tool/BuilderRT*.hpp
@@ -71,53 +78,6 @@ namespace {
 // CUDA 第 1 层：GPU kernel PTX 与分派运行时（--gpu 时追加写入 _rt.c）
 // PTX/OpenCL kernel 与分派层源码见 include/scourge/Tool/BuilderRTGpu*.hpp
 // ----------------------------------------------------------------------------
-
-
-// ----------------------------------------------------------------------------
-// 外部命令驱动
-// ----------------------------------------------------------------------------
-
-/// 执行外部命令并捕获合并输出（stdout+stderr → 捕获文件 → 读回 → 删除）。
-int runCapture(const std::string& exe, const std::string& args,
-               const fs::path& capPath, std::string& out) {
-    std::error_code ec;
-    fs::remove(capPath, ec);
-#ifdef _WIN32
-    // Windows 命令解释器对以引号开头且含特殊字符的命令会剥首尾引号——
-    // 外层再包一对引号（官方文档的标准规避法），内层各路径引号原样保留。
-    std::string cmdline = "\"\"" + exe + "\" " + args + " > \"" +
-                          capPath.string() + "\" 2>&1\"";
-#else
-    // POSIX: /bin/sh 直跑（双引号语义一致，无需外层规避对）。
-    std::string cmdline = "\"" + exe + "\" " + args + " > '" +
-                          capPath.string() + "' 2>&1";
-#endif
-    int rc = std::system(cmdline.c_str());
-    out.clear();
-    std::ifstream in(capPath, std::ios::binary);
-    if (in) {
-        std::ostringstream ss;
-        ss << in.rdbuf();
-        out = ss.str();
-    }
-    fs::remove(capPath, ec);
-    return rc;
-}
-
-/// 内嵌文本 → C 字符串字面量体（换行 → "\n" 续段，转义反斜杠与引号；
-/// 用于把 kernel PTX 原文嵌入生成的 _rt.c，逐行可读便于检视）。
-std::string cStringLiteral(const char* raw) {
-    std::string out;
-    for (const char* p = raw; *p; ++p) {
-        switch (*p) {
-        case '\n': out += "\\n\"\n\""; break;
-        case '\\': out += "\\\\"; break;
-        case '"': out += "\\\""; break;
-        default: out += *p; break;
-        }
-    }
-    return out;
-}
 
 // ----------------------------------------------------------------------------
 // AOT obj 增量缓存（设计文档 5.2：MLIR→LLVM→object 按（模块, 目标, 优化档）
@@ -143,17 +103,8 @@ inline uint64_t fnvKey(std::string_view s,
 ///     musl sysroot 不提供，故绕开）。
 /// 需在 buildOnce 可见作用域内取 targetWin/xo/llvmBin——以 lambda 闭包
 /// 形式在 buildOnce 内构造。
+/// 工具链标签与 clang 定位在 BuilderShared.hpp（单一事实源）。
 /// 工具链标签：clang 路径 + 大小 + 修改时间——工具链升级即缓存失效。
-std::string clangTag(const fs::path& clang) {
-    std::error_code ec;
-    uintmax_t size = fs::file_size(clang, ec);
-    uint64_t sizeV = ec ? 0 : static_cast<uint64_t>(size);
-    ec.clear();
-    auto t = fs::last_write_time(clang, ec);
-    uint64_t mtime = ec ? 0 : static_cast<uint64_t>(t.time_since_epoch().count());
-    return clang.string() + "|" + std::to_string(sizeV) + "|" +
-           std::to_string(mtime);
-}
 
 /// main.obj 缓存键（五重一致性，对齐 .sgbc 五重校验）：格式版本、
 /// 编译器自体指纹、工具链标签、源指纹（依赖层序逐模块：名/路径/归一化
@@ -276,6 +227,10 @@ void writeObjKey(const fs::path& p, uint64_t v) {
 
 BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
                        bool gpuMode, bool useCache, const CrossOpts& xo) {
+    // 裸机通道（--freestanding / --board / *-none-eabi）：链接层完全分叉，
+    // 委派 BuilderBare.cpp（前端管线同源）。
+    if (xo.bare.enabled) return buildBareOnce(inPath, outPath, gpuMode,
+                                              useCache, xo);
     BuildOutcome b;
     b.exe = outPath;
     const std::string entry = inPath.stem().string();

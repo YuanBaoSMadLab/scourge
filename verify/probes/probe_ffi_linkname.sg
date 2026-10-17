@@ -1,0 +1,24 @@
+# @extern 链接别名探针（symbol= 关键字参数）：Scourge 侧惯用名 → C 符号名。
+# 覆盖：别名调用（sg_pow→pow）、别名规避内建名冲突（strlen→strlen）、
+# 无别名路径不回归（fabs 原名直调）。断言式输出保证确定性。
+# Sema：@extern 仅放行 symbol= 字符串关键字参数（白名外拒绝）。
+capability ffi
+
+@extern("msvcrt.dll", symbol="pow")
+def sg_pow(x: float, y: float) -> float:
+    pass
+
+@extern("msvcrt.dll", symbol="strlen")
+def str_len(p: int) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def fabs(x: float) -> float:
+    pass
+
+def main() -> int:
+    print(sg_pow(2.0, 10.0))                 # 1024.0：别名解析到 pow
+    print(sg_pow(2.0, 10.0) == 1024.0)
+    print(str_len(data_ptr("hello, linkname")))  # 15：别名解析到 strlen
+    print(fabs(-2.5))                        # 2.5：无别名路径不回归
+    return 0

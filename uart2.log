@@ -1,0 +1,2 @@
+hello.bin: No such file or directory
+D:\Scourge\build-rel\baretest\qemu\qemu-system-aarch64.exe: -device loader,file=hello.bin,addr=0x42000000,cpu-num=0: Cannot load specified image hello.bin: Could not open 'hello.bin': No such file or directory

@@ -14,6 +14,7 @@
 #include "scourge/BC/VM.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -127,17 +128,18 @@ std::string sha256Hex(const std::string& s) {
 /// CRC-32/ISO-HDLC（IEEE 802.3；zlib/gzip 同款参数）。与 BuilderRTStd.hpp
 /// 的 sg_crc32 独立实现，规范决定结果，"123456789"→0xCBF43926 向量锁定。
 uint32_t crc32Of(const std::string& s) {
-    static uint32_t table[256];
-    static bool ready = false;
-    if (!ready) {
+    // magic static：多 world 并发首次调用也只初始化一次（手写 ready 旗标
+    // 存在数据竞争，会读到半初始化表）。
+    static const std::array<uint32_t, 256> table = [] {
+        std::array<uint32_t, 256> t{};
         for (uint32_t k = 0; k < 256; ++k) {
             uint32_t c = k;
             for (int b = 0; b < 8; ++b)
                 c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : (c >> 1);
-            table[k] = c;
+            t[k] = c;
         }
-        ready = true;
-    }
+        return t;
+    }();
     uint32_t c = 0xFFFFFFFFu;
     for (uint8_t ch : s) c = table[(c ^ ch) & 0xFF] ^ (c >> 8);
     return c ^ 0xFFFFFFFFu;

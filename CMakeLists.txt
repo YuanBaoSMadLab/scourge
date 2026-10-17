@@ -82,7 +82,7 @@ target_include_directories(scourge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 # 可执行文件（AOT/MLIR TU 拆至 scourge_aot：它们独吃 MLIR 巨头，见下）
 # ---------------------------------------------------------------------------
 add_executable(scourge src/Tool/main.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp
-    src/Tool/Builder.cpp src/Tool/TestRunner.cpp)
+    src/Tool/Builder.cpp src/Tool/BuilderBare.cpp src/Tool/TestRunner.cpp)
 target_link_libraries(scourge PRIVATE scourge_core)
 # POSIX 运行时（BuilderRTSys.hpp 的 @extern dlopen 路径）需要 dl；
 # CMAKE_DL_LIBS 在 Windows 上为空，无需平台分支。
@@ -125,7 +125,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 # ---------------------------------------------------------------------------
 add_library(scourge_aot STATIC
     src/AOT/InProcess.cpp src/AOT/LangDialect.cpp src/AOT/LangToAffine.cpp
-    src/AOT/LangToLLVM.cpp src/AOT/LangToLinalg.cpp)
+    src/AOT/LangLowerings.cpp src/AOT/LangToLLVM.cpp src/AOT/LangToLinalg.cpp)
 target_include_directories(scourge_aot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_include_directories(scourge_aot SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS}
                                                       ${MLIR_INCLUDE_DIRS})

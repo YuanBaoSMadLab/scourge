@@ -1,0 +1,4 @@
+# 负探针：宽度超上限（Sema validateFmtSpec 拒绝，防执行侧巨量分配）
+def main() -> int:
+    print(f"{7:1000001d}")
+    return 0

@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <unordered_set>
 
 #include "scourge/Common/Capability.hpp"
@@ -46,6 +47,12 @@ struct FmtSpec {
     char type = 0;
 };
 
+/// width/prec 上限（与 Sema validateFmtSpec、AOT sg_fmtspec_parse、裸机
+/// sg_fmtspec_parse 同值）。Sema 是唯一静态事实源；此处的饱和累加只防
+/// 篡改字节码触发的有符号溢出 UB 与巨量分配。
+constexpr int kMaxFmtWidth = 1000000;
+constexpr int kMaxFmtPrec = 100;
+
 FmtSpec parseFmtSpec(const std::string& s) {
     FmtSpec f;
     size_t i = 0;
@@ -62,13 +69,19 @@ FmtSpec parseFmtSpec(const std::string& s) {
         s[i + 1] >= '0' && s[i + 1] <= '9') {
         f.zero = true; ++i;
     }
-    while (i < s.size() && s[i] >= '0' && s[i] <= '9')
-        f.width = f.width * 10 + (s[i++] - '0');
+    while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+        int d = s[i++] - '0';
+        f.width = f.width > (kMaxFmtWidth - d) / 10 ? kMaxFmtWidth
+                                                    : f.width * 10 + d;
+    }
     if (i < s.size() && s[i] == '.') {
         f.prec = 0;
         ++i;
-        while (i < s.size() && s[i] >= '0' && s[i] <= '9')
-            f.prec = f.prec * 10 + (s[i++] - '0');
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9') {
+            int d = s[i++] - '0';
+            f.prec = f.prec > (kMaxFmtPrec - d) / 10 ? kMaxFmtPrec
+                                                     : f.prec * 10 + d;
+        }
     }
     if (i < s.size()) f.type = s[i];
     return f;
@@ -585,7 +598,10 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
             // 静态 intern 池深拷贝持有，同内容返回同地址；AOT 侧 str 为
             // 全局常量（llvm.ptrtoint），天然进程期存活。双模契约：
             // str 地址只读透传；池上限显式 panic 而非静默泄漏。
+            // 池是进程级 static（多 world 可并发调用），加锁保护。
+            static std::mutex poolMu;
             static std::unordered_set<std::string> pool;
+            std::lock_guard<std::mutex> lk(poolMu);
             if (pool.size() >= 4096)
                 panicHere("data_ptr() 字符串地址池已满（上限 4096）");
             push(Value::makeInt(static_cast<int64_t>(reinterpret_cast<intptr_t>(

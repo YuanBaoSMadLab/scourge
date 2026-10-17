@@ -1,0 +1,12 @@
+# @extern 链接别名反例：symbol= 指向不存在的符号 → 双模 panic 消息逐字一致
+# （stderr hash 比对）。消息须含"dll!别名"而非函数名——证明 VM 与 AOT
+# 降级层三处（查符号/缓存键/panic）同用别名。
+capability ffi
+
+@extern("msvcrt.dll", symbol="no_such_symbol_xyz_981")
+def aliased_boom(x: int) -> int:
+    pass
+
+def main() -> int:
+    print(aliased_boom(1))
+    return 0

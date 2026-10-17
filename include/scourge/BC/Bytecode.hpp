@@ -298,6 +298,8 @@ struct FuncBC {
     bool isExtern = false;              ///< @extern：动态库外部函数（H 专项；
                                         ///< 体不编译，VM 走 VMExtern thunk）
     std::string externDll;              ///< 动态库文件名（@extern 装饰器参数）
+    std::string externSym;              ///< 链接符号名（@extern(..., symbol=...)）；
+                                        ///< 空 = 用函数名（历史约定不破坏旧字节码）
     char externRet = 'v';               ///< 返回类型码：i/f/b/s/v（thunk 读回）
     bool isVariadic = false;            ///< 参数表尾 ...（O 节）：变参被调方
                                         ///< 按参数位置读 GP 影子槽，装载分叉

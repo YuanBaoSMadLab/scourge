@@ -559,13 +559,19 @@ static SgFmtSpec sg_fmtspec_parse(const char* s) {
         f.zero = 1;
         ++i;
     }
-    while (i < n && s[i] >= '0' && s[i] <= '9')
-        f.width = f.width * 10 + (s[i++] - '0');
+    /* width/prec 上限与 Sema validateFmtSpec 同值（1000000 / 100）；
+     * 静态校验是唯一事实源，此处饱和累加仅防篡改输入引发有符号溢出。 */
+    while (i < n && s[i] >= '0' && s[i] <= '9') {
+        int d = s[i++] - '0';
+        f.width = f.width > (1000000 - d) / 10 ? 1000000 : f.width * 10 + d;
+    }
     if (i < n && s[i] == '.') {
         f.prec = 0;
         ++i;
-        while (i < n && s[i] >= '0' && s[i] <= '9')
-            f.prec = f.prec * 10 + (s[i++] - '0');
+        while (i < n && s[i] >= '0' && s[i] <= '9') {
+            int d = s[i++] - '0';
+            f.prec = f.prec > (100 - d) / 10 ? 100 : f.prec * 10 + d;
+        }
     }
     if (i < n) f.type = s[i];
     return f;

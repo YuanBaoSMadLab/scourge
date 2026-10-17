@@ -634,15 +634,23 @@ Value Gen::genCall(const Call& c) {
 
 Value Gen::genExternCall(const FuncSig& sig, const std::vector<Value>& args) {
     // dll 名取自 @extern 装饰器首参数（检查器已校验恰一 StrLit）；
-    // sym = 函数名（约定：Lang 函数名即动态库导出符号名）。
+    // sym = symbol= 关键字参数（链接别名），缺省 = 函数名（历史约定）。
+    // 与 BC/VMExtern.cpp 解析同源：三处（查符号/缓存键/panic 消息）同值。
     std::string dll;
+    std::string sym = sig.name;
     if (sig.def)
         for (const auto& d : sig.def->decorators)
-            if (d.name == "extern" && !d.args.empty() &&
-                d.args[0]->kind == Expr::Kind::StrLit)
-                dll = static_cast<const StrLit&>(*d.args[0]).strValue;
+            if (d.name == "extern") {
+                if (!d.args.empty() &&
+                    d.args[0]->kind == Expr::Kind::StrLit)
+                    dll = static_cast<const StrLit&>(*d.args[0]).strValue;
+                for (const auto& kv : d.kwargs)
+                    if (kv.first == "symbol" &&
+                        kv.second->kind == Expr::Kind::StrLit)
+                        sym = static_cast<const StrLit&>(*kv.second).strValue;
+            }
     Value dv = strConst(dll);
-    Value sv = strConst(sig.name);
+    Value sv = strConst(sym);
     // variadic（O 节）：变参声明标记随 op 下传——降级层据此为间接 call
     // 挂 var_callee_type（LLVM 按 MS x64 varargs 发射，与 VM 位置式装载
     // 双模一致）；定参 extern 不带标记，走定参 ABI。

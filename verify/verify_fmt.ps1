@@ -44,7 +44,8 @@ foreach ($sg in $files) {
 
 # ---- Part 2: negative probes must fail check ----
 foreach ($stem in @('probe_fmt_neg_spec', 'probe_fmt_neg_fmtlit',
-                    'probe_fmt_neg_count', 'probe_fmt_neg_empty')) {
+                    'probe_fmt_neg_count', 'probe_fmt_neg_empty',
+                    'probe_fmt_neg_width', 'probe_fmt_neg_prec')) {
     $sg = "$cb\$stem.sg"
     $p = Start-Process -FilePath $exe -ArgumentList @("check", $sg) -NoNewWindow -Wait -PassThru `
          -RedirectStandardOutput "$dir\$stem.chk.out" -RedirectStandardError "$dir\$stem.chk.err"

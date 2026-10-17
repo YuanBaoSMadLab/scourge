@@ -1,0 +1,4 @@
+# 负探针：精度超上限（Sema validateFmtSpec 拒绝，防执行侧缓冲截断）
+def main() -> int:
+    print(f"{1.0:.101f}")
+    return 0

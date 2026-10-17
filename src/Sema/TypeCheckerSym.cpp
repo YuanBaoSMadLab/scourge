@@ -77,6 +77,28 @@ void TypeChecker::collectTopLevel(Module& m, ModuleSymbols& out) {
                             Errc::E1007_UnsupportedFeature, file_, d.range,
                             "@extern 需要恰好一个字符串参数，如 @extern(\"c\")");
                     }
+                    // 链接别名（@extern("dll", symbol="C名")）：查符号用
+                    // 别名、Scourge 侧保留惯用名；双模后端与 VM 解析同源。
+                    // 其余关键字参数一律拒绝（白名单外无隐式默认）。
+                    bool sawSym = false;
+                    for (const auto& kv : d.kwargs) {
+                        if (kv.first != "symbol" ||
+                            kv.second->kind != Expr::Kind::StrLit) {
+                            diag_.error(
+                                Errc::E1007_UnsupportedFeature, file_,
+                                d.range,
+                                "@extern 仅支持关键字参数 symbol=\"符号名\""
+                                "（字符串，缺省 = 函数名）");
+                            continue;
+                        }
+                        if (sawSym) {
+                            diag_.error(Errc::E1007_UnsupportedFeature, file_,
+                                        d.range,
+                                        "@extern 的 symbol= 只能出现一次");
+                            continue;
+                        }
+                        sawSym = true;
+                    }
                 }
             }
 

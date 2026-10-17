@@ -21,6 +21,8 @@
 //  v8：FuncBC 变参位 kFlagVariadic（O 节 FFI 宽类型域）——不持久化则
 //  .sgbc 命中路径 isVariadic 丢为 false，float 变参退回定参 ABI 读错
 //  GP 影子槽（探针 verify_o_wide 缓存命中分支实锤）；bump 使旧缓存全量失效。
+//  v9：FuncBC 新增 externSym（@extern(..., symbol=...) 链接符号）——不持久化
+//  则 .sgbc 命中路径 symbol 别名丢失、退回函数名查符号；bump 使旧缓存失效。
 // ============================================================================
 #include "scourge/BC/Serialize.hpp"
 
@@ -32,7 +34,7 @@ namespace bc {
 namespace {
 
 constexpr char kMagic[4] = {'S', 'G', 'B', 'C'};
-constexpr uint32_t kFormatVersion = 8; // v8：+kFlagVariadic（O 节变参位）
+constexpr uint32_t kFormatVersion = 9; // v9：+externSym（symbol 链接别名）
 constexpr uint8_t kOpCount = static_cast<uint8_t>(Op::NewTuple) + 1;
 
 constexpr uint8_t kFlagBuiltin = 1;
@@ -73,7 +75,7 @@ struct Reader {
     bool ok = true;
 
     bool raw(void* dst, size_t n) {
-        if (!ok || n > b.size() - p) {
+        if (!ok || p > b.size() || n > b.size() - p) {
             ok = false;
             return false;
         }
@@ -94,7 +96,7 @@ struct Reader {
     bool str(std::string& s) {
         uint32_t n;
         if (!u32(n)) return false;
-        if (n > b.size() - p) {
+        if (p > b.size() || n > b.size() - p) {
             ok = false;
             return false;
         }
@@ -102,8 +104,8 @@ struct Reader {
         p += n;
         return true;
     }
-    /// 剩余字节数（p 恒 ≤ b.size()）。
-    size_t remaining() const { return b.size() - p; }
+    /// 剩余字节数（p ≤ b.size() 是读端不变量；防御性夹零）。
+    size_t remaining() const { return p <= b.size() ? b.size() - p : 0; }
 };
 
 // ----------------------------------------------------------------------------
@@ -416,6 +418,7 @@ void encodeFunc(Writer& w, const FuncBC& f) {
     w.str(f.builtinName);
     if (f.isExtern) {
         w.str(f.externDll);
+        w.str(f.externSym);
         w.u8(static_cast<uint8_t>(f.externRet));
     }
 }
@@ -480,7 +483,7 @@ bool decodeFunc(Reader& r, FuncBC& f) {
     if (!(flags & kFlagExtern)) return true;
     f.isExtern = true;
     uint8_t ret = 0;
-    if (!r.str(f.externDll) || !r.u8(ret)) return false;
+    if (!r.str(f.externDll) || !r.str(f.externSym) || !r.u8(ret)) return false;
     f.externRet = static_cast<char>(ret);
     return true;
 }

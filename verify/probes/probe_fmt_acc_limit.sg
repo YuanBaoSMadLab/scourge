@@ -1,0 +1,7 @@
+# fmt 边界探针：width/prec 上界内（Sema 事实源 1000000 / 100）双模逐字节一致。
+def main() -> int:
+    x = 3.5
+    print(f"{x:.100f}")
+    print(f"{7:1000d}|")
+    print(f"{'hi':.1}")
+    return 0

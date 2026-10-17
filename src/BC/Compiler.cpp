@@ -352,6 +352,18 @@ bool Compiler::compileModule(const Module& m) {
                 break;
             }
         }
+        // 链接符号（@extern(..., symbol=...)）：缺省 = 函数名，与 VM 解析
+        // 及 AOT genExternCall 同源同序（Sema 已校验恰一 StrLit）。
+        for (const auto& d : fd.decorators) {
+            if (d.name != "extern") continue;
+            for (const auto& kv : d.kwargs) {
+                if (kv.first == "symbol" &&
+                    kv.second->kind == Expr::Kind::StrLit) {
+                    fn.externSym =
+                        static_cast<const StrLit&>(*kv.second).strValue;
+                }
+            }
+        }
         auto rt = registry_.find(m.name);
         if (rt == registry_.end()) return;
         auto st = rt->second->funcs.find(fd.name);

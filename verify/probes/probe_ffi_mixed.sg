@@ -1,0 +1,35 @@
+# @extern 混合签名定参探针（MS x64 位置分配规则，双模字节级比对）。
+# 覆盖：(int,double) 的 double 落 xmm1（非 xmm0）；(double,int) 的 int
+# 落 rdx（非 rcx）；(int,double,double) 的 xmm1/xmm2 位置分配；6 参
+# 混合形状的寄存器+栈分界；系统 CRT msvcrt!ldexp 同规则佐证。
+# 背景：0.9.4-0.9.10 定参装载误用 SysV 式独立计数，混合签名第二参数
+# 恒 0（AOT 走 LLVM 位置分配故正确，双模不一致）——本探针锁死该回归。
+capability ffi
+
+@extern("probe_ffi_mixed.dll")
+def m_if(a: int, b: float) -> float:
+    pass
+
+@extern("probe_ffi_mixed.dll")
+def m_fi(a: float, b: int) -> float:
+    pass
+
+@extern("probe_ffi_mixed.dll")
+def m_idd(a: int, b: float, c: float) -> float:
+    pass
+
+@extern("probe_ffi_mixed.dll")
+def m_6(a: int, b: float, c: int, d: float, e: int, f: float) -> float:
+    pass
+
+@extern("msvcrt.dll")
+def ldexp(x: float, e: int) -> float:
+    pass
+
+def main() -> int:
+    print(m_if(1, 7.25))        # 8.25：double 经 xmm1 抵达被调方
+    print(m_fi(7.25, 1))        # 8.25：int 经 rdx 抵达被调方
+    print(m_idd(1, 2.0, 3.0))   # 321.0：1 + 2*10 + 3*100（xmm1/xmm2）
+    print(m_6(1, 2.0, 3, 4.0, 5, 6.0))  # 21.0：前四参寄存器 + 5/6 入栈
+    print(ldexp(0.8125, 4))     # 13.0：系统 CRT 同规则佐证（e 经 rdx）
+    return 0
