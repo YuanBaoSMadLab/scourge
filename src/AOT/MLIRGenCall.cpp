@@ -388,6 +388,20 @@ Value Gen::genCall(const Call& c) {
                     emit("\"lang.list_append_b\"(" + self.ssa + ", " + v.ssa +
                          ") : (!llvm.ptr, i1) -> () " + opLoc());
                     break;
+                case VK::Tuple:
+                    // 批 9 F-21：元组句柄槽——ptrtoint 存 i64（与 items()/
+                    // List[Tuple] 字面量同构，下标/for-in 按 lElem 还原）
+                    if (v.vk != VK::Tuple)
+                        unsupported(c.args[0]->range,
+                                    "append() 实参类型与列表元素不符");
+                    {
+                        std::string b = fresh();
+                        emit(b + " = llvm.ptrtoint " + v.ssa +
+                             " : !llvm.ptr to i64");
+                        emit("\"lang.list_append_i\"(" + self.ssa + ", " + b +
+                             ") : (!llvm.ptr, i64) -> () " + opLoc());
+                    }
+                    break;
                 default:
                     unsupported(c.range, "append() 仅支持标量元素列表");
                 }

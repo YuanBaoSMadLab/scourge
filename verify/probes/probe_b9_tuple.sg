@@ -1,0 +1,42 @@
+# ============================================================================
+# probe_b9_tuple.sg — 批 9 F-21：Tuple[K, V, ...] 通用拼写双模验证
+# ----------------------------------------------------------------------------
+# 验证 Tuple[...] 注解与 (T1, T2, ...) 字面量注解同源等价：
+# 函数参数/返回、局部变量、三元组、下标访问、List[Tuple] 字面量与
+# for-in 消费；另以 Dict.items() 交叉确认批 8 F-22 打印路径不受影响。
+# 期望输出（双模一致，共 10 行）：
+#   (1, "a")
+#   (1, "a")
+#   (1, 2, "ok")
+#   [("a", 1)]
+#   ("a.sg", 3, 7)
+#   b
+#   ("a", 1, 2)
+#   ("b", 3, 4)
+#   ("a", 1, 2)
+#   ("b", 3, 4)
+# ============================================================================
+
+def echo(t: Tuple[int, str]) -> Tuple[int, str]:
+    return t
+
+def main() -> int:
+    t: Tuple[int, str] = (1, "a")
+    print(t)
+    print(echo(t))
+    tri: Tuple[int, int, str] = (1, 2, "ok")
+    print(tri)
+    d: Dict[str, int] = {"a": 1}
+    print(d.items())
+    rec: Tuple[str, int, int] = ("a.sg", 3, 7)
+    print(rec[0], rec[1], rec[2])
+    rows: List[Tuple[str, int, int]] = [("a", 1, 2), ("b", 3, 4)]
+    print(rows[1][0])
+    for r in rows:
+        print(r)
+    acc: List[Tuple[str, int, int]] = []
+    acc.append(("a", 1, 2))
+    acc.append(("b", 3, 4))
+    for r in acc:
+        print(r)
+    return 0

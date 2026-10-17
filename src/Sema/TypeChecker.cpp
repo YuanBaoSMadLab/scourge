@@ -161,8 +161,14 @@ TypePtr TypeChecker::resolveTypeExpr(const TypeExpr& te) {
         return makeTensor(elem, shape);
     }
 
-    // 元组类型注解 (T1, T2, ...)：params 即各元素类型（0.9.6）。
-    if (te.kind == TypeExpr::Kind::Tuple) {
+    // 元组类型注解（0.9.6 字面量形 / 批 9 F-21）：(T1, T2, ...) 与
+    // Tuple[K, V, ...] 两种拼写合流同一分支——单一事实源，保证双模与
+    // 诊断一致（demo 01 曾因仅支持字面量形被迫改写平行 List）。
+    bool isTupleName = te.kind == TypeExpr::Kind::Named && te.name == "Tuple";
+    if (te.kind == TypeExpr::Kind::Tuple || isTupleName) {
+        if (isTupleName && te.params.empty())
+            return fail(Errc::E2001_TypeMismatch, te.range,
+                        "Tuple 需要至少 1 个元素类型参数");
         std::vector<TypePtr> ps;
         ps.reserve(te.params.size());
         for (const auto& p : te.params) ps.push_back(resolveTypeExpr(*p));

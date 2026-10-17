@@ -114,6 +114,7 @@ inline VK vkOfAnnName(const std::string& n) {
     if (n == "str") return VK::Str;
     if (n == "None") return VK::None;
     if (n == "List") return VK::List; // 句柄 VK，元素 VK 由注解参数/首次 store 回填
+    if (n == "Tuple") return VK::Tuple; // 批 9 F-21：Tuple[K,V] 拼写 ≡ 字面量形 (K,V)，句柄 VK
     if (n == "Result") return VK::Result; // 句柄 VK，载荷 VK 由类型表查取
     if (n == "Option") return VK::Result; // ≡ Result 同构句柄，载荷 VK 由类型表查取
     if (n == "Dict") return VK::Dict; // 句柄 VK，键/值 VK 由类型表查取

@@ -304,15 +304,35 @@ Value Gen::genListLit(const ListLit& ls) {
 
     // 元素统一：与检查器 checkListLit 一致——任一 Float → 全 f64；
     // 同为 Int 则保持 i64（bool 只能与 bool 混排，检查器 E2001 已拒异型）。
-    bool anyFloat = false, allInt = true, allBool = true, allStr = true;
+    bool anyFloat = false, allInt = true, allBool = true, allStr = true,
+         allTuple = true;
     for (const Value& v : es) {
         if (v.vk == VK::Float) anyFloat = true;
         if (v.vk != VK::Int) allInt = false;
         if (v.vk != VK::Bool) allBool = false;
         if (v.vk != VK::Str) allStr = false;
+        if (v.vk != VK::Tuple) allTuple = false;
     }
-    if (!allInt && !allBool && !allStr && !anyFloat)
+    if (!allInt && !allBool && !allStr && !anyFloat && !allTuple)
         unsupported(ls.range, "列表字面量含该元素类型");
+
+    // 批 9 F-21：List[Tuple] 字面量——与 Dict.items()/for-in 同构，元素
+    // 句柄 ptrtoint 存 i64 槽（sg_list_format_tuples/下标读同按指针位
+    // 消费），lElem 记 Tuple 供下标与 for-in 还原句柄形态。
+    if (allTuple) {
+        std::vector<Value> bits;
+        bits.reserve(es.size());
+        for (Value& v : es) {
+            std::string b = fresh();
+            emit(b + " = llvm.ptrtoint " + v.ssa + " : !llvm.ptr to i64");
+            bits.push_back(Value{VK::Int, b});
+        }
+        std::string arr = buildI64Array(bits);
+        std::string h = fresh();
+        emit(h + " = \"lang.list_new_i\"(" + intConst((int64_t)bits.size()) +
+             ", " + arr + ") : (i64, !llvm.ptr) -> !llvm.ptr");
+        return Value{VK::List, h, false, 0, static_cast<uint8_t>(VK::Tuple)};
+    }
 
     // 逐元素统一转换（anyFloat 时 int/bool → f64；bool 元素在整型表中 zext i64）
     const bool isF = anyFloat;

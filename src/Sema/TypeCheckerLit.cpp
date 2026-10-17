@@ -442,11 +442,13 @@ TypePtr TypeChecker::checkAttr(const Expr& e) {
         // List.append(v) -> None：原地尾插（共享语义所有别名可见），
         // 非纯（修改状态，不进 @pure 白名单）。元素域 str/int/float/bool
         // （0.9.8 扩展标量全域；VM List 为 vector<Value> 天然异构，AOT
-        // 按元素 VK 分发 list_append_* 四入口，空列表首插定型 etag）。
+        // 按元素 VK 分发 list_append_* 四入口，空列表首插定型 etag）；
+        // 批 9 F-21 增 Tuple（句柄 ptrtoint 存 i64 槽，items() 同先例）。
         if (at.name == "append") {
             Type::Kind k = elem->kind;
             if (k == Type::Kind::Str || k == Type::Kind::Int ||
-                k == Type::Kind::Float || k == Type::Kind::Bool)
+                k == Type::Kind::Float || k == Type::Kind::Bool ||
+                k == Type::Kind::Tuple)
                 return makeFunction({elem}, tyNone());
         }
     }
