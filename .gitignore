@@ -74,6 +74,9 @@ _gpl/
 # bootstrap 引导解压的 LLVM/MLIR 库包（一键构建的中间产物）
 .deps/
 
+# Inno 安装包组装暂存目录（pack.ps1/git archive 现场生成，产物不入库）
+packaging/staging/
+
 # firmware 嵌入式构建产物（build.sh 现场生成，不入库）
 firmware/**/*.elf
 firmware/**/*.bin

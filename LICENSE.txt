@@ -1,0 +1,33 @@
+Scourge Compiler and Toolchain
+Copyright (c) 2026 Scourge Project. All rights reserved.
+
+License
+
+This software and its source code are made available for review,
+learning, and contribution to the Scourge project. Redistribution of
+the binaries or source code, in whole or in part, requires prior
+written permission from the project authors, except where such
+redistribution is an inherent part of contributing to this project
+(forks and pull requests hosted for that purpose).
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Third-Party Notices
+
+The AOT pipeline of the "sg" executable statically links LLVM and
+MLIR, which are licensed under the Apache License 2.0 with the LLVM
+Exceptions Notice:
+
+  LLVM Copyright (c) the LLVM Project. Licensed under the Apache
+  License, Version 2.0 with LLVM Exceptions. See
+  https://llvm.org/LICENSE.txt for the full text.
+
+LLVM/MLIR is linked as an unmodified upstream library; it is not
+distributed in source form within this repository.

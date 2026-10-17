@@ -10,6 +10,8 @@
 // ============================================================================
 #include "scourge/Tool/Session.hpp"
 
+#include "scourge/Common/Version.hpp"  // exePath：std/ 安装布局解析
+
 #include <algorithm>
 #include <atomic>
 #include <fstream>
@@ -319,6 +321,14 @@ std::filesystem::path resolveModulePath(
     std::filesystem::path cwd = std::filesystem::current_path();
     std::filesystem::path c2 = cwd / rel / leaf;
     if (!(c2 == c1) && note(c2)) return c2;
+
+    // 编译器安装布局（先于包缓存）：std/ 与可执行同根——build-rel/sg.exe
+    // 解析仓库根 std/，<install>/bin/sg.exe 解析 <install>/std/（rel 首段
+    // 即 "std"，此处不重复拼接）。安装包用户 import std.* 零配置；
+    // 未命中静默落入包缓存候选。
+    std::filesystem::path c25 =
+        exePath().parent_path().parent_path() / rel / leaf;
+    if (!(c25 == c1) && !(c25 == c2) && note(c25)) return c25;
 
     const char* envPkgs = std::getenv("SCOURGE_PACKAGES");
     std::filesystem::path root =

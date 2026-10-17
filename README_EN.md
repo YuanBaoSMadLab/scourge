@@ -48,6 +48,10 @@ A build produces three executables (in `build-rel/`):
 
 Build hygiene: `sg build` outputs go to `<source dir>/out/`; intermediates and caches go to `<source dir>/.sgbuild/` — the source tree is never polluted.
 
+## Installers
+
+Windows ships Inno Setup installers (`Scourge-0.1.0-win-x64-x86-setup.exe` and `Scourge-0.1.0-win-arm64-setup.exe`; the latter carries x64 binaries that run under the Windows-on-ARM compatibility layer). You can opt into **adding Scourge to the system PATH** during setup; after install, `sg run` / `sg check` / `sg repl` / `sgmcp` / `sget` work with zero configuration — the `std/` standard library is resolved relative to the compiler's install layout, no environment variables needed. Linux gets `scourge-0.1.0-linux-x86_64.tar.gz`, a source release: extract and run `scripts/bootstrap.sh` for a one-command build.
+
 ## Quick Start
 
 Prerequisites: `cmake ≥ 3.28`, `ninja`, `clang`; the MLIR libraries come from a distro `llvm-dev` (auto-detected on Linux) or a prebuilt Release package (auto-downloaded).
@@ -109,6 +113,37 @@ def run_epoch(W1: List[float], b1: List[float], ..., lr: float, t: int) -> Tuple
 
 Five end-to-end applications live in [demos/](demos/README.md): a system inspection tool, a zero-dependency web server, a data cleaning pipeline, MLP regression (GUI, live training), and MLP classification. (Demos and the language manual are documented in Chinese.)
 
+## Performance: Measured, Not Marketed
+
+All numbers below come from single-machine measurements (Windows 11 x64 · 16 cores · RTX 5060 Ti), compared side-by-side against CPython 3.14 and numpy 2.5.1 on the same machine with bit-exact cross-validation of results; methodology and all probes are in [docs/15-性能实测与客观对比.md](docs/15-性能实测与客观对比.md) (Chinese) — **slow numbers are reported as-is**.
+
+**Scalar code: AOT vs CPython 3.14**
+
+| Workload | Scourge AOT | CPython 3.14 | Speedup |
+|---|---|---|---|
+| fib(30) recursion | **6.78 ms** | 159 ms | **≈23×** |
+| 10M-iteration accumulation loop | **11.87 ms** | 882 ms | **≈74×** |
+
+**Matrix multiplication 128×128 (CPU)**
+
+| Implementation | Time | vs Scourge AOT |
+|---|---|---|
+| **Scourge AOT (build)** | **0.32–0.35 ms** | baseline |
+| numpy 2.5.1 (OpenBLAS) | 1.61 ms | ≈5× slower |
+| Scourge VM (run) | 1.23–1.38 ms | ≈4.1× slower |
+| Pure Python triple loop | 115.2 ms | **≈340× slower** |
+
+**Dual-mode equivalence is not a slogan**: the same source produces byte-for-byte identical results under `run` and `build` (panic messages included), and GPU results are bit-identical to CPU. Switch modes with confidence: **VM for development, AOT for release**.
+
+## Honest Limitations
+
+- **Large matrix multiplication trails numpy**: a single-threaded naive kernel against OpenBLAS multi-threaded blocking — ≈18× gap at 1024² (7.72 ms vs 139 ms). Multi-threaded blocking is the next optimization step;
+- **VM scalars trail CPython by 1.4–5.7×**: a straightforward bytecode interpreter — fine for debugging, not the language's ceiling (tensor ops still run native);
+- **GPU only pays off for very large matrices**: at ≤512² driver overhead dominates; at ≥1024² it leads by a marginal ≈1.15×;
+- **The ecosystem starts from zero**: no third-party tensor libraries or package registry — `std.nn` / `std.autodiff` / `sget` is the whole inventory;
+- **Semantics are still tightening**: known gaps (e.g. the `@` declaration form differs from docs) are catalogued in [docs/22-已知缺口与避坑.md](docs/22-已知缺口与避坑.md) (Chinese);
+- **Building AOT binaries needs an external toolchain**: system clang plus MSVC/SDK on Windows; `sg run` (VM) is the zero-dependency out-of-box path.
+
 ## Architecture
 
 ```mermaid
@@ -162,10 +197,18 @@ scripts/          cross-platform bootstrap · vsenv link environment
 firmware/         bare-metal embedded target (STM32F4: runtime + Renode sim)
 ```
 
+## Vision & Co-Development
+
+Scourge's bet: **in an era where AI agents write most of the code, the language itself must act as the verifier**. Deterministic dual-mode execution, full compile-time verification, structured diagnostics, native MCP — so every line an agent writes passes the same ruler, instead of relying on after-the-fact review.
+
+The project is at version 0.1.0 and moving fast. Language semantics, the standard library, the toolchain, and the manual all have room for contribution — issues, PRs, manual edits, and example contributions are all welcome.
+
+If Scourge is valuable to you, consider supporting continued development on Afdian: **[https://afdian.com/a/YuanBaoSMadLab](https://afdian.com/a/YuanBaoSMadLab)**
+
 ## Versioning
 
 **0.1.0** — first public release. The three-binary deliverable, one-command builds on Windows and Linux, five end-to-end demo projects, and the 26-chapter language manual form the stable baseline going forward.
 
 ## License
 
-Copyright © 2026 Scourge Project. All rights reserved.
+Copyright © 2026 Scourge Project. All rights reserved. See [LICENSE.txt](LICENSE.txt).

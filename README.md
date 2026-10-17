@@ -47,6 +47,10 @@ Scourge 把"确定性"作为第一原则：同一段 `.sg` 源码，经 `sg run`
 
 构建产物纪律：`sg build` 产物落 `<源目录>/out/`，中间产物与缓存落 `<源目录>/.sgbuild/`——源码树永不污染。
 
+## 安装包
+
+Windows 提供 Inno Setup 安装包（`Scourge-0.1.0-win-x64-x86-setup.exe` 与 `Scourge-0.1.0-win-arm64-setup.exe`，后者为 x64 二进制经 Windows on ARM 兼容层运行），安装时可勾选**加入系统 PATH**；安装后 `sg run` / `sg check` / `sg repl` / `sgmcp` / `sget` 零配置可用——`std/` 标准库随编译器安装布局解析，无需任何环境变量。Linux 提供 `scourge-0.1.0-linux-x86_64.tar.gz` 源码发行包，解压后 `scripts/bootstrap.sh` 一键构建。
+
 ## 30 秒上手
 
 依赖：`cmake ≥ 3.28`、`ninja`、`clang`；MLIR 库取自发行版 `llvm-dev`（Linux 自动探测）或 Release 预编译库包（自动下载）。
@@ -107,6 +111,37 @@ def run_epoch(W1: List[float], b1: List[float], ..., lr: float, t: int) -> Tuple
 ```
 
 五个端到端应用见 [demos/](demos/README.md)：系统巡检工具、零依赖 Web 服务、数据清洗管道、MLP 回归（GUI 实时训练）、MLP 分类。
+
+## 性能：实测数据说话
+
+以下数字全部来自单机实测（Windows 11 x64 · 16 核 · RTX 5060 Ti），与 CPython 3.14 / numpy 2.5.1 同机对拍、数值逐位交叉验证；方法学与全部探针见 [docs/15-性能实测与客观对比.md](docs/15-性能实测与客观对比.md)——**慢的数字原样收录**。
+
+**标量代码：AOT vs CPython 3.14**
+
+| 负载 | Scourge AOT | CPython 3.14 | 加速比 |
+|---|---|---|---|
+| fib(30) 递归 | **6.78 ms** | 159 ms | **≈23×** |
+| 1000 万次循环累加 | **11.87 ms** | 882 ms | **≈74×** |
+
+**矩阵乘 128×128（CPU）**
+
+| 实现 | 耗时 | 相对 Scourge AOT |
+|---|---|---|
+| **Scourge AOT（build）** | **0.32–0.35 ms** | 基准 |
+| numpy 2.5.1（OpenBLAS） | 1.61 ms | ≈5× 慢 |
+| Scourge VM（run） | 1.23–1.38 ms | ≈4.1× 慢 |
+| 纯 Python 三重循环 | 115.2 ms | **≈340× 慢** |
+
+**双模一致不是口号**：同一份源码，`run` 与 `build` 结果逐字节一致（含 panic 消息），GPU 路径数值与 CPU 逐位一致——性能可以放心换挡：**调试用 VM，发布用 AOT**。
+
+## 诚实的不足
+
+- **大尺寸矩阵乘落后于 numpy**：单线程朴素实现对阵 OpenBLAS 多线程分块，1024² 约 18× 差距（7.72 ms vs 139 ms）——多线程分块是下一步优化方向；
+- **VM 标量弱于 CPython 1.4–5.7×**：直译路线的解释器，调试够用，不是性能上限（张量运算仍走原生运行时）；
+- **GPU 仅极大矩阵有收益**：≤512² 因驱动固定开销反而更慢，≥1024² 约 1.15× 微弱领先；
+- **生态从零起步**：没有第三方张量库与包仓库，`std.nn` / `std.autodiff` / `sget` 是全部家底；
+- **语义仍在收紧**：`@` 声明形态与文档存在差异等已知缺口见 [docs/22-已知缺口与避坑.md](docs/22-已知缺口与避坑.md)；
+- **AOT 产物构建依赖外部工具链**：需系统 clang 与 MSVC/SDK（Windows）；`sg run`（VM）才是零依赖开箱即用的路径。
 
 ## 架构
 
@@ -170,10 +205,18 @@ scripts/          bootstrap 双平台一键构建 · vsenv 链接环境
 firmware/         裸机嵌入式目标（STM32F4：运行时 + Renode 仿真）
 ```
 
+## 愿景与共同研发
+
+Scourge 的赌注是：**AI 代理大规模写代码的时代，语言本身要成为验证器**。确定性双模执行、编译期全量验证、结构化诊断、MCP 原生——让"AI 写的每一行代码"都经过同一把尺子，而不是靠事后审查兜底。
+
+项目处于 0.1.0 早期阶段，语言语义、标准库、工具链、手册均有大量空间，欢迎以 issue、PR、手册修订、示例贡献等任何形式加入共同研发。
+
+如果这个项目对你有价值，欢迎在爱发电支持持续开发：**[https://afdian.com/a/YuanBaoSMadLab](https://afdian.com/a/YuanBaoSMadLab)**
+
 ## 版本
 
 **0.1.0** —— 首个公开版本。三件套交付形态、双平台一键构建、五 demos 端到端工程、26 章语言手册自此起稳定迭代。
 
-## 版权
+## License
 
-Copyright © 2026 Scourge Project. All rights reserved.
+Copyright © 2026 Scourge Project. All rights reserved. See [LICENSE.txt](LICENSE.txt).

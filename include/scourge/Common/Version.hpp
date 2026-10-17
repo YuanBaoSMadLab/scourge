@@ -37,12 +37,9 @@ inline constexpr std::string_view kScourgeVersion = "0.1.0";
 inline constexpr std::string_view kScourgeVersionLabel =
     "scourge 0.1.0（AOT 构建：build 命令经进程内 MLIR → LLVM IR → 原生可执行，无外部 mlir-opt/mlir-translate 依赖）";
 
-/// 编译器自体指纹：自身可执行文件路径 + 大小 + 修改时间。各级缓存键的
-/// 指纹源（原 Builder.cpp 本地助手，.sgbc 缓存接入后上移共享——单一
-/// 事实源）：任何 TU 重编 → 重链 scourge.exe → 指纹变化 → 缓存全量
-/// 失效，无需逐 TU 登记时间戳。路径取值失败时降级为空路径——大小/mtime
-/// 退化为 0，指纹仍稳定（仅失去失效灵敏度，不产生错误命中）。
-inline std::string selfTag() {
+/// 编译器自身可执行文件绝对路径（自体指纹与 std/ 安装布局解析共用；
+/// 取值失败返回空路径）。
+inline std::filesystem::path exePath() {
     std::string path;
 #ifdef _WIN32
     char buf[MAX_PATH];
@@ -53,6 +50,16 @@ inline std::string selfTag() {
     ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
     if (n > 0) path.assign(buf, static_cast<size_t>(n));
 #endif
+    return std::filesystem::path(path);
+}
+
+/// 编译器自体指纹：自身可执行文件路径 + 大小 + 修改时间。各级缓存键的
+/// 指纹源（原 Builder.cpp 本地助手，.sgbc 缓存接入后上移共享——单一
+/// 事实源）：任何 TU 重编 → 重链 scourge.exe → 指纹变化 → 缓存全量
+/// 失效，无需逐 TU 登记时间戳。路径取值失败时降级为空路径——大小/mtime
+/// 退化为 0，指纹仍稳定（仅失去失效灵敏度，不产生错误命中）。
+inline std::string selfTag() {
+    std::string path = exePath().string();
     std::error_code ec;
     uintmax_t size = std::filesystem::file_size(path, ec);
     uint64_t sizeV = ec ? 0 : static_cast<uint64_t>(size);
