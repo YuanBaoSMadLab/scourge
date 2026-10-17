@@ -29,17 +29,11 @@ def ext_of(name: str) -> str:
 def main() -> int:
     names: List[str] = list_dir(".")
 
-    fname: List[str] = []
-    flines: List[int] = []
-    fwords: List[int] = []
-    fbytes: List[int] = []
-    fblank: List[int] = []
-    fcomment: List[int] = []
-    fcode: List[int] = []
+    # 每文件一条 7 元组记录（Tuple[K,...] 双模打通后替代旧平行数组写法）
+    recs: List[Tuple[str, int, int, int, int, int, int]] = []
 
-    exts: List[str] = []
-    ext_files: List[int] = []
-    ext_lines: List[int] = []
+    # 按扩展名聚合：一条 (扩展名, 文件数, 行数) 记录对应一类文件
+    exts: List[Tuple[str, int, int]] = []
 
     n: int = len(names)
     i: int = 0
@@ -66,34 +60,27 @@ def main() -> int:
                     comment = comment + 1
                 m = m + 1
             code: int = lc - blank - comment
-            fname.append(name)
-            flines.append(lc)
-            fwords.append(words)
-            fbytes.append(len(s))
-            fblank.append(blank)
-            fcomment.append(comment)
-            fcode.append(code)
+            recs.append((name, lc, words, len(s), blank, comment, code))
 
             ext: str = ext_of(name)
             found: int = -1
             c: int = 0
             while c < len(exts):
-                if exts[c] == ext:
+                if exts[c][0] == ext:
                     found = c
                 c = c + 1
             if found < 0:
-                exts.append(ext)
-                ext_files.append(1)
-                ext_lines.append(lc)
+                exts.append((ext, 1, lc))
             else:
-                ext_files[found] = ext_files[found] + 1
-                ext_lines[found] = ext_lines[found] + lc
+                # 元组不可变：以重建元组整体替换槽位
+                old = exts[found]
+                exts[found] = (old[0], old[1] + 1, old[2] + lc)
         i = i + 1
 
     # 选择排序：按行数降序（对索引数组 order 排序）
     order: List[int] = []
     k: int = 0
-    while k < len(fname):
+    while k < len(recs):
         order.append(k)
         k = k + 1
     a: int = 0
@@ -101,7 +88,7 @@ def main() -> int:
         mx: int = a
         b: int = a + 1
         while b < len(order):
-            if flines[order[b]] > flines[order[mx]]:
+            if recs[order[b]][1] > recs[order[mx]][1]:
                 mx = b
             b = b + 1
         if mx != a:
@@ -114,12 +101,13 @@ def main() -> int:
     print("name lines words bytes blank comment code")
     r: int = 0
     while r < len(order):
-        idx: int = order[r]
-        print(fname[idx], flines[idx], fwords[idx], fbytes[idx], fblank[idx], fcomment[idx], fcode[idx])
+        # 无注解局部按 List[Tuple] 槽位自动推断为 7 元组（隐式单态化批次的变量推断）
+        rec = recs[order[r]]
+        print(rec[0], rec[1], rec[2], rec[3], rec[4], rec[5], rec[6])
         r = r + 1
 
-    # 摘要统计（对 flines 求 总数/均值/最小/最大/中位数）
-    nf: int = len(flines)
+    # 摘要统计（对行数位 recs[s2][1] 求 总数/均值/最小/最大/中位数）
+    nf: int = len(recs)
     total_lines: int = 0
     total_words: int = 0
     total_bytes: int = 0
@@ -127,17 +115,17 @@ def main() -> int:
     mx2: int = 0
     s2: int = 0
     while s2 < nf:
-        total_lines = total_lines + flines[s2]
-        total_words = total_words + fwords[s2]
-        total_bytes = total_bytes + fbytes[s2]
+        total_lines = total_lines + recs[s2][1]
+        total_words = total_words + recs[s2][2]
+        total_bytes = total_bytes + recs[s2][3]
         if s2 == 0:
-            mn = flines[s2]
-            mx2 = flines[s2]
+            mn = recs[s2][1]
+            mx2 = recs[s2][1]
         else:
-            if flines[s2] < mn:
-                mn = flines[s2]
-            if flines[s2] > mx2:
-                mx2 = flines[s2]
+            if recs[s2][1] < mn:
+                mn = recs[s2][1]
+            if recs[s2][1] > mx2:
+                mx2 = recs[s2][1]
         s2 = s2 + 1
 
     print("== summary ==")
@@ -149,8 +137,11 @@ def main() -> int:
         print("mean_lines", total_lines / float(nf))
         print("min_lines", mn)
         print("max_lines", mx2)
-        # 中位数：对行数排序后取中间
-        sl: List[int] = sorted(flines)
+        # 中位数：提取行数位排序后取中间
+        lines_only: List[int] = []
+        for rec in recs:
+            lines_only.append(rec[1])
+        sl: List[int] = sorted(lines_only)
         mid: int = floor(nf / 2)
         if nf % 2 == 1:
             print("median_lines", sl[mid])
@@ -161,10 +152,9 @@ def main() -> int:
     print("== by extension ==")
     e: int = 0
     while e < len(exts):
-        avg: float = 0.0
-        if ext_files[e] > 0:
-            avg = ext_lines[e] / float(ext_files[e])
-        print(exts[e], "files", ext_files[e], "lines", ext_lines[e], "avg", avg)
+        # 文件数恒 >= 1（append 时即建立记录），无需防护分支
+        avg: float = exts[e][2] / float(exts[e][1])
+        print(exts[e][0], "files", exts[e][1], "lines", exts[e][2], "avg", avg)
         e = e + 1
 
     # 行数分布直方图
@@ -175,7 +165,7 @@ def main() -> int:
     b3: int = 0
     h: int = 0
     while h < nf:
-        L: int = flines[h]
+        L: int = recs[h][1]
         if L < 10:
             b0 = b0 + 1
         elif L < 50:

@@ -187,6 +187,20 @@ void Gen::genAssign(const Assign& a) {
                      opLoc());
                 break;
             }
+            case static_cast<uint8_t>(VK::Tuple):
+                // 批 9 F-21 写路径补全：元组句柄槽——ptrtoint 存 i64
+                //（与 append/List[Tuple] 字面量同构，下标读按 lElem 还原）
+                if (v.vk != VK::Tuple)
+                    unsupported(a.value->range, "下标赋值类型与列表元素不符");
+                {
+                    std::string b = fresh();
+                    emit(b + " = llvm.ptrtoint " + v.ssa +
+                         " : !llvm.ptr to i64");
+                    emit("\"lang.list_store_i\"(" + base.ssa + ", " + iv.ssa +
+                         ", " + b + ") : (!llvm.ptr, i64, i64) -> () " +
+                         opLoc());
+                }
+                break;
             default:
                 unsupported(ix.base->range, "该列表元素类型不支持下标赋值");
             }

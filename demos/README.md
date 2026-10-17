@@ -22,7 +22,7 @@ demos/01_system_tool/main.exe
 
 | 目录 | 方向 | 演示内容（加强后） | 展示的语言能力 |
 |---|---|---|---|
-| `01_system_tool` | 系统工具 | **源代码度量分析器**：逐文件统计 行/词/字节/空行/注释行/代码行，按行数降序排序，按扩展名聚合，输出 均值/最小/最大/中位数 与行数分布直方图 | `capability io`、`list_dir`/`read_text`、`str.split`/`trim`/`startswith`、自定义函数、嵌套循环、自写选择排序、`sorted`、聚合统计 |
+| `01_system_tool` | 系统工具 | **源代码度量分析器**：逐文件统计 行/词/字节/空行/注释行/代码行，按行数降序排序，按扩展名聚合，输出 均值/最小/最大/中位数 与行数分布直方图 | `capability io`、`list_dir`/`read_text`、`str.split`/`trim`/`startswith`、自定义函数、嵌套循环、自写选择排序、`sorted`、`Tuple` 记录、类型自动推断、聚合统计 |
 | `02_web_server` | 网络 | **有状态 JSON API**：路由 `/` `/health` `/echo` `/sum` `/fib` `/stats` `/kv`，含服务端请求计数、内存 KV 存储（GET/POST）、迭代斐波那契、查询串解析、按方法分发、完善错误码 | `capability net`、`net_bind`/`net_accept`/`net_http_read_request`/`net_http_write_response`、`json_decode`、字符串切分、跨请求状态维护 |
 | `03_data_pipeline` | 数据处理 | **多维销售分析 ETL**：解析 JSON 流水，按「类别」「区域」两维分组，每组算 计数/总额/总量/均值/最小/最大/标准差/均价，按销售额降序，输出占比、Grand Total 与离群点检测 | `json_decode`、多维分组聚合、统计量（方差/标准差/`sqrt`）、自写排序、`float()` 转换、平行数组 |
 | `04_ml_regression` | **AI·ML（主方向）** | **MLP 回归完整实验**：autodiff+nn(Adam) 训练拟合 `sin` 单峰；训练/验证集划分、学习曲线、训练/验证 RMSE、密集网格预测的平均/最大绝对误差 | `import std.autodiff/nn as …`、标量 tape 自动微分、`linear_nodes`/`mse`/`gather_grads`/`adam`、权重初始化调优、评估方法论 |
@@ -34,13 +34,15 @@ demos/01_system_tool/main.exe
 ```
 == per-file metrics (sorted by lines desc) ==
 name lines words bytes blank comment code
-main.sg 193 662 5495 16 8 169
+main.sg 183 665 5586 16 13 154
 == summary ==
 files 1
-total_lines 193   total_words 662   total_bytes 5495
-mean_lines 193.0  min_lines 193  max_lines 193  median_lines 193
+total_lines 183
+total_words 665
+total_bytes 5586
+mean_lines 183.0  min_lines 183  max_lines 183  median_lines 183
 == by extension ==
-sg files 1 lines 193 avg 193.0
+sg files 1 lines 183 avg 183.0
 == line-count histogram ==
 0-9 0   10-49 0   50-99 0   100+ 1
 ```
@@ -102,12 +104,13 @@ class0 8 / 8   class1 8 / 8
 1. **模块解析**：`import std.autodiff as ad` 这类标准库导入，需从仓库根目录构建，否则编译器找不到 `std/`。
 2. **同包多子模块导入**要用 `as` 别名（如 `import std.autodiff as ad; import std.nn as nn`），否则顶层名 `std` 重复（E2007）。
 3. **能力门禁**：涉及文件读写需 `capability io`，涉及网络需 `capability net`；缺则报 E5004。
-4. **列表/张量字面量**：一维数值字面量 `[1,2,3]` 默认推断为 **Tensor**；需要 `List` 请显式注解，如 `xs: List[int] = []` + `append`。
+4. **列表/张量字面量**：一维数值字面量 `[1,2,3]` 默认推断为 **List**；需要 `Tensor` 请显式注解，如 `v: Tensor[int, (3,)] = [1, 2, 3]`（demo04/05 的数据集即此写法）。
 5. **`/` 是真除法**：`int / int` 得 `float`；要整数下标用 `floor(nf / 2)`（demo01 中位数即此写法）。
 6. **if/elif/else 共享同一作用域**：同一 `if` 链里不能把同名变量声明成不同类型（demo02 各分支因此用 `sk`/`fn`/`pkey` 等独立命名）。
-7. **元组**：`List[Tuple[str, int, int]]` 收集与下标 VM/AOT 双模一致（demo01 行收集即用平行数组）。
-8. 网络服务为单线程串行（官方契约），演示中处理固定数量请求后退出，便于验证。
-9. **ML 初始化**：tanh 隐层若用交替符号 + 均匀小偏置，易塌缩成常数输出；demo04/05 采用「陡权重 + 跨输入域铺开的偏置」初始化才稳定收敛。
+7. **元组**：`Tuple[K, ...]` 注解、`(a, b, ...)` 字面量、下标读、`append`、`List[Tuple]` 元素整体替换均 VM/AOT 双模一致（demo01 行收集即用 7 元组记录；元组本身不可变，更新槽位须重建元组赋值）。
+8. **类型自动推断**：变量初值与函数传参均可不标注类型——无注解参数按调用点实参类型自动生成特化（隐式单态化），标注注解则更严谨；递归函数的返回类型仍须显式注解。
+9. 网络服务为单线程串行（官方契约），演示中处理固定数量请求后退出，便于验证。
+10. **ML 初始化**：tanh 隐层若用交替符号 + 均匀小偏置，易塌缩成常数输出；demo04/05 采用「陡权重 + 跨输入域铺开的偏置」初始化才稳定收敛。
 
 ## 一句话总结
 
