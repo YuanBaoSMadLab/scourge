@@ -1,11 +1,9 @@
 // ============================================================================
 //  Copyright (c) 2026 Scourge Project. All rights reserved.
-//  Scourge 编译器 — 类型检查器 · 内建广度表
+//  Scourge 类型检查器 — 内建调用规则
 // ----------------------------------------------------------------------------
-//  职责边界：checkBuiltinCall——内建名 → 参数/返回类型规则（自
-//  TypeCheckerCall.cpp 按功能域拆出，单文件行数纪律）。@pure 纯度白名单、
-//  fmt() spec 静态校验（validateFmtSpec）同置此处。其余阶段见同目录
-//  TypeChecker*.cpp（拆分纪律见 AGENTS.md）。
+//  checkBuiltinCall：内建名 → 参数/返回类型规则；@pure 纯度白名单、
+//  fmt() spec 静态校验（validateFmtSpec）同置此处。
 // ============================================================================
 #include "scourge/Sema/TypeChecker.hpp"
 
@@ -16,18 +14,10 @@
 
 namespace scourge {
 
-// ============================================================================
-// fmt() 格式说明符静态校验（0.9.9，f-string :spec 降糖目标）
-// ----------------------------------------------------------------------------
+// fmt() 格式说明符静态校验。
 // 文法（Python 高频子集）：[[fill]align][+][0][width][.prec][type]，
-// type ∈ d/f/e/g/s/%/空。约束与执行侧（RT sg_format_* / VM doBuiltin
-// "fmt"）同一事实源（此处静态拒绝，执行侧不必设防）：
-//   * Int：type 仅 d（精度无意义，Python 同拒）；Float：f/e/g/%/空；
-//   * Str/Bool：fill/align + width/.prec（cpPad 全支持）；type 仅 s/空。
-//   * width ≤ 1000000、prec ≤ 100：执行侧缓冲/填充按此上界设计（AOT
-//     与裸机 fmt 运行时同值；超大值只会导致巨量分配或缓冲截断）。
+// type ∈ d/f/e/g/s/%/空。width ≤ 1000000、prec ≤ 100（与执行侧同值）。
 // 返回空串 = 合法；否则为原因短语（拼入 E1007 消息）。
-// ============================================================================
 static std::string validateFmtSpec(const std::string& s, Type::Kind k) {
     constexpr long long kMaxFmtWidth = 1000000;
     constexpr long long kMaxFmtPrec = 100;

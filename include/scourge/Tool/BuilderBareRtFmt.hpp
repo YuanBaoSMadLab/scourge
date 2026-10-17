@@ -1,17 +1,11 @@
-// ============================================================================
-//  Scourge 编译器 — 裸机运行时 · fmt() 段（Builder 分块专用）
-// ----------------------------------------------------------------------------
-//  职责边界：kBareRtFmtC 追加片段——fmt() 格式说明符解析与 i64/f64/str/bool
-//  排版（f-string :spec 降糖目标）。从 BuilderBareRtStr.hpp 原样搬出，与
-//  BuilderBare.cpp 的拼接顺序（基础段 → str 段 → 本段 → str 尾段）共同保证
-//  生成 C 运行时逐字节不变。panic 消息与 VM/宿主 AOT 逐字一致。
-// ============================================================================
+// Scourge bare runtime — fmt() segment (kBareRtFmtC)
+// Appended in BuilderBare.cpp after str segment, before str-tail segment.
 
 namespace scourge {
 namespace bare {
 
 // 原始字符串内容必须与拆出的原段逐字节一致，故不以段注释开头。
-inline const char kBareRtFmtC[] = R"BRF(/* ==== fmt() 格式化（f-string :spec 降糖目标；与 VM 逐字同构） ==== */
+inline const char kBareRtFmtC[] = R"BRF(/* ==== fmt() 格式化（f-string :spec 降糖） ==== */
 typedef struct {
     char fill;
     char align;
@@ -49,8 +43,7 @@ static SgFmtSpec sg_fmtspec_parse(const char* s) {
         f.zero = 1;
         ++i;
     }
-    /* width/prec 上限与 Sema validateFmtSpec 同值（1000000 / 100）；
-     * 静态校验是唯一事实源，此处饱和累加仅防篡改输入引发有符号溢出。 */
+    /* width/prec 上限 1000000/100（与 Sema 同值；饱和累加防篡改输入溢出）。 */
     while (i < n && s[i] >= '0' && s[i] <= '9') {
         int d = s[i++] - '0';
         f.width = f.width > (1000000 - d) / 10 ? 1000000 : f.width * 10 + d;

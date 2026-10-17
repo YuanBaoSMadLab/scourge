@@ -1,19 +1,6 @@
-// ============================================================================
-//  Scourge 工具链 — build 命令 · 裸机通道（--freestanding / --board）
-// ----------------------------------------------------------------------------
-//  职责边界：aarch64 freestanding 构建 Stage C。前端复用 Session/MLIR/
-//  InProcess（与宿主同一事实源），差异全在链接层：
-//    * 编译强制 -ffreestanding -fno-builtin（-O2 会把清零/拷贝循环
-//      builtin 化，freestanding 下解析回自身/缺失符号——firmware 考古结论）；
-//    * crt 三件套由 BuilderBareA64.hpp 模板按板级参数展开（entry.S + C
-//      运行时 + GNU ld 脚本），ld.lld -T 直链，无 libc/sysroot；
-//    * llvm-objcopy 出 raw bin（首字节即 _start，复位向量语义）；
-//    * 白名单外符号（io/net/json/gui/…）不实现——链接失败时把 lld 的
-//      undefined symbol 映射为能力域处方诊断。
-//  v1 无 obj 缓存（产物小、编译秒级；后续并入统一缓存体系）。
-//  语义纪律：与 firmware/stm32f4 考古结论对齐（boot 别名 / -fno-builtin），
-//  双模一致由 verify/verify_bare.ps1 锁定。
-// ============================================================================
+// Scourge build 命令 — aarch64 freestanding / --board 通道
+// Frontend 复用 Session/MLIR/InProcess，差异在链接层：crt 三件套模板展开，
+// ld.lld -T 直链无 libc，objcopy 出 raw bin；白名单外符号→能力域处方诊断。
 #include "scourge/Tool/Builder.hpp"
 
 #include "scourge/AOT/InProcess.hpp"

@@ -595,10 +595,7 @@ void VM::doBuiltin(const FuncBC& fn, uint32_t argc) {
         if (a[0].kind == Value::Kind::Str) {
             // str 的 SSO 副本随弹栈 Value 析构即悬空（短串缓冲在 Value
             // 内部，strlen 读到 0/AV），地址必须指向进程期稳定副本——
-            // 静态 intern 池深拷贝持有，同内容返回同地址；AOT 侧 str 为
-            // 全局常量（llvm.ptrtoint），天然进程期存活。双模契约：
-            // str 地址只读透传；池上限显式 panic 而非静默泄漏。
-            // 池是进程级 static（多 world 可并发调用），加锁保护。
+            // intern 池：进程级 static，多 world 并发时由 mutex 保护，上限 4096 后 panic。
             static std::mutex poolMu;
             static std::unordered_set<std::string> pool;
             std::lock_guard<std::mutex> lk(poolMu);

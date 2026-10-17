@@ -1,28 +1,19 @@
 // ============================================================================
 //  Copyright (c) 2026 Scourge Project. All rights reserved.
-//  Scourge SG-BC 序列化实现 — Program ↔ 字节流
+//  Scourge SG-BC 序列化 — Program ↔ 字节流
 // ----------------------------------------------------------------------------
-//  编码顺序（编码器与解码器共用同一份隐式契约，任一侧改动即 bump 版本）：
+//  编码顺序（编码器与解码器共享同一份隐式契约，任一侧改动即 bump 版本）：
 //    魔数 "SGBC" | u32 格式版本 | 工具链标签 | 入口名 | u64 源指纹
-//    | 模块名表 | 模块路径表
-//    | 常量池 | 全局名表 | 函数表
-//  Value 按类别编码载荷字段；Result 额外携带 isOk 与 payloadKind，
-//  成功态按 payloadKind 编码载荷、失败态仅携带错误信息。
-//  v2：新增 Tensor 常量（dtype + 形状 + 元素）与 MatMul 指令、
-//  LoadIndex/StoreIndex 的 b=下标个数语义（P1 张量执行）。
-//  v3：op 上界覆盖 IntToFloat/NewDict；新增 Dict 常量（按插入序编
-//  key/val 对，解码逐项 set 重建桶表，与运行时语义零分叉）。
-//  v4：op 上界覆盖 NewSet；新增 Set 常量（按首插序仅编元素，解码
-//  逐项 add 重建链表桶表，与运行时语义零分叉）。
-//  v5：FuncBC 新增 @extern 三元组（kFlagExtern + externDll + externRet，
-//  0.9.4 H 专项——旧格式函数无 extern，缺省字段语义安全）。
-//  v6：op 上界覆盖 NewTuple；新增 Tuple 常量（按源序仅编元素，复用
-//  list 字段递归编码，与运行时语义零分叉；0.9.6 元组缺省参数/常量池）。
-//  v8：FuncBC 变参位 kFlagVariadic（O 节 FFI 宽类型域）——不持久化则
-//  .sgbc 命中路径 isVariadic 丢为 false，float 变参退回定参 ABI 读错
-//  GP 影子槽（探针 verify_o_wide 缓存命中分支实锤）；bump 使旧缓存全量失效。
-//  v9：FuncBC 新增 externSym（@extern(..., symbol=...) 链接符号）——不持久化
-//  则 .sgbc 命中路径 symbol 别名丢失、退回函数名查符号；bump 使旧缓存失效。
+//    | 模块名表 | 模块路径表 | 常量池 | 全局名表 | 函数表
+//  Value 按类别编码载荷字段；Result 额外携带 isOk 与 payloadKind。
+//  版本历史（bump 使旧 .sgbc 全量失效，避免命中路径字段丢失）：
+//    v2: +Tensor 常量 / MatMul / LoadIndex/StoreIndex 新 b 语义
+//    v3: +Dict 常量（按插入序重建桶表）
+//    v4: +Set 常量
+//    v5: FuncBC +@extern 三元组（kFlagExtern + externDll + externRet）
+//    v6: +Tuple 常量（按源序编元素）
+//    v8: +FuncBC.kFlagVariadic（旧缓存命中则变参退化为定参 ABI 读错 GP 影子槽）
+//    v9: +FuncBC.externSym（旧缓存命中则退回函数名查符号）
 // ============================================================================
 #include "scourge/BC/Serialize.hpp"
 

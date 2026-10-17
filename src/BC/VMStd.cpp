@@ -1,15 +1,10 @@
 // ============================================================================
 //  Copyright (c) 2026 Scourge Project. All rights reserved.
-//  Scourge 字节码 VM — 标准库广度内建（M 专项：统计/倒序/哈希）
+//  Scourge VM — 标准库广度内建（mean/var/std/median/reversed/sha256/crc32）
 // ----------------------------------------------------------------------------
-//  职责边界：只实现 mean/var/std/median/reversed/sha256/crc32 七内建；doBuiltin
-//  白名单分派进来（VM.cpp 尾段一行路由，本文件是唯一实现处）。
-//  语义契约（与 src/Tool/BuilderRTStd.hpp 的 sg_* 逐字一致）：
-//    * mean/var/std 接受张量与数值列表（int/float 元素），恒返回 f64；
-//      空输入 panic；方差为总体方差（÷N）；NaN 按 IEEE 传播不拦截；
-//      求和顺序固定为左→右单遍（双模 IEEE 逐位一致的依据）。
-//    * median 同输入域恒返回 f64；排序取中，NaN 破坏全序显式 panic
-//      （同 sorted 契约：拒绝而非未定义）。
+//  doBuiltin 白名单分派进来（VM.cpp 尾段一行路由）。
+//  mean/var/std：总体方差（÷N），求和顺序固定左→右单遍保证 IEEE 双模一致。
+//  median：NaN 破坏全序显式 panic（同 sorted 契约）。
 // ============================================================================
 #include "scourge/BC/VM.hpp"
 

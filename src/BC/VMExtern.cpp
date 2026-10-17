@@ -1,44 +1,12 @@
 // ============================================================================
 //  Copyright (c) 2026 Scourge Project. All rights reserved.
-//  Scourge VM — @extern 动态库调用（0.9.4 H 专项）
+//  Scourge VM — @extern 动态库调用
 // ----------------------------------------------------------------------------
-//  职责边界：doExtern 单一入口——实参从调用栈弹出（Value 自描述类型），
-//  装入固定布局 frame，经通用 x64 机器码 thunk 按 MS x64 ABI 调用外部函数，
-//  返回值按 FuncBC.externRet 读回压栈。语义契约（与 AOT BuilderRTSys.hpp /
-//  LangToLLVM 逐字一致，双模差分由 verify 探针锁定）：
-//    * 参数分配（曾误用 SysV 式独立计数，已修正）：MS x64 寄存器按
-//      【参数位置】分配——
-//      第 p 个参数（0 起）为整型/指针类则占 GPR 序第 p 槽
-//      （rcx/rdx/r8/r9），为浮点类则占 XMM 序第 p 槽（xmm0-3）；
-//      第 5+ 参数按位置序入栈。切勿与 SysV AMD64 的"整型/浮点两类
-//      独立计数"混淆：混合签名 (int, double) 在 MS x64 是
-//      rcx + xmm1（double 位于参数位置 1），不是 rcx + xmm0。
-//      四方实证（2026-10-17，本机 D:\LLVM clang 23.1.3 / MSVC cl
-//      19.51.36260 / LLVM 后端降级 / libffi(ctypes) 结论一致）：
-//      clang 编译 m_if(int,double) 被调方读 b 于 xmm1（addsd
-//      %xmm1）；MSVC 调用方同样 movsd xmm1；LLVM 后端降级
-//      call f(i64,double) 亦把 double 装 xmm1；Python ctypes 经
-//      libffi 调同一 DLL，第二参数经 xmm1 正确抵达被调方。
-//      纯整型/纯浮点签名下两种模型等价（历史探针因此未暴露），
-//      混合签名才分叉——0.9.4-0.9.10 的定参装载误用独立计数，
-//      导致 VM 混合签名 extern 第二参数恒 0（AOT 走 LLVM 位置
-//      分配故正确，双模不一致）；
-//    * 定参与变参同一位置规则。变参额外要求浮点位模式双写 GP
-//      影子槽（被调方 va_arg 的权威读取来源，UCRT printf 族即此
-//      路径，实测证据 clang -S variadic_truth.c：printf("i=%d
-//      f=%.2f",42,3.5) 发射 movq %xmm0,%r8（位模式→位置 2 的
-//      GP 槽）+ movaps %xmm0,%xmm2（值→位置 2 的 xmm 槽））。
-//      定参被调方不读影子槽内容，双写无害——故装载端定参/变参
-//      合流为同一位置式实现；alCount = 最高占用 xmm 槽序数 + 1
-//      （ABI 要求被调方按 AL 保存 xmm[0..AL-1]，覆盖必须完整），
-//      thunk 无条件装载 AL，定参被调方不读 AL，写之无害；
-//    * int 传 i64（32 位形参读低 32 位兼容）、float 仅 double 形参、
-//      bool 传 0/1、str 传 NUL 指针（存活至调用返回）；
-//    * 返回：int 读全 RAX（32 位 int 返回写 EAX 自动零扩展，安全）、
-//      bool 读 RAX & 1、float 读 XMM0、str 深拷贝（NULL → ""）；
-//    * 解析缓存 dll!sym → 地址（cap 256），panic 消息与 AOT 逐字一致。
-//  thunk 一次生成（VirtualAlloc RXW → FlushInstructionCache）：frame 槽位
-//  无条件搬运（多余槽位外部函数不读，写入 0 无害），与具体签名无关。
+//  doExtern 单一入口：实参从调用栈弹出，经通用 x64 机器码 thunk 按 MS x64
+//  ABI 调用外部函数，返回值按 FuncBC.externRet 读回压栈。
+//  MS x64 位置分配规则：按参数位置 p 单流占槽（整型/浮点不独立计数），
+//  混合签名 (int, double) → rcx + xmm1；变参浮点双写 GP 影子槽。
+//  仅 Windows 宿主：POSIX 宿主走 AOT dlopen 路径（panic 见 doExtern 尾）。
 // ============================================================================
 #include "scourge/BC/VM.hpp"
 
@@ -85,8 +53,7 @@ std::vector<std::pair<std::string, void*>>& externCache() {
     return c;
 }
 
-/// 缓存互斥：externCache 是进程级 static，多 world 并发时"查—缺—解析—
-/// 插入"必须原子，否则会重复插入并突破 cap。
+/// 缓存互斥：多 world 并发下"查—缺—解析—插入"需原子，防重复插入突破 cap。
 std::mutex& externCacheMu() {
     static std::mutex m;
     return m;
@@ -170,7 +137,7 @@ uint8_t* generateThunk() {
                                         0x00, 0x00,                   // add rsp,0xA8
                                         0xC3};                        // ret
     en(kEpilogue, sizeof kEpilogue);
-    // 刷新失败意味着取指可能读到未写入的旧内容，必须视为不可用。
+    // 刷新失败意味着取指可能读到未写入的旧内容，必须释放视为不可用。
     if (!FlushInstructionCache(GetCurrentProcess(), p, 4096)) {
         VirtualFree(p, 0, MEM_RELEASE);
         return nullptr;
@@ -178,7 +145,7 @@ uint8_t* generateThunk() {
     return static_cast<uint8_t*>(p);
 }
 
-/// 进程级唯一桩：多 world 并发首次调用也只生成一份。
+/// 进程级唯一桩：多 world 并发首次调用也只生成一份。call_once 保证原子初始化。
 uint8_t* ensureThunk() {
     static std::once_flag once;
     static uint8_t* thunk = nullptr;

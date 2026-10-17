@@ -1,15 +1,6 @@
-// ============================================================================
-//  Scourge 编译器 — 裸机运行时 · str/容器段（Builder 分块专用）
-// ----------------------------------------------------------------------------
-//  职责边界：kBareRtC 追加片段——str 成员方法与 List/Result/crc32（白名单
-//  子集）；fmt() 格式化已拆至 BuilderBareRtFmt.hpp（kBareRtFmtC），二者与
-//  kBareRtStrTailC 按序拼接。从 BuilderRTStr/RTColl/RTStd.hpp 移植：malloc/
-//  realloc → bump（sg_balloc，前段定义），snprintf → 自研排版（i64 十进制 +
-//  f64 大数引擎），strtoll/strtod → 自研解析。panic 消息与 VM/宿主 AOT 逐字
-//  一致。
-//  白名单外（Dict/Set/Tensor/IO/网络/线程/JSON/sha/try 蹦床）不实现——
-//  链接期符号映射诊断（BuilderBare.cpp）。
-// ============================================================================
+// Scourge bare runtime — str/container segment (kBareRtStrC + kBareRtStrTailC)
+// Appended in BuilderBare.cpp after base segment; fmt() split out to
+// BuilderBareRtFmt.hpp.
 
 namespace scourge {
 namespace bare {
@@ -632,8 +623,7 @@ int64_t sg_str_count(const char* hay, const char* needle) {
 
 )BRS";
 
-// 职责边界：以下为 str/List/Result 尾段，与 kBareRtStrC 按序拼接；
-// fmt() 段已拆至 BuilderBareRtFmt.hpp（kBareRtFmtC）。
+// str/List/Result 尾段；与 kBareRtStrC 按序拼接，fmt() 在 kBareRtFmtC。
 inline const char kBareRtStrTailC[] = R"BRS(
 /* ---- crc32（与 kStdRuntimeC 逐位一致：IEEE 反射 0xEDB88320） ---- */
 int64_t sg_crc32(const char* s) {
