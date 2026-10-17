@@ -1,0 +1,41 @@
+# stats_hub.sg — 博客站统计排名层（02 完整博客站）
+# 职责边界：纯计算，无 IO 无状态——把 views 计数 Dict 变成确定序的
+# TopN JSON 片段。排序用「定宽 fmt 键 + sorted + reversed」（sorted 无
+# key 参数的标准替代，01/02/03 三处复用）。
+capability net, thread
+
+# views.items() → 定宽键列表 f"{hits:06d}|{path}"（降序可排序形态）。
+def rank_keys(views: Dict[str, int]) -> List[str]:
+    ks: List[str] = []
+    for it in views.items():
+        ks.append(f"{it[1]:06d}|{it[0]}")
+    return ks
+
+# 定宽键降序取前 limit，产出 JSON 数组片段（不含外层方括号）。
+def top_paths(ks: List[str], limit: int) -> str:
+    out = ""
+    shown = 0
+    first = True
+    for k in reversed(sorted(ks)):
+        if shown >= limit:
+            break
+        sep = k.find("|")
+        if first:
+            first = False
+        else:
+            out = out + ","
+        out = out + f'["{k[sep + 1:]}",{int(k[:sep])}]'
+        shown = shown + 1
+    return out
+
+# 控制台收尾报表：TopN 逐行 "top <path> = <hits>"。
+def top_lines(views: Dict[str, int], limit: int) -> str:
+    out = ""
+    shown = 0
+    for k in reversed(sorted(rank_keys(views))):
+        if shown >= limit:
+            break
+        sep = k.find("|")
+        out = out + f"top {k[sep + 1:]} = {int(k[:sep])}\n"
+        shown = shown + 1
+    return out

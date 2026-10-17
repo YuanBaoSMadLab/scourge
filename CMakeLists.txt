@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(scourge
-    VERSION 0.9.1
+    VERSION 0.1.0
     DESCRIPTION "Scourge：为 AI 代理时代设计的确定性验证型语言（P2 外部协作接口）"
     LANGUAGES CXX)
 
@@ -52,7 +52,7 @@ add_library(scourge_core STATIC
     src/Syntax/Lexer.cpp
     src/Syntax/Parser.cpp src/Syntax/ParserStmt.cpp
     src/Syntax/ParserExpr.cpp src/Syntax/ParserType.cpp
-    src/Sema/Type.cpp
+    src/Sema/Type.cpp src/Sema/TypeRegistry.cpp
     src/Sema/TypeChecker.cpp src/Sema/TypeCheckerSym.cpp
     src/Sema/TypeCheckerFunc.cpp src/Sema/TypeCheckerStmt.cpp
     src/Sema/TypeCheckerExpr.cpp src/Sema/TypeCheckerLit.cpp
@@ -84,12 +84,25 @@ target_include_directories(scourge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 add_executable(scourge src/Tool/main.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp
     src/Tool/Builder.cpp src/Tool/BuilderBare.cpp src/Tool/TestRunner.cpp)
 target_link_libraries(scourge PRIVATE scourge_core)
+# 交付名 sg.exe（目标名保持 scourge，避免全链 target 引用翻改）——
+# `sg run xxx` 短名直达，语言小写双字母主命令。
+set_target_properties(scourge PROPERTIES OUTPUT_NAME sg)
 # POSIX 运行时（BuilderRTSys.hpp 的 @extern dlopen 路径）需要 dl；
 # CMAKE_DL_LIBS 在 Windows 上为空，无需平台分支。
 target_link_libraries(scourge PRIVATE ${CMAKE_DL_LIBS})
 # VMNet.cpp（F/G 专项网络内建）需要 Winsock。
 if(WIN32)
     target_link_libraries(scourge PRIVATE ws2_32)
+endif()
+
+# ---------------------------------------------------------------------------
+# sgmcp.exe：MCP 服务器独立入口（与 sg mcp 子命令共用 McpServer，零分叉）
+# ---------------------------------------------------------------------------
+add_executable(sgmcp src/Tool/McpMain.cpp src/Tool/Repl.cpp
+    src/Tool/McpServer.cpp)
+target_link_libraries(sgmcp PRIVATE scourge_core ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_link_libraries(sgmcp PRIVATE ws2_32)
 endif()
 
 # ---- 进程内 MLIR/LLVM（build 命令阶段 2+3 内联，摆脱 mlir-opt/mlir-translate）----
@@ -193,6 +206,28 @@ target_link_libraries(scourge_aot PRIVATE
     MLIRLLVMToLLVMIRTranslation MLIRBuiltinToLLVMIRTranslation
     MLIRRegisterAllExtensions)
 target_link_libraries(scourge PRIVATE scourge_aot)
+
+# ---------------------------------------------------------------------------
+# sget.exe：包管理器自举（源码即产物——用 sg 编译 Scourge 写的 sget）。
+# 命令面 install/uninstall/list/search/bind 见 examples/sget/main.sg 头注释；
+# 依赖 examples/sget/main.sg 变更才重跑（AOT 缓存命中时仅链接，秒级）。
+# SCOURGE_BOOTSTRAP_SGET=OFF 可跳过（无 AOT 工具链的 CI 场景）。
+# ---------------------------------------------------------------------------
+option(SCOURGE_BOOTSTRAP_SGET "自举构建 sget.exe 包管理器" ON)
+if(SCOURGE_BOOTSTRAP_SGET)
+    # 产物名按平台后缀（Windows sget.exe / Linux sget）——宿主自己也是交付物。
+    set(SCOURGE_SGET_OUT "${CMAKE_CURRENT_BINARY_DIR}/sget${CMAKE_EXECUTABLE_SUFFIX}")
+    add_custom_command(
+        OUTPUT "${SCOURGE_SGET_OUT}"
+        COMMAND $<TARGET_FILE:scourge> build
+                "${CMAKE_CURRENT_SOURCE_DIR}/examples/sget/main.sg"
+                -o "${SCOURGE_SGET_OUT}"
+        DEPENDS scourge "${CMAKE_CURRENT_SOURCE_DIR}/examples/sget/main.sg"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/sget"
+        COMMENT "sget: 自举构建包管理器（sg build examples/sget/main.sg）"
+        VERBATIM)
+    add_custom_target(sget ALL DEPENDS "${SCOURGE_SGET_OUT}")
+endif()
 
 add_executable(scourge_tests tests/test_runner.cpp src/Tool/Repl.cpp
     src/Tool/McpServer.cpp src/Tool/TestRunner.cpp)

@@ -1,0 +1,16 @@
+# demo_cpp_demo.sg — bindgen 生态闭环：Python 风格 .bind → C++ 代理 shim → 双模直调
+import demo_cpp
+
+capability ffi
+
+def main() -> int:
+    c: int = demo_cpp.counter_new("moran")
+    print("name =", demo_cpp.counter_name(c))
+    demo_cpp.counter_add(c, 5)
+    demo_cpp.counter_add(c, 7)
+    print("after 5+7 =", demo_cpp.counter_get(c))
+    demo_cpp.counter_reset(c)
+    print("after reset =", demo_cpp.counter_get(c))
+    demo_cpp.counter_free(c)
+    print("closed")
+    return 0

@@ -1,0 +1,32 @@
+# json_api.sg — 博客站 JSON API 响应体构造（02 完整博客站）
+# 职责边界：纯 JSON 字符串加工，无 IO 无状态——f-string 即模板引擎，
+# {{ }} 转义字面花括号。views 计数表由调用方在 SYNC 栅栏对齐后传入，
+# 此处只读（Dict 跨模块只读传参，修改操作全部留在 main.sg）。
+capability net, thread
+
+import stats_hub
+
+# GET /api/posts：文章列表（含各自阅读数）。
+def posts_json(posts: List[Tuple[int, str, str]], views: Dict[str, int]) -> str:
+    parts: List[str] = []
+    for p in posts:
+        v = views.get("/post/" + str(p[0]), 0)
+        parts.append(f'{{"id":{p[0]},"title":"{p[1]}","views":{v}}}')
+    return "[" + ",".join(parts) + "]"
+
+# POST /api/posts 成功（201）。
+def post_created_json(nid: int, title: str) -> str:
+    return f'{{"id":{nid},"title":"{title}"}}'
+
+# POST /api/posts 请求体不是合法 JSON / 缺字段（400）。
+def bad_request_json() -> str:
+    return '{"error":"bad-json-need-title-body"}'
+
+# 其余路由（404）。
+def not_found_json() -> str:
+    return '{"error":"not-found"}'
+
+# GET /api/stats：总览 + Top3 路径（排名计算委托 stats_hub）。
+def stats_json(served: int, views: Dict[str, int]) -> str:
+    top = stats_hub.top_paths(stats_hub.rank_keys(views), 3)
+    return f'{{"served":{served},"paths":{len(views)},"hits":{sum(views.values())},"top":[{top}]}}'

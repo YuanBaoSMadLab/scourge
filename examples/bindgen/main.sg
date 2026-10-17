@@ -1,0 +1,347 @@
+# bindgen — Scourge 生态绑定生成器（自举：用 Scourge 写的生态工具）
+# 输入：Python 风格绑定声明（.bind）。def + 缩进函数体，函数体是逐字嵌入
+# shim 的 C++ 语句。头文件开源且协议友好 → shim 直接 #include 集成（vendored），
+# 环境不集成，一切调用经我们生成的代理 DLL 中转。link "x.c"（包根基准）的
+# C 源由 C 驱动自动预编成 .obj 再链入代理 DLL（clang++ 视 .c 为 C++ 会炸）。
+# 输出（一次生成三件）：
+#   <outdir>/<name>.sg       Scourge @extern 绑定（import 后直调）
+#   <outdir>/shim/shim.cpp   C++ 代理 DLL 源码（有函数体的 def 才进 shim）
+#   <outdir>/shim/build_shim.bat   一键编译代理 DLL → <outdir>/bin/<dll>
+# 用法：
+#   bindgen <in.bind> <outdir>
+#   bindgen --all <packages_dir>    一次性处理所有 <pkg>/<pkg>.bind
+capability io, proc, env
+
+def indent_of(raw: str) -> int:
+    n: int = 0
+    while n < len(raw) and raw[n] == " ":
+        n = n + 1
+    return n
+
+def unquote(s: str) -> str:
+    if s.startswith("\"") and s.endswith("\"") and len(s) >= 2:
+        return s.slice(1, len(s) - 1)
+    return s
+
+# 引号感知字段切分（library 行的值可能带引号且含空格）
+def fields(s: str) -> List[str]:
+    out: List[str] = []
+    cur: str = ""
+    in_q: bool = False
+    i: int = 0
+    while i < len(s):
+        c: str = s[i]
+        if c == "\"":
+            in_q = not in_q
+        elif (c == " " or c == "\t") and not in_q:
+            if cur != "":
+                out.append(cur)
+            cur = ""
+        else:
+            cur = cur + c
+        i = i + 1
+    if cur != "":
+        out.append(cur)
+    return out
+
+# DSL 类型 → C ABI（shim 导出签名）。handle 统一按 long long 传输
+# （指针当整数过边界），body 内自行转真实指针类型。
+def c_ret(t: str) -> str:
+    if t == "int" or t == "handle":
+        return "long long"
+    if t == "f64":
+        return "double"
+    if t == "bool":
+        return "bool"
+    if t == "str":
+        return "const char*"
+    return "void"
+
+def c_param(t: str) -> str:
+    if t == "int" or t == "handle":
+        return "long long"
+    if t == "f64":
+        return "double"
+    if t == "bool":
+        return "bool"
+    if t == "str":
+        return "const char*"
+    return t
+
+# DSL 类型 → Scourge 绑定类型（handle 是不透明指针 → int）
+def sg_type(t: str) -> str:
+    if t == "handle":
+        return "int"
+    if t == "f64":
+        return "float"
+    if t == "none":
+        return "None"
+    return t
+
+def copyleft(lic: str) -> bool:
+    return lic.contains("GPL") or lic.contains("LGPL") or lic.contains("AGPL")
+
+# 解析 def 行：def name(p: t, p: t) -> ret:（冒号可省）
+# 返回编码 "name|params|ret"，失败返回 ""
+def parse_def(line: str) -> str:
+    lp: int = line.find("(")
+    rp: int = line.find(")")
+    if lp < 0 or rp < lp:
+        return ""
+    name: str = line.slice(4, lp).trim()
+    params: str = line.slice(lp + 1, rp).trim()
+    tail: str = line.slice(rp + 1, len(line)).trim()
+    ret: str = "none"
+    if tail.startswith("->"):
+        ret = tail.slice(2, len(tail)).trim()
+        if ret.endswith(":"):
+            ret = ret.slice(0, len(ret) - 1).trim()
+    return name + "|" + params + "|" + ret
+
+# 单个函数落盘：绑定侧恒生成；shim 侧仅当有函数体。sg/shim 列表是引用
+# 传递（append 共享语义）。返回 0=直通 / 1=进 shim / -1=参数错误。
+def flush_fn(name: str, params_csv: str, ret: str, body0: List[str],
+             dll: str, sg: List[str], shim: List[str]) -> int:
+    pnames: List[str] = []
+    ptypes: List[str] = []
+    if params_csv != "":
+        raws: List[str] = params_csv.split(",")
+        i: int = 0
+        while i < len(raws):
+            p: str = raws[i].trim()
+            if p != "":
+                ci: int = p.find(":")
+                if ci < 0:
+                    print("bindgen: 参数缺类型注解 '" + p + "'（函数 " + name + "）")
+                    return -1
+                pnames.append(p.slice(0, ci).trim())
+                ptypes.append(p.slice(ci + 1, len(p)).trim())
+            i = i + 1
+    sg.append("@extern(\"" + dll + "\")")
+    sig: str = "def " + name + "("
+    k: int = 0
+    while k < len(pnames):
+        if k > 0:
+            sig = sig + ", "
+        sig = sig + pnames[k] + ": " + sg_type(ptypes[k])
+        k = k + 1
+    sig = sig + ") -> " + sg_type(ret) + ":"
+    sg.append(sig)
+    sg.append("    pass")
+    body: List[str] = []
+    for b0 in body0:
+        if b0 != "":
+            body.append(b0)
+    if len(body) == 0:
+        return 0
+    shim.append("extern \"C\" __declspec(dllexport)")
+    psig: str = c_ret(ret) + " " + name + "("
+    k = 0
+    while k < len(pnames):
+        if k > 0:
+            psig = psig + ", "
+        psig = psig + c_param(ptypes[k]) + " " + pnames[k]
+        k = k + 1
+    psig = psig + ") {"
+    shim.append(psig)
+    b: int = 0
+    while b < len(body):
+        ln: str = body[b]
+        if ln != "" and not ln.endswith(";") and not ln.endswith("}") and not ln.endswith("{") and not ln.endswith(":"):
+            ln = ln + ";"
+        shim.append("    " + ln)
+        b = b + 1
+    shim.append("}")
+    shim.append("")
+    return 1
+
+def process(path: str, outdir: str) -> int:
+    if not exists(path):
+        print("bindgen: 找不到绑定声明", path)
+        return 1
+    text: str = read_text(path)
+    lines: List[str] = text.split("\n")
+    pkg: str = ""
+    dll: str = ""
+    lic: str = ""
+    includes: List[str] = []
+    incdirs: List[str] = []
+    links: List[str] = []
+    sg: List[str] = []
+    shim: List[str] = []
+    total: int = 0
+    shimmed: int = 0
+    cur_body: List[str] = []
+    cur_name: str = ""
+    cur_params: str = ""
+    cur_ret: str = ""
+    cur_body: List[str] = []
+    in_def: bool = False
+    def_indent: int = 0
+    i: int = 0
+    while i < len(lines):
+        raw: str = lines[i]
+        line: str = raw.trim()
+        ind: int = indent_of(raw)
+        i = i + 1
+        if line == "" or line.startswith("#"):
+            continue
+        if in_def:
+            if ind > def_indent:
+                cur_body.append(line)
+                continue
+            r: int = flush_fn(cur_name, cur_params, cur_ret, cur_body, dll,
+                              sg, shim)
+            if r < 0:
+                return 1
+            total = total + 1
+            shimmed = shimmed + r
+            in_def = False
+        if line.startswith("library "):
+            fs: List[str] = fields(line)
+            if len(fs) < 2:
+                print("bindgen: library 行缺包名")
+                return 1
+            pkg = unquote(fs[1])
+            j: int = 2
+            while j + 1 <= len(fs) - 1:
+                key: str = fs[j]
+                val: str = unquote(fs[j + 1])
+                if key == "dll":
+                    dll = val
+                elif key == "license":
+                    lic = val
+                j = j + 2
+            if dll == "":
+                print("bindgen: library 行缺 dll 字段")
+                return 1
+        elif line.startswith("include "):
+            includes.append(unquote(fields(line)[1]))
+        elif line.startswith("incdir "):
+            incdirs.append(unquote(fields(line)[1]))
+        elif line.startswith("link "):
+            links.append(unquote(fields(line)[1]))
+        elif line.startswith("def "):
+            enc: str = parse_def(line)
+            if enc == "":
+                print("bindgen: def 行语法错误:", line)
+                return 1
+            parts: List[str] = enc.split("|")
+            cur_name = parts[0]
+            cur_params = parts[1]
+            cur_ret = parts[2]
+            cur_body = [""]
+            in_def = True
+            def_indent = ind
+        else:
+            print("bindgen: 未知指令:", line)
+            return 1
+    if in_def:
+        r: int = flush_fn(cur_name, cur_params, cur_ret, cur_body, dll,
+                          sg, shim)
+        if r < 0:
+            return 1
+        total = total + 1
+        shimmed = shimmed + r
+    if pkg == "":
+        print("bindgen: 缺 library 行")
+        return 1
+    if copyleft(lic):
+        print("bindgen: 警告 — " + pkg + " 许可证 " + lic +
+              " 为 copyleft，集成发布前先过法务")
+    # ---- 产物 1：Scourge 绑定 ----
+    hdr: str = "# " + pkg + " — 由 bindgen 生成（源: " + path + "，许可证 " + lic + "）"
+    if len(shim) > 0:
+        hdr = hdr + "\n# 经代理 DLL 中转：环境不集成，调用全代理"
+    sg2: List[str] = [hdr, "capability ffi", ""]
+    for l in sg:
+        sg2.append(l)
+    write_text(outdir + "/" + pkg + ".sg", "\n".join(sg2) + "\n")
+    # ---- 产物 2/3：代理 shim（仅当存在带函数体的 def）----
+    if len(shim) > 0:
+        sh: List[str] = []
+        sh.append("// 由 bindgen 自动生成（源: " + path + "，许可证 " + lic +
+                  "）。头文件按许可直接集成，环境不集成，调用经此代理。")
+        sh.append("#include <cstdint>")
+        sh.append("")
+        for inc in includes:
+            sh.append("#include \"" + inc + "\"")
+        if len(includes) > 0:
+            sh.append("")
+        for l in shim:
+            sh.append(l)
+        shimdir: str = outdir + "/shim"
+        spawn_wait("cmd", ["/c", "mkdir", shimdir.replace("/", "\\")])
+        write_text(shimdir + "/shim.cpp", "\n".join(sh))
+        bat: List[str] = []
+        bat.append("@echo off")
+        bat.append("set \"CLANG=%SCOURGE_CLANG%\"")
+        bat.append("if \"%CLANG%\"==\"\" set \"CLANG=D:\\LLVM\\bin\\clang++.exe\"")
+        bat.append("if not exist \"%CLANG%\" set \"CLANG=clang++\"")
+        # link 分区：.c 源必须由 C 驱动预编成 .obj——clang++ 把 .c 按 C++
+        # 编译（deprecated），且 amalgamation 类纯 C 代码在 C++ 下直接重定义
+        # 报错（SQLite 实锤）。link 路径按包根计（与 incdir 同基准），shim
+        # 内 CWD 上跳一层；.obj 落 shim 目录不污染包根。
+        csrcs: List[str] = []
+        objs: List[str] = []
+        for lk in links:
+            if lk.endswith(".c"):
+                csrcs.append(lk)
+            else:
+                objs.append(lk)
+        incflags: str = ""
+        for d in incdirs:
+            incflags = incflags + " -I\"..\\" + d + "\""
+        if len(csrcs) > 0:
+            bat.append("set \"CLANGC=%SCOURGE_CLANG_C%\"")
+            bat.append("if \"%CLANGC%\"==\"\" set \"CLANGC=D:\\LLVM\\bin\\clang.exe\"")
+            bat.append("if not exist \"%CLANGC%\" set \"CLANGC=clang\"")
+        bat.append("if not exist \"..\\bin\" mkdir \"..\\bin\"")
+        for cs in csrcs:
+            parts: List[str] = cs.split("/")
+            bn: str = parts[len(parts) - 1]
+            obj: str = bn.slice(0, len(bn) - 2) + ".obj"
+            bat.append("\"%CLANGC%\" -O2" + incflags + " -c \"..\\" + cs +
+                       "\" -o \"" + obj + "\"")
+            bat.append("if errorlevel 1 exit /b 1")
+            objs.append(obj)
+        cmd: str = "\"%CLANG%\" -shared -O2 -std=c++17" + incflags + " shim.cpp"
+        for ob in objs:
+            cmd = cmd + " \"" + ob + "\""
+        cmd = cmd + " -o \"..\\bin\\" + dll + "\""
+        bat.append(cmd)
+        bat.append("if errorlevel 1 exit /b 1")
+        bat.append("echo bindgen: 已生成 ..\\bin\\" + dll)
+        write_text(shimdir + "/build_shim.bat", "\r\n".join(bat) + "\r\n")
+    total = total + 0
+    print("bindgen:", pkg, "—", total, "个函数 →", outdir + "/" + pkg + ".sg" +
+          ("（其中 " + str(shimmed) + " 个经 C++ 代理 shim，shim/build_shim.bat 一键编译）"
+           if shimmed > 0 else "（纯 C 直通，无需 shim）"))
+    return 0
+
+def main() -> int:
+    a: List[str] = args()
+    if len(a) == 2 and a[0] == "--all":
+        root: str = a[1]
+        if not exists(root):
+            print("bindgen: 目录不存在", root)
+            return 1
+        names: List[str] = list_dir(root)
+        ok: int = 0
+        bad: int = 0
+        for n in names:
+            b: str = root + "/" + n + "/" + n + ".bind"
+            if exists(b):
+                if process(b, root + "/" + n) == 0:
+                    ok = ok + 1
+                else:
+                    bad = bad + 1
+        print("bindgen: --all 完成，成功", ok, "个" +
+              ("，失败 " + str(bad) + " 个" if bad > 0 else ""))
+        return 1 if bad > 0 else 0
+    if len(a) != 2:
+        print("bindgen — Scourge 生态绑定生成器")
+        print("用法: bindgen <in.bind> <outdir>")
+        print("      bindgen --all <packages_dir>（一次性处理所有包）")
+        return 0
+    return process(a[0], a[1])

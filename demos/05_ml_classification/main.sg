@@ -1,200 +1,66 @@
-# 演示：AI·ML 主方向 —— autodiff + nn(Adam) 训练 MLP 做 2D 棋盘非线性分类
-# 在 demo05(XOR 4 点) 基础上升级为 4x4 网格 16 点：类别 = (x1>0) XOR (x2>0)，
-# 即棋盘格决策边界。报告总体准确率 + 分类别准确率 + 逐点预测，展示学到的非线性边界。
-import std.autodiff as ad
-import std.nn as nn
-
-def predict(W1: List[float], b1: List[float], W2: List[float], b2: List[float],
-            nin: int, nhid: int, x0: float, x1: float) -> float:
-    T: List[float] = ad.tape()
-    ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
-    ids2: List[int] = nn.params(T, W2, b2, nhid, 1)
-    xn: List[int] = []
-    xn.append(ad.const(T, x0))
-    xn.append(ad.const(T, x1))
-    hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
-    ht: List[int] = []
-    h: int = 0
-    while h < nhid:
-        ht.append(ad.tanh_(T, hn[h]))
-        h = h + 1
-    on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, 1)
-    return ad.value(T, on[0])
+# main.sg — 05 棋盘非线性分类 · 装配入口
+# 流程：model.new_param 随机初始化（seed=7 可复现）→ train.run_epoch 逐
+# epoch 全批训练 → 逐点预测表 + 总体/分类别准确率。
+# 职责边界：本文件只做 epoch 循环编排与评估报告；数据在 dataset、
+# 模型在 model、单 epoch 训练步在 train。
+# 展示：std.autodiff/nn 全套训练闭环（经 model/train 模块化）、
+#       List 切片分段 Adam、f-string 评估表。
+import dataset
+import model
+import train
 
 def main() -> int:
-    nin: int = 2
-    nhid: int = 12
-    nout: int = 1
-    p1: int = nin * nhid
+    seed(7)
+    nhid = 16
+    W1: List[float] = model.new_param(2 * nhid, 1.2)
+    b1: List[float] = model.new_param(nhid, 0.3)
+    W2: List[float] = model.new_param(nhid, 1.2)
+    b2: List[float] = [0.0]
+    mW1 = model.zeros(2 * nhid)
+    vW1 = model.zeros(2 * nhid)
+    mb1 = model.zeros(nhid)
+    vb1 = model.zeros(nhid)
+    mW2 = model.zeros(nhid)
+    vW2 = model.zeros(nhid)
+    mb2 = model.zeros(1)
+    vb2 = model.zeros(1)
 
-    W1: List[float] = []
-    b1: List[float] = []
-    W2: List[float] = []
-    b2: List[float] = []
-    i: int = 0
-    while i < p1:
-        if i % 2 == 0:
-            W1.append(2.0)
-        else:
-            W1.append(-2.0)
-        i = i + 1
-    i = 0
-    while i < nhid:
-        b1.append(-1.5 + 3.0 * float(i) / float(nhid - 1))
-        i = i + 1
-    sg: float = 0.5
-    i = 0
-    while i < nhid * nout:
-        W2.append(sg)
-        sg = -sg
-        i = i + 1
-    b2.append(0.0)
-
-    # 4x4 网格数据集，标签 = (x1>0) XOR (x2>0)
-    xs0: List[float] = []
-    xs1: List[float] = []
-    yt: List[int] = []
-    levels: List[float] = []
-    levels.append(-1.5)
-    levels.append(-0.5)
-    levels.append(0.5)
-    levels.append(1.5)
-    a: int = 0
-    while a < 4:
-        b: int = 0
-        while b < 4:
-            x0: float = levels[a]
-            x1: float = levels[b]
-            lab: int = 0
-            p0: int = 0
-            if x0 > 0.0:
-                p0 = 1
-            p1v: int = 0
-            if x1 > 0.0:
-                p1v = 1
-            if p0 != p1v:
-                lab = 1
-            xs0.append(x0)
-            xs1.append(x1)
-            yt.append(lab)
-            b = b + 1
-        a = a + 1
-    nsamp: int = len(xs0)
-
-    mW1: List[float] = []
-    vW1: List[float] = []
-    mb1: List[float] = []
-    vb1: List[float] = []
-    mW2: List[float] = []
-    vW2: List[float] = []
-    mb2: List[float] = []
-    vb2: List[float] = []
-    i = 0
-    while i < p1:
-        mW1.append(0.0)
-        vW1.append(0.0)
-        i = i + 1
-    i = 0
-    while i < nhid:
-        mb1.append(0.0)
-        vb1.append(0.0)
-        i = i + 1
-    i = 0
-    while i < nhid * nout:
-        mW2.append(0.0)
-        vW2.append(0.0)
-        i = i + 1
-    mb2.append(0.0)
-    vb2.append(0.0)
-
-    lr: float = 0.03
-    epochs: int = 12000
-    t: int = 0
-    e: int = 0
+    lr = 0.05
+    epochs = 6000
+    t = 0
+    e = 0
     while e < epochs:
-        loss_sum: float = 0.0
-        s: int = 0
-        while s < nsamp:
-            T: List[float] = ad.tape()
-            ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
-            ids2: List[int] = nn.params(T, W2, b2, nhid, nout)
-            xn: List[int] = []
-            xn.append(ad.const(T, xs0[s]))
-            xn.append(ad.const(T, xs1[s]))
-            hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
-            ht: List[int] = []
-            h: int = 0
-            while h < nhid:
-                ht.append(ad.tanh_(T, hn[h]))
-                h = h + 1
-            on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
-            yy: List[float] = []
-            yy.append(float(yt[s]))
-            loss: int = nn.mse(T, on, yy, 1)
-            ids: List[int] = []
-            c: int = 0
-            while c < len(ids1):
-                ids.append(ids1[c])
-                c = c + 1
-            c = 0
-            while c < len(ids2):
-                ids.append(ids2[c])
-                c = c + 1
-            g: List[float] = nn.gather_grads(T, loss, ids, p1 + nhid + nhid * nout + nout)
-            t = t + 1
-            g1: List[float] = []
-            g1b: List[float] = []
-            g2: List[float] = []
-            g2b: List[float] = []
-            j: int = 0
-            while j < p1:
-                g1.append(g[j])
-                j = j + 1
-            j = 0
-            while j < nhid:
-                g1b.append(g[p1 + j])
-                j = j + 1
-            j = 0
-            while j < nhid * nout:
-                g2.append(g[p1 + nhid + j])
-                j = j + 1
-            g2b.append(g[p1 + nhid + nhid * nout])
-            nn.adam(W1, g1, mW1, vW1, lr, t, p1)
-            nn.adam(b1, g1b, mb1, vb1, lr, t, nhid)
-            nn.adam(W2, g2, mW2, vW2, lr, t, nhid * nout)
-            nn.adam(b2, g2b, mb2, vb2, lr, t, nout)
-            loss_sum = loss_sum + ad.value(T, loss)
-            s = s + 1
-        if e == 0 or e == 3000 or e == 8000 or e == 11999:
-            print("epoch", e, "loss", loss_sum / float(nsamp))
+        r = train.run_epoch(W1, b1, W2, b2, mW1, vW1, mb1, vb1, mW2, vW2, mb2, vb2, lr, t, nhid)
+        t = r[0]
+        avg = r[1]
+        if e == 0 or e == 3000 or e == epochs - 1:
+            print("epoch", e, "loss", avg)
         e = e + 1
 
+    # 评估：逐点预测表 + 总体/分类别准确率
     print("--- checkerboard evaluation (16 points) ---")
-    correct: int = 0
-    c0_t: int = 0
-    c0_c: int = 0
-    c1_t: int = 0
-    c1_c: int = 0
+    correct = 0
+    c0t = 0
+    c0c = 0
+    c1t = 0
+    c1c = 0
     s = 0
+    nsamp = dataset.n_samples()
     while s < nsamp:
-        pred: float = predict(W1, b1, W2, b2, nin, nhid, xs0[s], xs1[s])
-        cls: int = 0
-        if pred >= 0.5:
-            cls = 1
-        tgt: int = yt[s]
-        ok: int = 0
-        if cls == tgt:
-            ok = 1
-            correct = correct + 1
-        if tgt == 0:
-            c0_t = c0_t + 1
-            c0_c = c0_c + ok
+        pred = model.predict(W1, b1, W2, b2, nhid, dataset.x0_at(s), dataset.x1_at(s))
+        cls = 1 if pred >= 0.5 else 0
+        yt = dataset.label_at(s)
+        ok = 1 if cls == yt else 0
+        correct = correct + ok
+        if yt == 0:
+            c0t = c0t + 1
+            c0c = c0c + ok
         else:
-            c1_t = c1_t + 1
-            c1_c = c1_c + ok
-        print("in", xs0[s], xs1[s], "pred", pred, "class", cls, "target", tgt)
+            c1t = c1t + 1
+            c1c = c1c + ok
+        mark = "ok " if ok == 1 else "MISS"
+        print(f"in {dataset.x0_at(s):+5.1f} {dataset.x1_at(s):+5.1f}  pred {pred:.3f}  class {cls}  target {yt}  {mark}")
         s = s + 1
-    print("accuracy", correct, "/", nsamp)
-    print("class0", c0_c, "/", c0_t)
-    print("class1", c1_c, "/", c1_t)
+    print(f"accuracy {correct} / {nsamp}")
+    print(f"class0 {c0c} / {c0t}   class1 {c1c} / {c1t}")
     return 0

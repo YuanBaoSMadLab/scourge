@@ -31,6 +31,8 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <dbghelp.h>
+#pragma comment(lib, "dbghelp.lib")
 #endif
 
 #include "scourge/Common/Version.hpp"
@@ -76,7 +78,7 @@ int cmdCheck(const std::vector<std::string>& args) {
         }
     }
     if (files.empty()) {
-        std::cerr << "用法: scourge check [--json] [-j N] <file.sg>...\n";
+        std::cerr << "用法: sg check [--json] [-j N] <file.sg>...\n";
         return 2;
     }
 
@@ -112,7 +114,7 @@ int cmdInterface(const std::vector<std::string>& args) {
         }
     }
     if (inFile.empty()) {
-        std::cerr << "用法: scourge interface [--out <file>] <file.sg>\n";
+        std::cerr << "用法: sg interface [--out <file>] <file.sg>\n";
         return 2;
     }
 
@@ -267,11 +269,18 @@ int cmdRun(const std::vector<std::string>& args) {
             scriptArgs.push_back(a); // 文件名后的一切原样透传（可含 -- 开头）
     }
     if (inFile.empty() || args.size() > 3 + scriptArgs.size()) {
-        std::cerr << "用法: scourge run [--no-cache] [--watch] <file.sg> [args...]\n";
+        std::cerr << "用法: sg run [--no-cache] [--watch] <file.sg> [args...]\n";
         return 2;
     }
 
     fs::path inPath(inFile);
+    if (inPath.extension() != ".sg") {
+        // `sg run main` 短名：省略 .sg 后缀（存在 main.sg 才生效）。
+        fs::path cand = inPath;
+        cand += ".sg";
+        std::error_code ec;
+        if (fs::exists(cand, ec)) inPath = cand;
+    }
     if (!watch) {
         RunOutcome r = runOnce(inPath, useCache, /*captureOut=*/false, scriptArgs);
         // 失败诊断走 stderr——stdout 只承载程序输出（与 MCP 通道纪律一致）。
@@ -283,6 +292,8 @@ int cmdRun(const std::vector<std::string>& args) {
 
 int cmdBuild(const std::vector<std::string>& args) {
     std::string outFile;
+    std::string outDir;     // --out-dir：最终产物目录（默认 <源目录>/out）
+    std::string buildDirS;  // --build-dir：中间产物/缓存目录（默认 <源目录>/.sgbuild）
     std::string inFile;
     bool gpuMode = false;
     bool useCache = true;
@@ -306,6 +317,10 @@ int cmdBuild(const std::vector<std::string>& args) {
     for (size_t i = 0; i < args.size(); ++i) {
         if (args[i] == "-o" && i + 1 < args.size()) {
             outFile = args[++i];
+        } else if (args[i] == "--out-dir" && i + 1 < args.size()) {
+            outDir = args[++i]; /* 最终产物目录覆盖（默认 <源目录>/out） */
+        } else if (args[i] == "--build-dir" && i + 1 < args.size()) {
+            buildDirS = args[++i]; /* 中间产物/缓存目录覆盖（默认 .sgbuild） */
         } else if (args[i] == "--gpu") {
             gpuMode = true; /* GPU 覆盖集 op 走 CUDA 动态加载（自动回退 CPU） */
         } else if (args[i] == "--no-cache") {
@@ -361,8 +376,9 @@ int cmdBuild(const std::vector<std::string>& args) {
             inFile = args[i];
         }
     }
-    if (inFile.empty() || args.size() > 40) {
-        std::cerr << "用法: scourge build [--gpu] [--no-cache] "
+    if (inFile.empty() || args.size() > 44) {
+        std::cerr << "用法: sg build [--gpu] [--no-cache] [--out-dir <dir>] "
+                     "[--build-dir <dir>] "
                      "[--target <triple>|--target=<triple>] "
                      "[--sysroot <dir>] [--cpu <c>] [--march <a>] [--static] "
                      "[--freestanding] [--board <name>] [--uart-* ...] "
@@ -444,22 +460,34 @@ int cmdBuild(const std::vector<std::string>& args) {
     }
 
     fs::path inPath(inFile);
-    fs::path outPath =
-        outFile.empty()
-            ? inPath.parent_path() /
-                  (inPath.stem().string() +
-                   (xo.bare.enabled ? "" :
-#ifdef _WIN32
-                                      ".exe"
-#else
-                                      ""
-#endif
-                   ))
-            : fs::path(outFile);
-    if (xo.bare.enabled && outFile.empty()) {
-        outPath = inPath.parent_path() / (inPath.stem().string() + ".elf");
+    if (inPath.extension() != ".sg" && !xo.bare.enabled) {
+        // `sg build main` 短名：省略 .sg 后缀（存在 main.sg 才生效）。
+        fs::path cand = inPath;
+        cand += ".sg";
+        std::error_code ec;
+        if (fs::exists(cand, ec)) inPath = cand;
     }
-    BuildOutcome r = buildOnce(inPath, outPath, gpuMode, useCache, xo);
+    // 产物路径裁定（优先级：-o 显式 > --out-dir > 默认 <源目录>/out/）。
+    // 裸机通道产物为 .elf；宿主通道 Windows = .exe / POSIX = 无后缀。
+    fs::path outPath;
+    if (!outFile.empty()) {
+        outPath = fs::path(outFile);
+    } else {
+        const char* ext =
+            xo.bare.enabled ? ".elf"
+#ifdef _WIN32
+                            : ".exe";
+#else
+                            : "";
+#endif
+        fs::path base = outDir.empty() ? inPath.parent_path() / "out"
+                                       : fs::path(outDir);
+        outPath = base / (inPath.stem().string() + ext);
+    }
+    fs::path buildDir =
+        buildDirS.empty() ? fs::path() : fs::path(buildDirS);
+    BuildOutcome r = buildOnce(inPath, outPath, gpuMode, useCache, xo,
+                               buildDir);
     // 失败文本走 stderr——stdout 只承载构建结果报告。
     if (!r.log.empty()) std::cerr << r.log;
     if (r.exitCode == 0) {
@@ -491,14 +519,51 @@ int cmdBuild(const std::vector<std::string>& args) {
 
 } // namespace
 
+#ifdef _WIN32
+// 开发期崩溃报告：未处理异常时打印异常码与整栈符号（dbghelp + PDB，
+// 支持文件:行号），定位编译器自身崩溃；不影响正常路径。
+static LONG WINAPI crashReport(EXCEPTION_POINTERS* ep) {
+    HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+    SymInitialize(proc, nullptr, TRUE);
+    fprintf(stderr, "\ncompiler-crash code=0x%08lX\n",
+            static_cast<unsigned long>(ep->ExceptionRecord->ExceptionCode));
+    void* stk[32];
+    USHORT n = CaptureStackBackTrace(0, 32, stk, nullptr);
+    for (USHORT i = 0; i < n; ++i) {
+        DWORD64 pc = reinterpret_cast<DWORD64>(stk[i]);
+        alignas(SYMBOL_INFOW) char buf[sizeof(SYMBOL_INFOW) + 512 * sizeof(wchar_t)];
+        auto* si = reinterpret_cast<SYMBOL_INFOW*>(buf);
+        si->SizeOfStruct = sizeof(SYMBOL_INFOW);
+        si->MaxNameLen = 255;
+        DWORD64 off = 0;
+        if (SymFromAddrW(proc, pc, &off, si)) {
+            IMAGEHLP_LINEW64 ln{};
+            ln.SizeOfStruct = sizeof(IMAGEHLP_LINEW64);
+            DWORD disp = 0;
+            if (SymGetLineFromAddrW64(proc, pc, &disp, &ln))
+                fprintf(stderr, "  #%hu %ls+0x%llX (%ls:%lu)\n", i, si->Name,
+                        off, ln.FileName, static_cast<unsigned long>(ln.LineNumber));
+            else
+                fprintf(stderr, "  #%hu %ls+0x%llX\n", i, si->Name, off);
+        } else {
+            fprintf(stderr, "  #%hu pc=%p\n", i, stk[i]);
+        }
+    }
+    fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
 int main(int argc, char** argv) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); // 中文诊断在 Windows 控制台正常显示
+    SetUnhandledExceptionFilter(crashReport);
 #endif
     std::vector<std::string> args(argv + (argc > 1 ? 1 : 0), argv + argc);
     if (args.empty()) {
         std::cout << kScourgeVersionLabel
-              << "\n用法: scourge <check|interface|run|build|test|repl|mcp|version|help> ...\n";
+              << "\n用法: sg <check|interface|run|build|test|repl|mcp|version|help> ...\n";
         return 2;
     }
     const std::string cmd = args[0];
@@ -513,22 +578,26 @@ int main(int argc, char** argv) {
                   << "命令:\n"
             << "  check [--json] [-j N] <file.sg>...  全量验证（JSON 诊断可选，N 为并行度）\n"
             << "  interface [--out <f>] <file>        生成 .sgi 接口文件\n"
-            << "  run [--no-cache] [--watch] <file>   编译执行（.sgbc 缓存；--watch 保存即重跑）\n"
-            << "  build [--gpu] [--no-cache] [--target <triple>|--target=<triple>] [--sysroot <dir>]\n"
+            << "  run [--no-cache] [--watch] <file>   编译执行（缓存落 .sgbuild/；--watch 保存即重跑）\n"
+            << "  build [--gpu] [--no-cache] [--out-dir <dir>] [--build-dir <dir>]\n"
+            << "        [--target <triple>|--target=<triple>] [--sysroot <dir>]\n"
             << "        [--cpu <c>] [--march <a>] [--static]\n"
             << "        [--freestanding] [--board <name>] [--uart-kind/-base/-shift/-clk] [--baud <b>]\n"
-            << "        [--load-base <hex>] [--stack <n>] [--map <0,1,1,0>] <file>\n"
-            << "                                    AOT 构建：MLIR → LLVM IR → 原生可执行\n"
-            << "                                      （<stem>.sgbuild/obj 增量缓存；交叉编译\n"
-            << "                                      目标：*linux-gnu 走 musl 静态 sysroot，\n"
-            << "                                      POSIX triple 自动补 --static 并定位 sysroot；\n"
-            << "                                      裸机：--freestanding/--board 出 ELF+bin，\n"
-            << "                                      预设 qemu-virt-a64 / rk3588）\n"
+            << "        [--load-base <hex>] [--stack <n>] [--map <0,1,1,0>] <file> [-o out]\n"
+            << "                                    AOT 构建：MLIR → LLVM IR → 原生可执行。\n"
+            << "                                      最终产物默认 <源目录>/out/，中间产物与\n"
+            << "                                      缓存默认 <源目录>/.sgbuild/（--out-dir/\n"
+            << "                                      --build-dir 可覆盖）；交叉编译目标：\n"
+            << "                                      *linux-gnu 走 musl 静态 sysroot\n"
+            << "                                      （POSIX triple 自动补 --static 并定位\n"
+            << "                                      sysroot）；裸机 --freestanding/--board\n"
+            << "                                      出 ELF+bin，预设 qemu-virt-a64 / rk3588\n"
             << "  repl                                会话式求值（REPL；会话内 :help 查看命令）\n"
             << "  test [--json] [--seed N] [--runs N] <file>\n"
             << "                                      测试框架：<stem>.sgt 显式测试 +\n"
             << "                                      @pure 契约属性测试（自动预言）\n"
-            << "  mcp                                 MCP 服务器模式（stdio JSON-RPC 2.0，供 AI 代理接入）\n"
+            << "  mcp                                 MCP 服务器模式（stdio JSON-RPC 2.0，供 AI 代理接入；\n"
+            << "                                      亦可用独立入口 sgmcp.exe）\n"
             << "  version                             版本信息\n"
             << "  help                                本帮助\n";
         return 0;
@@ -540,19 +609,19 @@ int main(int argc, char** argv) {
     if (cmd == "test") return runTests(rest);
     if (cmd == "repl") {
         if (!rest.empty()) {
-            std::cerr << "用法: scourge repl\n";
+            std::cerr << "用法: sg repl\n";
             return 2;
         }
         return cmdRepl();
     }
     if (cmd == "mcp") {
         if (!rest.empty()) {
-            std::cerr << "用法: scourge mcp（stdio JSON-RPC，无命令行参数）\n";
+            std::cerr << "用法: sg mcp（stdio JSON-RPC，无命令行参数）\n";
             return 2;
         }
         return cmdMcp();
     }
 
-    std::cerr << "未知命令 '" << cmd << "'（scourge help 查看用法）\n";
+    std::cerr << "未知命令 '" << cmd << "'（sg help 查看用法）\n";
     return 2;
 }

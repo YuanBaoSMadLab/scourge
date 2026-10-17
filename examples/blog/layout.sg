@@ -1,0 +1,95 @@
+# layout.sg — HTML 渲染（转义 / mini markdown / 页面模板）
+import posts
+
+capability io
+
+# ---- HTML 转义：& 必须最先，防注入（评论区等动态内容出口全走这里） ----
+def esc(s: str) -> str:
+    t: str = s.replace("&", "&amp;")
+    t = t.replace("<", "&lt;")
+    t = t.replace(">", "&gt;")
+    t = t.replace("\"", "&quot;")
+    return t
+
+
+# ---- 剥离 markdown 前缀（语言无切片，用 split 绕） ----
+def cut_prefix(s: str, pre: str) -> str:
+    parts: List[str] = s.split(pre)
+    if len(parts) > 1:
+        return parts[1]
+    return s
+
+
+# ---- mini markdown：## 标题 / - 列表（连续行并组）/ 空行分段 / > 引用 ----
+def md(src: str) -> str:
+    out = ""
+    in_list: bool = False
+    in_quote: bool = False
+    blocks: List[str] = src.split("\n\n")
+    for b in blocks:
+        t: str = b.trim()
+        if t == "":
+            continue
+        if t.startswith("## "):
+            if in_list:
+                out = out + "</ul>"
+                in_list = False
+            if in_quote:
+                out = out + "</blockquote>"
+                in_quote = False
+            out = out + f"<h2>{esc(cut_prefix(t, "## "))}</h2>"
+        elif t.startswith("> "):
+            if in_list:
+                out = out + "</ul>"
+                in_list = False
+            if not in_quote:
+                out = out + "<blockquote>"
+                in_quote = True
+            out = out + f"<p>{esc(cut_prefix(t, "> "))}</p>"
+        elif t.startswith("- "):
+            if in_quote:
+                out = out + "</blockquote>"
+                in_quote = False
+            if not in_list:
+                out = out + "<ul>"
+                in_list = True
+            out = out + f"<li>{esc(cut_prefix(t, "- "))}</li>"
+        else:
+            if in_list:
+                out = out + "</ul>"
+                in_list = False
+            if in_quote:
+                out = out + "</blockquote>"
+                in_quote = False
+            out = out + f"<p>{esc(t).replace("\n", "<br>")}</p>"
+    if in_list:
+        out = out + "</ul>"
+    if in_quote:
+        out = out + "</blockquote>"
+    return out
+
+
+# ---- 整页骨架：顶栏 + 内容 + 页脚 ----
+def page(title: str, body: str) -> str:
+    css: str = read_text("static/style.css")
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{esc(title)} - {posts.BLOG_NAME}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<nav>
+<a class="logo" href="/">{posts.BLOG_NAME}</a>
+<a href="/">文章</a>
+<a href="/archive">归档</a>
+<a href="/about">关于</a>
+</nav>
+<main>
+{body}
+</main>
+<footer>由 Scourge 单文件服务器驱动 · 双模一致</footer>
+</body>
+</html>"""

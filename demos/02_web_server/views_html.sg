@@ -1,0 +1,44 @@
+# views_html.sg — 博客站呈现层（02 完整博客站）
+# 职责边界：纯 HTML/CSS 模板加工，输入参数→输出字符串，无 IO 无状态。
+# f-string 即模板引擎：{t} 插值、三引号多行模板；前端首页经 fetch 动态
+# 渲染列表（浏览器侧拼装），服务端只出骨架页。
+capability net, thread
+
+# 内嵌样式表（GET /style.css 响应体）。
+def css_text() -> str:
+    return """body { font-family: sans-serif; max-width: 640px; margin: 2rem auto;
+padding: 0 1rem; color: #222; background: #fdfdfb; }
+header h1 { margin-bottom: 0; } header p { color: #777; margin-top: 0.2rem; }
+article { border-left: 3px solid #7a5; padding-left: 1rem; margin: 1rem 0; }
+a { color: #369; text-decoration: none; } footer { margin-top: 2rem; color: #999; }"""
+
+# 首页骨架（GET /）：列表由前端 fetch('/api/posts') 动态渲染。
+def index_html() -> str:
+    return """<!doctype html>
+<html><head><meta charset="utf-8"><title>Scourge Blog</title>
+<link rel="stylesheet" href="/style.css"></head>
+<body><header><h1>Scourge Blog</h1>
+<p>one binary, whole site - SSR pages, JSON API and fetch-rendered index</p></header>
+<main id="app"><p>loading...</p></main>
+<footer><a href="/api/posts">/api/posts</a> | <a href="/api/stats">/api/stats</a></footer>
+<script>
+fetch('/api/posts').then(function (r) { return r.json(); }).then(function (ps) {
+  document.getElementById('app').innerHTML = ps.map(function (p) {
+    return '<article><h2><a href="/post/' + p.id + '">' + p.title +
+           '</a></h2><p>' + p.views + ' views</p></article>';
+  }).join('');
+});
+</script></body></html>"""
+
+# 文章详情页（SSR，GET /post/{id} 命中）：标题/正文/阅读数服务端直出。
+def post_html(title: str, body: str, views: int) -> str:
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{title}</title>
+<link rel="stylesheet" href="/style.css"></head>
+<body><header><h1>{title}</h1></header>
+<main><article>{body}</article><p>{views} views - <a href="/">back</a></p></main>
+</body></html>"""
+
+# 未命中文章（GET /post/{id} 不存在）。
+def not_found_html() -> str:
+    return "<h1>404</h1>"

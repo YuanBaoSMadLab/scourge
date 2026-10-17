@@ -89,7 +89,7 @@ clean "$stem"
 if [ $? -ne 0 ]; then
     echo "$stem BUILD-FAIL"; _FAIL=$((_FAIL+1))
 else
-    # Run 1: VM（scourge run），Run 2: AOT exe 直启（PS1 0.9s，放宽 2 倍）
+    # Run 1: VM（sg run），Run 2: AOT exe 直启（PS1 0.9s，放宽 2 倍）
     "$SCOURGE" run "$sg" >"$WORK/$stem.run.out" 2>"$WORK/$stem.run.err" & p1=$!
     sleep 1.8
     "$PY" "$client" >"$WORK/$stem.client.out" 2>"$WORK/$stem.client.err"

@@ -1,0 +1,11 @@
+import demo_cpp
+
+capability ffi
+
+def main() -> int:
+    c: int = demo_cpp.counter_new("sget")
+    demo_cpp.counter_add(c, 20)
+    demo_cpp.counter_add(c, 26)
+    print("sget+bindgen =", demo_cpp.counter_get(c), demo_cpp.counter_name(c))
+    demo_cpp.counter_free(c)
+    return 0

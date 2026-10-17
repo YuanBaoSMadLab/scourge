@@ -4,13 +4,40 @@
 #   P1: stdlib_math.sg - VM (run) vs AOT (build) stdout byte-identical (SHA256), exit 0 both.
 #   P2: stdlib_panic.sg - VM vs AOT stderr byte-identical (SHA256), exit 1 both
 #       (floor(1e100) => "floor() result out of int64 range" panic, byte-same message).
-#   P3: scourge test math2.sg - all explicit tests pass (exit 0, ok=true).
+#   P3: sg test math2.sg - all explicit tests pass (exit 0, ok=true).
 $ErrorActionPreference = 'Stop'
 $root = 'd:\Scourge\build-rel\verify\stdlib'
 $srcDir = 'd:\Scourge\verify\stdlib'
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-$scourge = 'd:\Scourge\build-rel\scourge.exe'
+# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = $null
+try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
+if (-not $repoRoot) {
+    # Walk up to find CMakeLists.txt as fallback
+    $p = $here
+    while ($p -and -not (Test-Path (Join-Path $p 'CMakeLists.txt'))) {
+        $parent = Split-Path $p -Parent
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    $repoRoot = $p
+}
+$exe = $null
+$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cmd) {
+    # Sanity check: ensure it's Scourge, not ast-grep or some other tool
+    $sgOutArr = & $cmd.Source --help 2>&1
+    $sgHelp = ($sgOutArr -join "`n")
+    $sgExit = $LASTEXITCODE
+    if ($sgExit -eq 0 -and $sgHelp -match 'scourge') {
+        $exe = $cmd.Source
+    }
+}
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+# -------------------------------------------------------------------------------------
 $utf8nb = New-Object System.Text.UTF8Encoding($false)
 
 Copy-Item (Join-Path $srcDir 'stdlib_math.sg') $root
@@ -23,7 +50,7 @@ function Run-Proc([string[]]$procArgs, [string]$tag) {
     $errF = Join-Path $root ($tag + '.err')
     if (Test-Path $outF) { Remove-Item -Force $outF }
     if (Test-Path $errF) { Remove-Item -Force $errF }
-    $p = Start-Process -FilePath $scourge -ArgumentList $procArgs -RedirectStandardOutput $outF -RedirectStandardError $errF -Wait -PassThru -NoNewWindow
+    $p = Start-Process -FilePath $exe -ArgumentList $procArgs -RedirectStandardOutput $outF -RedirectStandardError $errF -Wait -PassThru -NoNewWindow
     return @{
         Exit = $p.ExitCode
         Out = $outF
@@ -79,7 +106,7 @@ if ($buildp.Exit -eq 0) {
     Write-Output ("  stderr: " + [System.IO.File]::ReadAllText($buildp.Err))
 }
 
-# ---- P3: scourge test math2.sg - all explicit tests pass ----
+# ---- P3: sg test math2.sg - all explicit tests pass ----
 $t = Run-Proc @('test', '--json', (Join-Path $root 'math2.sg')) 'test_math2'
 Check ($t.Exit -eq 0) "P3 test exit 0 (got $($t.Exit))"
 $tjson = [System.IO.File]::ReadAllText($t.Out, [System.Text.Encoding]::UTF8).Replace([string][char]13, '')

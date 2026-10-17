@@ -1,11 +1,38 @@
-﻿# verify_bindgen.ps1 — bindgen（Python 风格绑定 → Scourge 绑定 + C++ 代理 shim）端到端回归
+# verify_bindgen.ps1 — bindgen（Python 风格绑定 → Scourge 绑定 + C++ 代理 shim）端到端回归
 # 用法: 'A' | powershell -ExecutionPolicy Bypass -File verify_bindgen.ps1
 $ErrorActionPreference = "Stop"
 $fail = 0
 $root = "D:\Scourge"
 $bg = "$root\examples\bindgen"
 $pkg = "$bg\packages"
-$sg = "$root\build-rel\scourge.exe"
+# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = $null
+try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
+if (-not $repoRoot) {
+    # Walk up to find CMakeLists.txt as fallback
+    $p = $here
+    while ($p -and -not (Test-Path (Join-Path $p 'CMakeLists.txt'))) {
+        $parent = Split-Path $p -Parent
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    $repoRoot = $p
+}
+$exe = $null
+$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cmd) {
+    # Sanity check: ensure it's Scourge, not ast-grep or some other tool
+    $sgOutArr = & $cmd.Source --help 2>&1
+    $sgHelp = ($sgOutArr -join "`n")
+    $sgExit = $LASTEXITCODE
+    if ($sgExit -eq 0 -and $sgHelp -match 'scourge') {
+        $exe = $cmd.Source
+    }
+}
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+# -------------------------------------------------------------------------------------
 
 function Fail($m) { Write-Host "$m FAIL"; $script:fail++ }
 function Pass($m) { Write-Host "$m PASS" }
@@ -13,7 +40,7 @@ function Pass($m) { Write-Host "$m PASS" }
 Push-Location $root
 try {
     # ---- 0. bindgen 自举构建（Scourge 写的生态工具）----
-    & $sg build "$bg\main.sg" -o "$bg\bindgen.exe" *> $null
+    & $exe build "$bg\main.sg" -o "$bg\bindgen.exe" *> $null
     if ($LASTEXITCODE -ne 0) { Fail "bindgen-build"; Pop-Location; exit 1 }
     Pass "bindgen-build (AOT 自举)"
 
@@ -27,8 +54,8 @@ def main() -> int:
     print("[" + s.slice(10, 999) + "]")
     return 0
 "@ | Set-Content $t -Encoding UTF8
-    $vm = & $sg run $t 2>&1
-    & $sg build $t -o "$env:TEMP\vb_slice.exe" *> $null
+    $vm = & $exe run $t 2>&1
+    & $exe build $t -o "$env:TEMP\vb_slice.exe" *> $null
     $aot = & "$env:TEMP\vb_slice.exe" 2>&1
     if (($vm -join "`n") -eq ($aot -join "`n") -and $aot -contains "bindgen") {
         Pass "slice 双模一致"
@@ -36,8 +63,8 @@ def main() -> int:
 
     # ---- 2. and/or 短路（VM/AOT 语义一致）----
     $t2 = "$root\verify\probes\probe_logic_shortcircuit.sg"
-    $vm2 = & $sg run $t2 2>&1
-    & $sg build $t2 -o "$env:TEMP\vb_sc_probe.exe" *> $null
+    $vm2 = & $exe run $t2 2>&1
+    & $exe build $t2 -o "$env:TEMP\vb_sc_probe.exe" *> $null
     $aot2 = & "$env:TEMP\vb_sc_probe.exe" 2>&1
     if (($vm2 -join "`n") -eq ($aot2 -join "`n") -and ($vm2 -join "`n") -match "panic: True") {
         Pass "短路求值双模一致"
@@ -70,8 +97,8 @@ def main() -> int:
     Remove-Item "$pkg\demo_cpp\demo_demo*" -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue
     Copy-Item "$pkg\demo_cpp\bin\demo_cpp_shim.dll" "$pkg\demo_cpp\" -Force
     Push-Location "$pkg\demo_cpp"
-    $vm3 = & $sg run demo_cpp_demo.sg 2>&1
-    & $sg build demo_cpp_demo.sg -o demo_demo.exe *> $null
+    $vm3 = & $exe run demo_cpp_demo.sg 2>&1
+    & $exe build demo_cpp_demo.sg -o demo_demo.exe *> $null
     $aot3 = & .\demo_demo.exe 2>&1
     Pop-Location
     if (($vm3 -join "`n") -eq ($aot3 -join "`n") -and ($aot3 -join "`n") -match "after 5\+7 = 12") {
@@ -80,8 +107,8 @@ def main() -> int:
 
     # ---- 6. mathx 纯 C 直通双模 ----
     Push-Location "$pkg\mathx"
-    $vm4 = & $sg run mathx_demo.sg 2>&1
-    & $sg build mathx_demo.sg -o mathx_demo.exe *> $null
+    $vm4 = & $exe run mathx_demo.sg 2>&1
+    & $exe build mathx_demo.sg -o mathx_demo.exe *> $null
     $aot4 = & .\mathx_demo.exe 2>&1
     Pop-Location
     if (($vm4 -join "`n") -eq ($aot4 -join "`n") -and ($aot4 -join "`n") -match "pow\(2,10\) = 1024") {
@@ -102,8 +129,8 @@ def main() -> int:
     Remove-Item "$pkg\sqlite3\sqlite3_demo_run*", "$pkg\sqlite3\sqlite3_demo.db" -Recurse -Force -Confirm:$false -ErrorAction SilentlyContinue
     Copy-Item "$pkg\sqlite3\bin\sqlite3_shim.dll" "$pkg\sqlite3\" -Force
     Push-Location "$pkg\sqlite3"
-    $vm6 = & $sg run --no-cache sqlite3_demo.sg 2>&1
-    & $sg build sqlite3_demo.sg -o sqlite3_demo_run.exe *> $null
+    $vm6 = & $exe run --no-cache sqlite3_demo.sg 2>&1
+    & $exe build sqlite3_demo.sg -o sqlite3_demo_run.exe *> $null
     $aot6 = & .\sqlite3_demo_run.exe 2>&1
     Pop-Location
     # bind_double 走混合签名定参（MS x64 位置分配）：avg = 8.25 即
@@ -117,16 +144,16 @@ def main() -> int:
     Remove-Item "$pkg\sqlite3\sqlite3_shim.dll" -Force -ErrorAction SilentlyContinue
 
     # ---- 8. sget bind 集成 ----
-    $sgetDir = "$root\examples\sget"
-    & $sg build "$sgetDir\main.sg" -o "$sgetDir\sget.exe" *> $null
-    Push-Location $sgetDir
+    $exeetDir = "$root\examples\sget"
+    & $exe build "$exeetDir\main.sg" -o "$exeetDir\sget.exe" *> $null
+    Push-Location $exeetDir
     Remove-Item demo_cpp_shim.dll -Force -ErrorAction SilentlyContinue
     $b = & cmd /c "sget.exe bind demo_cpp 2>&1"
     Pop-Location
-    if (-not (Test-Path "$sgetDir\demo_cpp_shim.dll")) { Fail "sget bind ($b)"; Pop-Location; exit 1 }
-    Push-Location $sgetDir
-    $vm5 = & $sg run bind_demo.sg 2>&1
-    & $sg build bind_demo.sg -o bind_demo.exe *> $null
+    if (-not (Test-Path "$exeetDir\demo_cpp_shim.dll")) { Fail "sget bind ($b)"; Pop-Location; exit 1 }
+    Push-Location $exeetDir
+    $vm5 = & $exe run bind_demo.sg 2>&1
+    & $exe build bind_demo.sg -o bind_demo.exe *> $null
     $aot5 = & .\bind_demo.exe 2>&1
     Pop-Location
     if (($vm5 -join "`n") -eq ($aot5 -join "`n") -and ($aot5 -join "`n") -match "sget\+bindgen = 46") {

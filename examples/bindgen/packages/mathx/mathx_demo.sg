@@ -1,0 +1,10 @@
+import mathx
+
+capability ffi
+
+def main() -> int:
+    print("pow(2,10) =", mathx.pow(2.0, 10.0))
+    print("fabs(-3.5) =", mathx.fabs(-3.5))
+    print("fmod(7,3) =", mathx.fmod(7.0, 3.0))
+    print("atoi 42 =", mathx.atoi("42"))
+    return 0

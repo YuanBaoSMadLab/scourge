@@ -1,0 +1,21 @@
+def fib(n: int) -> int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def main() -> int:
+    print("scourge bare-metal hello (aarch64)")
+    n: int = fib(10)
+    f: float = 2.5 * 4.0
+    s: str = "fib(10)=" + str(n) + " f=" + str(f)
+    print(s)
+    print(n)
+    print(f)
+    print(True)
+    print(0.1)
+    print(1e-300 * 10)
+    xs: List[int] = [3, 1, 2]
+    xs.append(42)
+    print(xs)
+    print("crc32:", crc32("123456789"))
+    return 0

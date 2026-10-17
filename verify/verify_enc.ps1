@@ -8,7 +8,34 @@ $ErrorActionPreference = 'Stop'
 $root = 'd:\Scourge\build-rel\verify\enc'
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-$scourge = 'd:\Scourge\build-rel\scourge.exe'
+# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = $null
+try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
+if (-not $repoRoot) {
+    # Walk up to find CMakeLists.txt as fallback
+    $p = $here
+    while ($p -and -not (Test-Path (Join-Path $p 'CMakeLists.txt'))) {
+        $parent = Split-Path $p -Parent
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    $repoRoot = $p
+}
+$exe = $null
+$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cmd) {
+    # Sanity check: ensure it's Scourge, not ast-grep or some other tool
+    $sgOutArr = & $cmd.Source --help 2>&1
+    $sgHelp = ($sgOutArr -join "`n")
+    $sgExit = $LASTEXITCODE
+    if ($sgExit -eq 0 -and $sgHelp -match 'scourge') {
+        $exe = $cmd.Source
+    }
+}
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+# -------------------------------------------------------------------------------------
 
 $t1 = -join @([char]0x4F60, [char]0x597D, [char]0x2C, [char]0x4E16, [char]0x754C, [char]0x41, [char]0x42, [char]0x43)
 $t2 = [string][char]0x4F60 + [string][char]0x597D + [string][char]0xD83C + [string][char]0xDF89 + [string][char]0x21
@@ -33,7 +60,7 @@ function Run-Probe([string]$sg, [string]$tag) {
     $errF = Join-Path $root ($tag + '.err')
     if (Test-Path $outF) { Remove-Item -Force $outF }
     if (Test-Path $errF) { Remove-Item -Force $errF }
-    $p = Start-Process -FilePath $scourge -ArgumentList @('run', '--no-cache', $sg) -RedirectStandardOutput $outF -RedirectStandardError $errF -Wait -PassThru -NoNewWindow
+    $p = Start-Process -FilePath $exe -ArgumentList @('run', '--no-cache', $sg) -RedirectStandardOutput $outF -RedirectStandardError $errF -Wait -PassThru -NoNewWindow
     if ($p.ExitCode -ne 0) {
         Write-Output ("FAIL run exit " + $tag + " code=" + $p.ExitCode)
         Get-Content $errF | ForEach-Object { Write-Output $_ }
@@ -86,7 +113,7 @@ $exeErr = Join-Path $root 'aot.err'
 if (Test-Path $exeOut) { Remove-Item -Force $exeOut }
 if (Test-Path $exeErr) { Remove-Item -Force $exeErr }
 $sg = Join-Path $root 'enc_utf8bom.sg'
-$p = Start-Process -FilePath $scourge -ArgumentList @('build', $sg, '-o', $exe) -RedirectStandardOutput (Join-Path $root 'aot_build.out') -RedirectStandardError (Join-Path $root 'aot_build.err') -Wait -PassThru -NoNewWindow
+$p = Start-Process -FilePath $exe -ArgumentList @('build', $sg, '-o', $exe) -RedirectStandardOutput (Join-Path $root 'aot_build.out') -RedirectStandardError (Join-Path $root 'aot_build.err') -Wait -PassThru -NoNewWindow
 if ($p.ExitCode -ne 0) {
     Write-Output "FAIL build exit"
     Get-Content (Join-Path $root 'aot_build.err') | ForEach-Object { Write-Output $_ }

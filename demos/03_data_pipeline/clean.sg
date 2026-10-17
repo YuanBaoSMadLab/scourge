@@ -1,0 +1,28 @@
+# clean.sg — ETL 清洗校验层（03 销售流水 ETL）
+# 职责边界：原始 JSON 文本 → 已清洗记录列表；类型守卫（缺字段/类型不符/
+# 非正金额一律丢弃）。Json 临时值不跨语句复用类型（E2001 同名异型坑），
+# 故 jc/jr/ja/jq 独立命名。
+capability io
+
+# 原始 JSON 数组文本 → List[(cat, region, amt, qty)]。
+# 校验规则：cat/region 必须字符串、qty 必须整数、amt 必须正数
+#（int 或 float 均收，统一转 float）。丢弃不抛错——计数交给调用方
+#（j.len() 与返回长度的差值）。
+def clean_all(raw: str) -> List[Tuple[str, str, float, int]]:
+    j = json_decode(raw)
+    recs: List[Tuple[str, str, float, int]] = []
+    i = 0
+    while i < j.len():
+        rec = j.at(i)
+        jc = rec.get("cat")
+        jr = rec.get("region")
+        ja = rec.get("amt")
+        jq = rec.get("qty")
+        ok = False
+        if jc.is_str() and jr.is_str() and jq.is_int():
+            if (ja.is_float() or ja.is_int()) and ja.as_float() > 0.0:
+                ok = True
+        if ok:
+            recs.append((jc.as_str(), jr.as_str(), ja.as_float(), jq.as_int()))
+        i = i + 1
+    return recs

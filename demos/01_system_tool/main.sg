@@ -1,182 +1,56 @@
-# 演示：系统工具方向 —— 源代码度量分析器
-# 扫描目录下 .sg/.md/.txt，统计每个文件的行/词/字节/空行/注释行/代码行，
-# 按行数降序排序，按扩展名聚合，并输出摘要统计（均值/最小/最大/中位数）与行数分布直方图。
-capability io
+# main.sg — 01 代码库度量 CLI · 装配入口
+# 用法：main.exe [--path=目录] [--top=N]（缺省扫当前目录、展示前 5）。
+# 职责边界：只做 CLI 解析与三层数据流编排——scan.sg 采集、stats.sg 聚合、
+# report.sg 呈现；本文件不含任何统计或格式化逻辑。
+# 展示：args()、跨模块 import 协作、内建统计、Dict 聚合、write_text 落盘。
+capability io, env
 
-def is_blank(line: str) -> bool:
-    return len(line.trim()) == 0
-
-def is_comment(line: str) -> bool:
-    t: str = line.trim()
-    return t.startswith("#")
-
-def count_words(line: str) -> int:
-    ws: List[str] = line.split(" ")
-    c: int = 0
-    i: int = 0
-    while i < len(ws):
-        if len(ws[i]) > 0:
-            c = c + 1
-        i = i + 1
-    return c
-
-def ext_of(name: str) -> str:
-    parts: List[str] = name.split(".")
-    if len(parts) >= 2:
-        return parts[len(parts) - 1]
-    return "none"
+import scan
+import stats
+import report
 
 def main() -> int:
-    names: List[str] = list_dir(".")
+    # CLI 解析：args() 含程序名，仅消费 --path= / --top= 旗标
+    path = "."
+    top = 5
+    for a in args():
+        if a.startswith("--path="):
+            path = a[7:]
+        elif a.startswith("--top="):
+            top = int(a[6:])
 
-    # 每文件一条 7 元组记录（Tuple[K,...] 双模打通后替代旧平行数组写法）
-    recs: List[Tuple[str, int, int, int, int, int, int]] = []
+    # 采集 → 汇总总量（词/字节跨文件累加，行数留给内建统计）
+    recs = scan.measure_dir(path)
+    if len(recs) == 0:
+        print(f"no .sg/.md/.txt files under '{path}'")
+        return 1
+    total_words = 0
+    total_bytes = 0
+    lines_only: List[int] = []
+    for r in recs:
+        total_words = total_words + r[2]
+        total_bytes = total_bytes + r[3]
+        lines_only.append(r[1])
 
-    # 按扩展名聚合：一条 (扩展名, 文件数, 行数) 记录对应一类文件
-    exts: List[Tuple[str, int, int]] = []
+    print(f"== top {top} files by lines ({path}) ==")
+    print(report.top_table(recs, top))
 
-    n: int = len(names)
-    i: int = 0
-    while i < n:
-        name: str = names[i]
-        keep: bool = name.endswith(".sg") or name.endswith(".md") or name.endswith(".txt")
-        if keep:
-            try:
-                s: str = read_text(name)
-            except:
-                s = ""
-            lines: List[str] = s.split("\n")
-            lc: int = len(lines)
-            words: int = 0
-            blank: int = 0
-            comment: int = 0
-            m: int = 0
-            while m < lc:
-                ln: str = lines[m]
-                words = words + count_words(ln)
-                if is_blank(ln):
-                    blank = blank + 1
-                elif is_comment(ln):
-                    comment = comment + 1
-                m = m + 1
-            code: int = lc - blank - comment
-            recs.append((name, lc, words, len(s), blank, comment, code))
-
-            ext: str = ext_of(name)
-            found: int = -1
-            c: int = 0
-            while c < len(exts):
-                if exts[c][0] == ext:
-                    found = c
-                c = c + 1
-            if found < 0:
-                exts.append((ext, 1, lc))
-            else:
-                # 元组不可变：以重建元组整体替换槽位
-                old = exts[found]
-                exts[found] = (old[0], old[1] + 1, old[2] + lc)
-        i = i + 1
-
-    # 选择排序：按行数降序（对索引数组 order 排序）
-    order: List[int] = []
-    k: int = 0
-    while k < len(recs):
-        order.append(k)
-        k = k + 1
-    a: int = 0
-    while a < len(order):
-        mx: int = a
-        b: int = a + 1
-        while b < len(order):
-            if recs[order[b]][1] > recs[order[mx]][1]:
-                mx = b
-            b = b + 1
-        if mx != a:
-            tmp: int = order[a]
-            order[a] = order[mx]
-            order[mx] = tmp
-        a = a + 1
-
-    print("== per-file metrics (sorted by lines desc) ==")
-    print("name lines words bytes blank comment code")
-    r: int = 0
-    while r < len(order):
-        # 无注解局部按 List[Tuple] 槽位自动推断为 7 元组（隐式单态化批次的变量推断）
-        rec = recs[order[r]]
-        print(rec[0], rec[1], rec[2], rec[3], rec[4], rec[5], rec[6])
-        r = r + 1
-
-    # 摘要统计（对行数位 recs[s2][1] 求 总数/均值/最小/最大/中位数）
-    nf: int = len(recs)
-    total_lines: int = 0
-    total_words: int = 0
-    total_bytes: int = 0
-    mn: int = 0
-    mx2: int = 0
-    s2: int = 0
-    while s2 < nf:
-        total_lines = total_lines + recs[s2][1]
-        total_words = total_words + recs[s2][2]
-        total_bytes = total_bytes + recs[s2][3]
-        if s2 == 0:
-            mn = recs[s2][1]
-            mx2 = recs[s2][1]
-        else:
-            if recs[s2][1] < mn:
-                mn = recs[s2][1]
-            if recs[s2][1] > mx2:
-                mx2 = recs[s2][1]
-        s2 = s2 + 1
-
+    nf = len(recs)
     print("== summary ==")
-    print("files", nf)
-    print("total_lines", total_lines)
-    print("total_words", total_words)
-    print("total_bytes", total_bytes)
-    if nf > 0:
-        print("mean_lines", total_lines / float(nf))
-        print("min_lines", mn)
-        print("max_lines", mx2)
-        # 中位数：提取行数位排序后取中间
-        lines_only: List[int] = []
-        for rec in recs:
-            lines_only.append(rec[1])
-        sl: List[int] = sorted(lines_only)
-        mid: int = floor(nf / 2)
-        if nf % 2 == 1:
-            print("median_lines", sl[mid])
-        else:
-            print("median_lines", (sl[mid - 1] + sl[mid]) / 2.0)
+    print(f"files {nf}  total_lines {sum(lines_only)}  total_words {total_words}  total_bytes {total_bytes}")
+    print(f"mean {mean(lines_only):.1f}  median {median(lines_only):.1f}  std {std(lines_only):.2f}  min {min(lines_only)}  max {max(lines_only)}")
 
-    # 按扩展名聚合
+    ext_files = stats.ext_file_counts(recs)
+    ext_lines = stats.ext_line_counts(recs)
     print("== by extension ==")
-    e: int = 0
-    while e < len(exts):
-        # 文件数恒 >= 1（append 时即建立记录），无需防护分支
-        avg: float = exts[e][2] / float(exts[e][1])
-        print(exts[e][0], "files", exts[e][1], "lines", exts[e][2], "avg", avg)
-        e = e + 1
+    for it in ext_files.items():
+        n = it[1]
+        print(f"{it[0]:<8} files {n}  lines {ext_lines[it[0]]}  avg {ext_lines[it[0]] / float(n):.1f}")
 
-    # 行数分布直方图
-    print("== line-count histogram ==")
-    b0: int = 0
-    b1: int = 0
-    b2: int = 0
-    b3: int = 0
-    h: int = 0
-    while h < nf:
-        L: int = recs[h][1]
-        if L < 10:
-            b0 = b0 + 1
-        elif L < 50:
-            b1 = b1 + 1
-        elif L < 100:
-            b2 = b2 + 1
-        else:
-            b3 = b3 + 1
-        h = h + 1
-    print("0-9", b0)
-    print("10-49", b1)
-    print("50-99", b2)
-    print("100+", b3)
+    hist = stats.histogram(lines_only)
+    print(f"== histogram ==   0-9 {hist[0]}   10-49 {hist[1]}   50-99 {hist[2]}   100+ {hist[3]}")
+
+    write_text(path + "/metrics-report.md",
+               report.markdown_report(path, recs, total_words, total_bytes))
+    print(f"report -> {path}/metrics-report.md")
     return 0

@@ -2,7 +2,7 @@
 #  bootstrap.ps1 - Scourge 一键构建引导（Windows）
 #
 #  与 bootstrap.sh 同职责：工具链检查 → 获取平台预编译 MLIR 库包（或本机
-#  LLVM/MLIR）→ cmake 配置 → 构建 build-rel\scourge.exe。
+#  LLVM/MLIR）→ cmake 配置 → 构建 build-rel\sg.exe。
 #  Windows 侧 AOT build 运行时另需 clang（D:\LLVM 或任意 LLVM 安装的
 #  bin\clang.exe 在 PATH）与 MSVC/SDK 链接环境（scripts\vsenv.ps1 注入）。
 #  用法：
@@ -74,7 +74,7 @@ if ($LlvmRoot) {
 
 # ---- AOT clang version gate ------------------------------------------------
 # MLIR-generated IR carries package-version attributes (e.g. nocreateundeforpoison);
-# an older system clang fails with "unterminated attribute group" at scourge build
+# an older system clang fails with "unterminated attribute group" at sg build
 # time. Export SCOURGE_LLVM_BIN when the package bundles clang; otherwise warn.
 $pkgClang = Join-Path $MlirRoot "bin\clang.exe"
 $verFile  = Join-Path $MlirRoot "LLVM_VERSION.txt"
@@ -110,6 +110,31 @@ $CMakeArgs = @(
 cmake @CMakeArgs
 
 Write-Host "[bootstrap] build (-j$Jobs)"
-cmake --build (Join-Path $RepoRoot "build-rel") -j $Jobs --target scourge scourge_tests
+# three deliverables: sg (compiler) + sgmcp (standalone MCP entry) + sget
+# (bootstrapped package manager -- its success is itself the AOT smoke test);
+# scourge_tests = CTest unit tests.
+cmake --build (Join-Path $RepoRoot "build-rel") -j $Jobs --target scourge sgmcp sget scourge_tests
 
-Write-Host "[bootstrap] done: $(Join-Path $RepoRoot 'build-rel\scourge.exe')"
+Write-Host "[bootstrap] smoke"
+$Bin = Join-Path $RepoRoot "build-rel"
+$hello = & (Join-Path $Bin "sg.exe") run (Join-Path $RepoRoot "examples\hello.sg") | Select-Object -Last 1
+Write-Host "[bootstrap]   sg:    $hello"
+$sgetOut = (& (Join-Path $Bin "sget.exe") list 2>$null | Select-Object -First 1)
+Write-Host "[bootstrap]   sget:  $sgetOut"
+$mcpInit = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+# PS 5.1 piped stdin injects a UTF-8 BOM in -File mode -> sgmcp JSON parse
+# fails at offset 0. Feed via stdin file + Start-Process (same pattern as
+# the verify scripts) to bypass the pipeline encoder entirely.
+$initF = Join-Path $env:TEMP "sgmcp_init.json"
+$outF  = Join-Path $env:TEMP "sgmcp_init.out"
+[System.IO.File]::WriteAllText($initF, $mcpInit + "`n")
+Start-Process -FilePath (Join-Path $Bin "sgmcp.exe") -RedirectStandardInput $initF -RedirectStandardOutput $outF -NoNewWindow -Wait | Out-Null
+$mcpOut = [System.IO.File]::ReadAllText($outF)
+if ($mcpOut -match 'serverInfo') {
+    Write-Host "[bootstrap]   sgmcp: initialize OK"
+} else {
+    Write-Warning "[bootstrap]   sgmcp: no serverInfo in initialize response"
+}
+Write-Host ("[bootstrap] done: {0} (+ sgmcp.exe, sget.exe) -- ready to use" -f (Join-Path $Bin "sg.exe"))
+Write-Host "[bootstrap]   sg run <file.sg>      # VM direct run"
+Write-Host "[bootstrap]   sg build <file.sg>    # AOT standalone executable"

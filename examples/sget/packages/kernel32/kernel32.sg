@@ -1,0 +1,14 @@
+# kernel32 — Windows 内核基础 API 绑定（sget 内置包）
+capability ffi
+
+@extern("kernel32.dll")
+def GetTickCount() -> int:
+    pass
+
+@extern("kernel32.dll")
+def MulDiv(a: int, b: int, c: int) -> int:
+    pass
+
+@extern("kernel32.dll")
+def Beep(freq: int, dur: int) -> bool:
+    pass

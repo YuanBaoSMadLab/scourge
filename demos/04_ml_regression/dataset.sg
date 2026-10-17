@@ -1,0 +1,33 @@
+# dataset.sg — 04 数据层：[0,pi] 40 点 sin(x) 数据集（纯函数，无状态）
+# 职责边界：只回答"第 s 个样本是什么"——x/y/训练归属与网格真值；
+# 不建容器、不做 IO。归属规则：偶下标训练、奇下标验证。
+# 展示：跨模块纯函数数据源——数据生成逻辑与训练/评估解耦。
+
+def n_samples() -> int:
+    return 40
+
+def n_train() -> int:
+    return 20
+
+def n_val() -> int:
+    return 20
+
+def is_train(s: int) -> int:
+    return 1 if s % 2 == 0 else 0
+
+# 归一化前原始角（[0,pi] 等分）——y 的定义域。
+def raw(s: int) -> float:
+    return 3.14159265 * float(s) / float(n_samples() - 1)
+
+# 归一化输入 x ∈ [-1,1]（模型实际看到的就是它）。
+def x_at(s: int) -> float:
+    xv = raw(s)
+    return 2.0 * xv / 3.14159265 - 1.0
+
+# 真值函数：任意归一化 x 对应的 sin（网格评估与样本标签共用一个定义）。
+def truth(gx: float) -> float:
+    return sin((gx + 1.0) / 2.0 * 3.14159265)
+
+# 样本标签：y = sin(raw)（等价于 truth(x_at(s))，显式写 raw 保数值路径一致）。
+def y_at(s: int) -> float:
+    return sin(raw(s))

@@ -1,0 +1,51 @@
+# report.sg — 呈现层（01 代码库度量 CLI）
+# 职责边界：把记录列表变成人可读的三种形态——控制台对齐表格（按行数
+# 降序 TopN）、Markdown 报告模板。纯字符串加工，无 IO。
+
+# 行数降序 TopN 表格。排序用「定宽 fmt 键 + sorted + reversed」——
+# sorted 无 key 参数的标准替代：数值格式化进字符串前缀 f"{v:06d}|{name}"
+# 建键，排序后经 find("|") 切回原记录（此技巧在 01/02/03 三处复用）。
+def top_table(recs: List[Tuple[str, int, int, int, int, int, int]], top: int) -> str:
+    idx: Dict[str, int] = {}
+    keys: List[str] = []
+    for i in range(len(recs)):
+        idx[recs[i][0]] = i
+        keys.append(f"{recs[i][1]:06d}|{recs[i][0]}")
+
+    out = f"{'file':<24}{'lines':>6}{'words':>7}{'bytes':>8}{'code':>6}"
+    shown = 0
+    for k in reversed(sorted(keys)):
+        r = recs[idx[k[k.find("|") + 1:]]]
+        out = out + "\n" + f"{r[0]:<24}{r[1]:>6}{r[2]:>7}{r[3]:>8}{r[6]:>6}"
+        shown = shown + 1
+        if shown >= top:
+            break
+    return out
+
+# Markdown 报告（三引号 f-string 模板）：摘要 + 降序表格复用 top_table。
+def markdown_report(path: str, recs: List[Tuple[str, int, int, int, int, int, int]],
+                    total_words: int, total_bytes: int) -> str:
+    lines_only: List[int] = []
+    for r in recs:
+        lines_only.append(r[1])
+    table = ""
+    idx: Dict[str, int] = {}
+    keys: List[str] = []
+    for i in range(len(recs)):
+        idx[recs[i][0]] = i
+        keys.append(f"{recs[i][1]:06d}|{recs[i][0]}")
+    for k in reversed(sorted(keys)):
+        r = recs[idx[k[k.find("|") + 1:]]]
+        table = table + f"| {r[0]} | {r[1]} | {r[2]} | {r[6]} |\n"
+    nf = len(recs)
+    return f"""# code metrics report
+
+- path: `{path}`
+- files: {nf}
+- total: {sum(lines_only)} lines / {total_words} words / {total_bytes} bytes
+- lines: mean {mean(lines_only):.1f}, median {median(lines_only):.1f}, std {std(lines_only):.2f}
+
+| file | lines | words | code |
+|---|---|---|---|
+{table}
+"""

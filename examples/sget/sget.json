@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "comment": "sget registry 索引。api: c=纯 C API 绑定直接可用；c-legacy=C 兼容层符号；cpp/com=须经 C shim（extern \"C\" 包装 DLL），安装只放库文件。dlls 为 zip 内 DLL 相对路径（正斜杠）。binding: builtin=内置绑定源码 / bundled=包内自带 <pkg>.sg / shim=待 C shim 工程。",
+  "pkgs": {
+    "sqlite3": {
+      "desc": "嵌入式 SQL 数据库，约 1.4MB，纯 C API 绑定直接可用",
+      "api": "c",
+      "url": "https://www.sqlite.org/2026/sqlite-dll-win-x64-3540000.zip",
+      "format": "zip",
+      "dlls": ["sqlite3.dll"],
+      "binding": "builtin"
+    },
+    "opencv": {
+      "desc": "计算机视觉库（官方预编译包保留 C API 兼容层；完整现代 C++ API 需 shim）",
+      "api": "c-legacy",
+      "url": "https://github.com/opencv/opencv/releases/download/4.11.0/opencv-4.11.0-windows.zip",
+      "format": "zip",
+      "dlls": ["opencv/build/x64/vc16/bin/opencv_world4110.dll"],
+      "binding": "builtin"
+    },
+    "onnxruntime": {
+      "desc": "跨平台推理引擎（纯 C API：OrtGetApiBase 函数表——表内函数指针调用需 shim 后开放）",
+      "api": "c",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip",
+      "format": "zip",
+      "dlls": ["onnxruntime-win-x64-1.20.1/lib/onnxruntime.dll"],
+      "binding": "shim"
+    },
+    "yolo": {
+      "desc": "YOLO 目标检测（经 onnxruntime C API 推理 onnx 模型；依赖 onnxruntime 包）",
+      "api": "c",
+      "url": "https://github.com/ultralytics/yolov5",
+      "format": "none",
+      "dlls": [],
+      "binding": "shim"
+    },
+    "torch": {
+      "desc": "PyTorch 推理（libtorch 为 C++ ABI，须 C shim：extern \"C\" 包装 at::Tensor 操作）",
+      "api": "cpp",
+      "url": "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.5.1%2Bcpu.zip",
+      "format": "zip",
+      "dlls": ["libtorch/lib/torch.dll"],
+      "binding": "shim"
+    },
+    "qt": {
+      "desc": "Qt 6 GUI（C++ ABI，须 C shim；或改用用户态窗口 API user32 绑定自绘）",
+      "api": "cpp",
+      "url": "https://download.qt.io/official_releases/qt/6.8/6.8.2/submodules/qtbase-everywhere-src-6.8.2.zip",
+      "format": "zip",
+      "dlls": ["qtbase-everywhere-src-6.8.2/lib/Qt6Core.dll"],
+      "binding": "shim"
+    },
+    "webview2": {
+      "desc": "Microsoft Edge WebView2（COM ABI，须 C shim 封装 CreateCoreWebView2Environment）",
+      "api": "com",
+      "url": "https://go.microsoft.com/fwlink/?linkid=2094703",
+      "format": "exe",
+      "dlls": [],
+      "binding": "shim"
+    },
+    "zlib": {
+      "desc": "通用压缩（纯 C API；预编译 DLL 推荐 vitodev 或自编）",
+      "api": "c",
+      "url": "https://github.com/vitodev/zlib/releases",
+      "format": "none",
+      "dlls": [],
+      "binding": "shim"
+    },
+    "lua": {
+      "desc": "Lua 脚本解释器（纯 C API，栈式交互无指针输出场景）",
+      "api": "c",
+      "url": "https://github.com/lua/lua/releases",
+      "format": "none",
+      "dlls": [],
+      "binding": "shim"
+    },
+    "sdl2": {
+      "desc": "跨平台窗口/输入/音频（纯 C API，绑定直接可用；DLL 取 libsdl.org 官方 VC 包）",
+      "api": "c",
+      "url": "https://github.com/libsdl-org/SDL/releases/download/release-2.30.11/SDL2-devel-2.30.11-VC.zip",
+      "format": "zip",
+      "dlls": ["SDL2-2.30.11/lib/x64/SDL2.dll"],
+      "binding": "shim"
+    }
+  }
+}

@@ -1,0 +1,33 @@
+# ============================================================================
+#  attention_softmax.sg — 缩放点积注意力（单头）的 softmax 片段
+# ----------------------------------------------------------------------------
+#  端到端演示 0.7.0 新增张量算子：transpose / sqrt / max / exp / sum / reshape。
+#  流程： Q (n,d) 与 K (n,d) → scores = Q @ Kᵀ / sqrt(d)（缩放点积），
+#         按行 softmax 得注意力权重（减行最大值做数值稳定），
+#         最后 reshape 展平打印。
+#  运行： scourge run examples/attention_softmax.sg
+# ============================================================================
+
+def main() -> int:
+    # 3 个 token，每 token 2 维（手写固定值，无随机数，可复现）
+    Q = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]]
+    K = [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]]
+    n = 3
+
+    # 注意力分数：Q @ Kᵀ（transpose 可直接出现在表达式内），再按 1/sqrt(d_k) 缩放
+    scores = Q @ transpose(K)
+    scale = sqrt(2.0)
+    scores = scores / scale
+
+    # 按行 softmax（row = 部分索引得到的子张量拷贝，写回用全秩索引）
+    for i in range(n):
+        row = scores[i]
+        m = max(row)          # 数值稳定：减去行最大值
+        e = exp(row - m)
+        p = e / sum(e)
+        for j in range(n):
+            scores[i, j] = p[j]
+
+    print("attn_weights=" + str(scores))
+    print("flat=" + str(reshape(scores, 9)))
+    return 0

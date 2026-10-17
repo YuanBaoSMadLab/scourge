@@ -1,0 +1,113 @@
+# main.sg — 单文件博客服务器
+# 路由：/ 首页（文章列表）、/post/<slug> 文章页、/archive 归档、
+#       /about 关于、/static/style.css 样式；其余 404。
+# 启动：start_vm.bat（解释执行）或 start_exe.bat（AOT 编译执行），
+#       两种模式行为逐字节一致。处理 64 个请求后自动退出（示例生命周期）。
+import posts
+import layout
+
+capability net, io
+
+
+# ---- 首页：文章卡片列表 ----
+def home() -> str:
+    out = "<h1>最新文章</h1>\n"
+    i: int = 0
+    while i < posts.count():
+        out = out + f"""
+<article class="card">
+<h2><a href="/post/{posts.slugs()[i]}">{layout.esc(posts.titles()[i])}</a></h2>
+<p class="meta">{posts.dates()[i]}</p>
+<p>{layout.esc(posts.summaries()[i])}</p>
+<p class="more"><a href="/post/{posts.slugs()[i]}">阅读全文 →</a></p>
+</article>"""
+        i = i + 1
+    return out
+
+
+# ---- 文章页：mini markdown 渲染正文 ----
+def post_page(slug: str) -> str:
+    i: int = 0
+    while i < posts.count():
+        if posts.slugs()[i] == slug:
+            nav = f"""<p class="meta">{posts.dates()[i]}</p>
+{layout.md(posts.bodies()[i])}
+<p class="more"><a href="/">← 返回列表</a></p>"""
+            return f"<h1>{layout.esc(posts.titles()[i])}</h1>\n{nav}"
+        i = i + 1
+    return ""
+
+
+# ---- 归档：全部文章按时间倒序（数据本身即倒序） ----
+def archive() -> str:
+    out = "<h1>归档</h1>\n<ul class=\"archive\">\n"
+    i: int = 0
+    while i < posts.count():
+        out = out + f"""<li><span class="meta">{posts.dates()[i]}</span>
+<a href="/post/{posts.slugs()[i]}">{layout.esc(posts.titles()[i])}</a></li>
+"""
+        i = i + 1
+    return out + "</ul>\n"
+
+
+# ---- 路由：写入一个完整响应 ----
+def route(conn: int, path: str) -> None:
+    if path == "/":
+        n: int = net_http_write_response(conn, 200, "text/html; charset=utf-8",
+                                         layout.page("首页", home()))
+        print("  200", n, "bytes")
+        return
+    if path == "/archive":
+        n = net_http_write_response(conn, 200, "text/html; charset=utf-8",
+                                    layout.page("归档", archive()))
+        print("  200", n, "bytes")
+        return
+    if path == "/about":
+        about = f"<h1>关于</h1>\n{layout.md(posts.ABOUT)}"
+        n = net_http_write_response(conn, 200, "text/html; charset=utf-8",
+                                    layout.page("关于", about))
+        print("  200", n, "bytes")
+        return
+    if path == "/static/style.css":
+        css: str = read_text("static/style.css")
+        n = net_http_write_response(conn, 200, "text/css; charset=utf-8", css)
+        print("  200 css")
+        return
+    if path.startswith("/post/"):
+        parts: List[str] = path.split("/")
+        if len(parts) == 3 and parts[2] != "":
+            body = post_page(parts[2])
+            if body != "":
+                n = net_http_write_response(conn, 200,
+                                            "text/html; charset=utf-8",
+                                            layout.page(parts[2], body))
+                print("  200", n, "bytes")
+                return
+        n = net_http_write_response(conn, 404, "text/html; charset=utf-8",
+                                    layout.page("404", "<h1>404</h1>\n<p>这篇不存在。</p>"))
+        print("  404")
+        return
+    n = net_http_write_response(conn, 404, "text/html; charset=utf-8",
+                                layout.page("404", "<h1>404</h1>\n<p>页面不存在。</p>"))
+    print("  404")
+
+
+def main() -> int:
+    srv: int = net_bind("127.0.0.1", 18080)
+    print("博客已启动: http://127.0.0.1:18080  (处理 64 个请求后退出)")
+    served: int = 0
+    while served < 64:
+        conn: int = net_accept(srv)
+        req: Json = net_http_read_request(conn)
+        if req.is_null():
+            net_close(conn)
+            continue
+        path: str = req.get("path").as_str()
+        method: str = req.get("method").as_str()
+        print(method, path)
+        route(conn, path)
+        net_close(conn)
+        served = served + 1
+    net_close(srv)
+    print("演示结束，服务器退出")
+    return 0

@@ -12,8 +12,8 @@
 #    suite_done                        # 输出 <名> PASS / exit 1
 #
 #  环境变量：
-#    SCOURGE  scourge 可执行路径；默认依次探测 build-rel/scourge（Linux）
-#             与 build-rel/scourge.exe（Windows/WSL 互通）。
+#    SCOURGE  sg 可执行路径；默认优先 PATH 里的 `sg`，回退
+#             build-rel/sg（Linux）或 build-rel/sg.exe（Windows/WSL）。
 #  产物约定：一律落 $REPO_ROOT/build-rel/verify/<套件名>/，严禁写回 verify/。
 # ============================================================================
 # 代理环境去重：小写代理变量与大写并存时丢弃小写（Python 子进程网络测试需要）
@@ -32,14 +32,18 @@ if [ -z "${PY:-}" ]; then
     PY="$(command -v python3 || command -v python || true)"
 fi
 
-# scourge 可执行探测（Linux 原生无后缀；Windows/git-bash 为 .exe）
+# sg 可执行探测：先 PATH 后本地
 if [ -z "${SCOURGE:-}" ]; then
-    for _c in "$REPO_ROOT/build-rel/scourge" "$REPO_ROOT/build-rel/scourge.exe"; do
-        if [ -x "$_c" ]; then SCOURGE="$_c"; break; fi
-    done
+    _c="$(command -v sg 2>/dev/null || true)"
+    if [ -z "$_c" ]; then
+        for _c in "$REPO_ROOT/build-rel/sg" "$REPO_ROOT/build-rel/sg.exe"; do
+            if [ -x "$_c" ]; then break; fi
+        done
+    fi
+    if [ -n "$_c" ] && [ -x "$_c" ]; then SCOURGE="$_c"; fi
 fi
 if [ -z "${SCOURGE:-}" ]; then
-    echo "scourge 可执行未找到：请先构建（cmake --build build-rel），或设 SCOURGE=<路径>" >&2
+    echo "sg 可执行未找到：请先构建（cmake --build build-rel）或把 sg 加进 PATH，或设 SCOURGE=<路径>" >&2
     exit 2
 fi
 

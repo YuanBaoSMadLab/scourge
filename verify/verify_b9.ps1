@@ -2,7 +2,34 @@
 # param/return annotations, local var, 3-tuple, plus Dict.items() cross-check.
 # Also rejects bare "Tuple" without type params at compile time in both modes.
 # ASCII only: PowerShell 5.1 parses BOM-less ps1 as ANSI.
-$exe = "d:\Scourge\build-rel\scourge.exe"
+# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = $null
+try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
+if (-not $repoRoot) {
+    # Walk up to find CMakeLists.txt as fallback
+    $p = $here
+    while ($p -and -not (Test-Path (Join-Path $p 'CMakeLists.txt'))) {
+        $parent = Split-Path $p -Parent
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    $repoRoot = $p
+}
+$exe = $null
+$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cmd) {
+    # Sanity check: ensure it's Scourge, not ast-grep or some other tool
+    $sgOutArr = & $cmd.Source --help 2>&1
+    $sgHelp = ($sgOutArr -join "`n")
+    $sgExit = $LASTEXITCODE
+    if ($sgExit -eq 0 -and $sgHelp -match 'scourge') {
+        $exe = $cmd.Source
+    }
+}
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+# -------------------------------------------------------------------------------------
 $dir = "d:\Scourge\build-rel\verify"
 New-Item -ItemType Directory -Force $dir | Out-Null
 $fail = 0
@@ -136,6 +163,77 @@ foreach ($mode in @("run", "build")) {
     if ($p.ExitCode -eq 0 -or -not $txt.Contains("E2001")) {
         Write-Host "mono-reject $mode FAIL (exit $($p.ExitCode))"; $fail++
     } else { Write-Host "mono-reject $mode OK" }
+}
+
+# --- probe 6: half-open slices (s[:p] / s[p+1:]) inside a monomorphized
+# --- instance (cloneExpr null-guard regression). Dual-mode identical, 2 lines.
+$stem = 'probe_b9_monoslice'
+$sg = "d:\Scourge\verify\probes\$stem.sg"
+Remove-Item "$dir\$stem.*" -Recurse -Force -ErrorAction SilentlyContinue
+$p1 = Start-Process -FilePath $exe -ArgumentList @("run", $sg) -NoNewWindow -Wait -PassThru `
+      -RedirectStandardOutput "$dir\$stem.run.out" -RedirectStandardError "$dir\$stem.run.err"
+if ($p1.ExitCode -ne 0) { Write-Host "$stem VM-FAIL"; Get-Content "$dir\$stem.run.err" -First 5; $fail++ }
+else {
+    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", $sg, "-o", "$dir\$stem.exe") -NoNewWindow -Wait -PassThru `
+          -RedirectStandardOutput "$dir\$stem.build.out" -RedirectStandardError "$dir\$stem.build.err"
+    if ($p2.ExitCode -ne 0) { Write-Host "$stem BUILD-FAIL"; Get-Content "$dir\$stem.build.err" -First 5; $fail++ }
+    else {
+        $p3 = Start-Process -FilePath "$dir\$stem.exe" -NoNewWindow -Wait -PassThru `
+              -RedirectStandardOutput "$dir\$stem.aot.out" -RedirectStandardError "$dir\$stem.aot.err"
+        if ($p3.ExitCode -ne 0) { Write-Host "$stem AOT-FAIL"; Get-Content "$dir\$stem.aot.err" -First 5; $fail++ }
+        else {
+            $r1 = (Get-Content "$dir\$stem.run.out") -join "`n"
+            $r3 = (Get-Content "$dir\$stem.aot.out") -join "`n"
+            $e1 = (Get-FileHash "$dir\$stem.run.err").Hash
+            $e3 = (Get-FileHash "$dir\$stem.aot.err").Hash
+            if ($r1 -eq $r3 -and $e1 -eq $e3 -and
+                $r1.Contains("28") -and $r1.Contains("4") -and
+                -not $r1.Contains("13")) {
+                Write-Host "$stem IDENTICAL (mono half-open slice, 2 lines)"
+            }
+            else {
+                Write-Host "$stem DIFFER"
+                Write-Host "--- run:"; Get-Content "$dir\$stem.run.out"
+                Write-Host "--- aot:"; Get-Content "$dir\$stem.aot.out"
+                $fail++
+            }
+        }
+    }
+}
+
+# --- probe 7: empty dict literal under Dict[K,V] annotation + cross-pointer
+# --- str key lookup (checkDictLit ktag regression). Dual-mode identical, 3 lines.
+$stem = 'probe_b9_dictempty'
+$sg = "d:\Scourge\verify\probes\$stem.sg"
+Remove-Item "$dir\$stem.*" -Recurse -Force -ErrorAction SilentlyContinue
+$p1 = Start-Process -FilePath $exe -ArgumentList @("run", $sg) -NoNewWindow -Wait -PassThru `
+      -RedirectStandardOutput "$dir\$stem.run.out" -RedirectStandardError "$dir\$stem.run.err"
+if ($p1.ExitCode -ne 0) { Write-Host "$stem VM-FAIL"; Get-Content "$dir\$stem.run.err" -First 5; $fail++ }
+else {
+    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", $sg, "-o", "$dir\$stem.exe") -NoNewWindow -Wait -PassThru `
+          -RedirectStandardOutput "$dir\$stem.build.out" -RedirectStandardError "$dir\$stem.build.err"
+    if ($p2.ExitCode -ne 0) { Write-Host "$stem BUILD-FAIL"; Get-Content "$dir\$stem.build.err" -First 5; $fail++ }
+    else {
+        $p3 = Start-Process -FilePath "$dir\$stem.exe" -NoNewWindow -Wait -PassThru `
+              -RedirectStandardOutput "$dir\$stem.aot.out" -RedirectStandardError "$dir\$stem.aot.err"
+        if ($p3.ExitCode -ne 0) { Write-Host "$stem AOT-FAIL"; Get-Content "$dir\$stem.aot.err" -First 5; $fail++ }
+        else {
+            $r1 = (Get-Content "$dir\$stem.run.out") -join "`n"
+            $r3 = (Get-Content "$dir\$stem.aot.out") -join "`n"
+            $e1 = (Get-FileHash "$dir\$stem.run.err").Hash
+            $e3 = (Get-FileHash "$dir\$stem.aot.err").Hash
+            if ($r1 -eq $r3 -and $e1 -eq $e3 -and $r1.Split("`n").Count -eq 3 -and
+                -not $r1.Contains("-1")) {
+                Write-Host "$stem IDENTICAL (dict empty-lit ktag, 3 lines)"
+            }
+            else {
+                Write-Host "$stem DIFFER"
+                Write-Host "--- run:"; Get-Content "$dir\$stem.run.out"
+                Write-Host "--- aot:"; Get-Content "$dir\$stem.aot.out"
+                $fail++
+            }
+        }
+    }
 }
 
 if ($fail -eq 0) { Write-Host "B9-1 ALL PASS" } else { Write-Host "$fail FAILED"; exit 1 }

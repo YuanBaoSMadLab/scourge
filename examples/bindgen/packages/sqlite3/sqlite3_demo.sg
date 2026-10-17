@@ -1,0 +1,60 @@
+# sqlite3_demo.sg — bindgen 生态闭环：真实 C 库（SQLite，public domain）
+# 经代理 DLL 直调。建表 → 清表 → 参数化插入三行 → 行遍历 → 聚合查询。
+# 用户侧零 C 代码：句柄即 int，字符串/浮点由运行时自动转换。
+import sqlite3
+
+# SQLite 常量（shim 内以宏使用；Scourge 侧字面量，勿改）
+ROW: int = 100            # SQLITE_ROW
+DONE: int = 101           # SQLITE_DONE
+OPEN_RW_CREATE: int = 6   # SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+
+def main() -> int:
+    db: int = sqlite3.open_db("sqlite3_demo.db", OPEN_RW_CREATE)
+    if db == 0:
+        print("open failed")
+        return 1
+    print("create rc =", sqlite3.exec_sql(db, "CREATE TABLE IF NOT EXISTS demo(id INTEGER, name TEXT, score REAL)"))
+    print("clear  rc =", sqlite3.exec_sql(db, "DELETE FROM demo"))
+
+    names: List[str] = ["alpha", "beta", "gamma"]
+    scores: List[float] = [9.5, 7.25, 8.0]
+    i: int = 0
+    while i < 3:
+        stmt: int = sqlite3.prepare(db, "INSERT INTO demo(id, name, score) VALUES(?, ?, ?)")
+        if stmt == 0:
+            print("prepare failed:", sqlite3.err_msg(db))
+            sqlite3.close_db(db)
+            return 1
+        sqlite3.bind_int(stmt, 1, i + 1)
+        sqlite3.bind_text(stmt, 2, names[i])
+        sqlite3.bind_double(stmt, 3, scores[i])
+        rc: int = sqlite3.step(stmt)
+        sqlite3.finalize(stmt)
+        if rc != DONE:
+            print("insert failed rc =", rc, sqlite3.err_msg(db))
+            sqlite3.close_db(db)
+            return 1
+        i = i + 1
+    print("inserted 3 rows")
+
+    stmt: int = sqlite3.prepare(db, "SELECT id, name, score FROM demo ORDER BY id")
+    if stmt == 0:
+        print("query prepare failed:", sqlite3.err_msg(db))
+        sqlite3.close_db(db)
+        return 1
+    total: float = 0.0
+    n: int = 0
+    while sqlite3.step(stmt) == ROW:
+        print("row:", sqlite3.column_int(stmt, 0), sqlite3.column_text(stmt, 1), sqlite3.column_double(stmt, 2))
+        total = total + sqlite3.column_double(stmt, 2)
+        n = n + 1
+    sqlite3.finalize(stmt)
+    print("rows =", n, "avg =", total / float(n))
+
+    stmt = sqlite3.prepare(db, "SELECT COUNT(*), SUM(score) FROM demo")
+    if sqlite3.step(stmt) == ROW:
+        print("agg: count =", sqlite3.column_int(stmt, 0), "sum =", sqlite3.column_double(stmt, 1))
+    sqlite3.finalize(stmt)
+    sqlite3.close_db(db)
+    print("sqlite3 demo ok")
+    return 0

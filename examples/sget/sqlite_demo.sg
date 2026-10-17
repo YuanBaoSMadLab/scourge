@@ -1,0 +1,12 @@
+# sget + sqlite3 生态闭环：registry 安装的库直接调用
+import sqlite3
+
+capability ffi, env
+
+def main() -> int:
+    v: str = sqlite3.sqlite3_libversion()
+    print("SQLite 版本:", v)
+    print("版本 3.x:", v.contains("3."))
+    print("内存占用 > 0:", sqlite3.sqlite3_memory_used() > 0)
+    print("THREADSAFE 编译:", sqlite3.sqlite3_compileoption_used("THREADSAFE"))
+    return 0

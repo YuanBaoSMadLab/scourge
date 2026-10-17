@@ -1,0 +1,41 @@
+# scan.sg — 目录扫描与单文件度量（01 代码库度量 CLI 的数据采集层）
+# 职责边界：只读文件系统，产出逐文件 7 元组记录（名, 行, 词, 字节,
+# 空行, 注释行, 代码行）；不做排序、不做聚合、不打印——消费方见
+# report.sg（呈现）与 main.sg（编排）。
+capability io
+
+# 扫描目录下 .sg/.md/.txt 文件，逐文件返回 7 元组度量记录。
+# 单文件读取失败（权限/编码）静默跳过——度量工具不能因脏文件中断。
+def measure_dir(path: str) -> List[Tuple[str, int, int, int, int, int, int]]:
+    recs: List[Tuple[str, int, int, int, int, int, int]] = []
+    for name in list_dir(path):
+        keep = name.endswith(".sg") or name.endswith(".md") or name.endswith(".txt")
+        if not keep:
+            continue
+        try:
+            s = read_text(path + "/" + name)
+        except:
+            continue
+        m = measure_text(s)
+        recs.append((name, m[0], m[1], m[2], m[3], m[4], m[5]))
+    return recs
+
+# 单文件文本 → 6 元组（行, 词, 字节, 空行, 注释行, 代码行）。
+# 注释行 = 首个非空白字符为 '#' 的行；代码行 = 总行 - 空行 - 注释行。
+def measure_text(s: str) -> Tuple[int, int, int, int, int, int]:
+    lines = s.split("\n")
+    words = 0
+    blank = 0
+    comment = 0
+    for ln in lines:
+        t = ln.trim()
+        if len(t) == 0:
+            blank = blank + 1
+            continue
+        if t.startswith("#"):
+            comment = comment + 1
+        for w in t.split(" "):
+            if len(w) > 0:
+                words = words + 1
+    code = len(lines) - blank - comment
+    return (len(lines), words, len(s), blank, comment, code)

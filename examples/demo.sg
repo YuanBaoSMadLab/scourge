@@ -1,0 +1,36 @@
+# demo.sg — Scourge P0 端到端示例：跨模块 import + 契约 + Result + 张量
+# 运行： scourge check examples/demo.sg
+# 接口： scourge interface examples/demo.sg
+# ============================================================================
+
+import math_utils
+
+LIMIT: int = 100
+
+def report(score: int) -> str:
+    """生成评分报告文本。"""
+    return "score=" + str(score)
+
+def normalize(scores: List[int]) -> float:
+    """求均值（演示 List 与循环）。"""
+    total: int = 0
+    for s in scores:
+        total = total + s
+    return total / 3.0
+
+def checkedDiv(a: int, b: int) -> Result[float, str]:
+    """错误即值：除零显式进 Result，编译器强制消费。"""
+    if b == 0:
+        return err("除数为零")
+    return ok(a / b)
+
+def main() -> int:
+    m: Tensor[float, (2, 2)] = [[1.0, 2.0], [3.0, 4.0]]
+    scaled: Tensor[float, (2, 2)] = math_utils.scale2d(m, 2.0)
+    print(str(scaled[0, 0]))
+
+    c: int = math_utils.clamp(150, 0, LIMIT)
+    print(report(c))
+
+    r: Result[float, str] = checkedDiv(10, 2)
+    return 0

@@ -78,9 +78,10 @@ RunOutcome runOnce(const std::filesystem::path& inPath, bool useCache,
 
     bc::Program program;
     bool fromCache = false;
+    // 缓存统一落 <源目录>/.sgbuild/——源码目录只留源码（中间产物隔离纪律）。
+    std::filesystem::path buildDir = inPath.parent_path() / ".sgbuild";
+    std::filesystem::path cachePath = buildDir / (entry + ".sgbc");
     if (useCache) {
-        std::filesystem::path cachePath =
-            inPath.parent_path() / (entry + ".sgbc");
         std::string bytes;
         if (readBinaryFile(cachePath, bytes)) {
             bc::CacheMeta meta;
@@ -136,14 +137,15 @@ RunOutcome runOnce(const std::filesystem::path& inPath, bool useCache,
         }
 
         // 写缓存（加速项而非正确性依赖：写入失败静默跳过）。
+        std::error_code mkEc;
+        std::filesystem::create_directories(buildDir, mkEc);
         bc::CacheMeta meta;
         meta.toolchain = std::string(kScourgeVersionLabel);
         meta.entry = entry;
         meta.modules = order;
         meta.paths = panicPaths;
         meta.sourceHash = hash;
-        std::ofstream of(inPath.parent_path() / (entry + ".sgbc"),
-                         std::ios::binary);
+        std::ofstream of(cachePath, std::ios::binary);
         if (of) of << bc::encodeProgram(program, meta);
     }
 

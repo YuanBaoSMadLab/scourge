@@ -4,7 +4,34 @@ $ErrorActionPreference = 'Stop'
 $root = 'd:\Scourge\build-rel\verify\bench'
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-$scourge = 'd:\Scourge\build-rel\scourge.exe'
+# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = $null
+try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
+if (-not $repoRoot) {
+    # Walk up to find CMakeLists.txt as fallback
+    $p = $here
+    while ($p -and -not (Test-Path (Join-Path $p 'CMakeLists.txt'))) {
+        $parent = Split-Path $p -Parent
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    $repoRoot = $p
+}
+$exe = $null
+$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cmd) {
+    # Sanity check: ensure it's Scourge, not ast-grep or some other tool
+    $sgOutArr = & $cmd.Source --help 2>&1
+    $sgHelp = ($sgOutArr -join "`n")
+    $sgExit = $LASTEXITCODE
+    if ($sgExit -eq 0 -and $sgHelp -match 'scourge') {
+        $exe = $cmd.Source
+    }
+}
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+# -------------------------------------------------------------------------------------
 
 foreach ($f in @('bench_fib.sg', 'bench_call.sg', 'bench_loop.sg')) {
     Copy-Item (Join-Path 'd:\Scourge\verify\bench' $f) $root
@@ -25,10 +52,10 @@ function Run-Cmd([string]$exe, [string[]]$argList, [string]$cwd) {
 }
 
 # Best-of-3 elapsed for VM and AOT (timer noise reduction).
-function Best-Elapsed([string]$tag, [string[]]$scourgeArgs, [string]$sg) {
+function Best-Elapsed([string]$tag, [string[]]$exeArgs, [string]$sg) {
     $best = $null
     for ($k = 0; $k -lt 3; $k++) {
-        $line = Run-Cmd $scourge $scourgeArgs $root
+        $line = Run-Cmd $exe $exeArgs $root
         if ($null -eq $line) { return }
         $el = [double]($line -replace '.*elapsed_s=', '')
         if ($null -eq $best -or $el -lt $best) { $best = $el }
@@ -44,7 +71,7 @@ Best-Elapsed 'VM   loop' @('run', 'bench_loop.sg') (Join-Path $root 'bench_loop.
 # ---- AOT ----
 foreach ($b in @('bench_fib', 'bench_call', 'bench_loop')) {
     $exe = Join-Path $root ($b + '.exe')
-    $p = Start-Process -FilePath $scourge -ArgumentList @('build', ($b + '.sg'), '-o', ($b + '.exe')) -WorkingDirectory $root -Wait -PassThru -NoNewWindow
+    $p = Start-Process -FilePath $exe -ArgumentList @('build', ($b + '.sg'), '-o', ($b + '.exe')) -WorkingDirectory $root -Wait -PassThru -NoNewWindow
     if ($p.ExitCode -ne 0) { Write-Output ("AOT build FAILED for " + $b); exit 1 }
     Best-Elapsed ('AOT  ' + $b.Substring(6)) @(($b + '.exe')) $root
 }

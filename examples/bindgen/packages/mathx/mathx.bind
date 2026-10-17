@@ -1,0 +1,7 @@
+# mathx.bind — 纯 C 直通示例（msvcrt 数学函数，零 shim 零下载）
+# 直通规则：def 名 = C 导出名，且不可与 Scourge 内建冲突。
+library "mathx" dll "msvcrt.dll" license "MIT"
+def pow(x: f64, y: f64) -> f64
+def fabs(x: f64) -> f64
+def fmod(x: f64, y: f64) -> f64
+def atoi(s: str) -> int

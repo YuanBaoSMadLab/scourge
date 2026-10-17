@@ -1,0 +1,46 @@
+# sqlite3 — 由 bindgen 生成（源: D:\Scourge\examples\bindgen\packages/sqlite3/sqlite3.bind，许可证 PublicDomain）
+# 经代理 DLL 中转：环境不集成，调用全代理
+capability ffi
+
+@extern("sqlite3_shim.dll")
+def open_db(path: str, flags: int) -> int:
+    pass
+@extern("sqlite3_shim.dll")
+def close_db(db: int) -> None:
+    pass
+@extern("sqlite3_shim.dll")
+def exec_sql(db: int, sql: str) -> int:
+    pass
+@extern("sqlite3_shim.dll")
+def prepare(db: int, sql: str) -> int:
+    pass
+@extern("sqlite3_shim.dll")
+def bind_int(stmt: int, idx: int, v: int) -> int:
+    pass
+@extern("sqlite3_shim.dll")
+def bind_text(stmt: int, idx: int, v: str) -> int:
+    pass
+@extern("sqlite3_shim.dll")
+def bind_double(stmt: int, idx: int, v: float) -> int:
+    pass
+@extern("sqlite3_shim.dll")
+def step(stmt: int) -> int:
+    pass
+@extern("sqlite3_shim.dll")
+def column_int(stmt: int, idx: int) -> int:
+    pass
+@extern("sqlite3_shim.dll")
+def column_double(stmt: int, idx: int) -> float:
+    pass
+@extern("sqlite3_shim.dll")
+def column_text(stmt: int, idx: int) -> str:
+    pass
+@extern("sqlite3_shim.dll")
+def finalize(stmt: int) -> None:
+    pass
+@extern("sqlite3_shim.dll")
+def err_code(db: int) -> int:
+    pass
+@extern("sqlite3_shim.dll")
+def err_msg(db: int) -> str:
+    pass

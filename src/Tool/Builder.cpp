@@ -226,7 +226,8 @@ void writeObjKey(const fs::path& p, uint64_t v) {
 // ----------------------------------------------------------------------------
 
 BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
-                       bool gpuMode, bool useCache, const CrossOpts& xo) {
+                       bool gpuMode, bool useCache, const CrossOpts& xo,
+                       const fs::path& buildDir) {
     // 裸机通道（--freestanding / --board / *-none-eabi）：链接层完全分叉，
     // 委派 BuilderBare.cpp（前端管线同源）。
     if (xo.bare.enabled) return buildBareOnce(inPath, outPath, gpuMode,
@@ -384,17 +385,31 @@ BuildOutcome buildOnce(const fs::path& inPath, const fs::path& outPath,
         if (m) sessionCaps |= capMaskOf(*m);
     }
 
-    // ---- 中间产物路径（与可执行同目录，便于检视） ----
-    fs::path dir = outPath.parent_path();
-    if (dir.empty()) dir = ".";
+    // ---- 中间产物目录（--build-dir；默认 <源目录>/.sgbuild）——源码目录
+    //      与产物目录只留源码/最终产物，.mlir/.ll/_rt.c 等中间体隔离于此 ----
+    fs::path dir = buildDir.empty() ? inPath.parent_path() / ".sgbuild"
+                                    : buildDir;
+    {
+        std::error_code mkEc;
+        fs::create_directories(dir, mkEc);
+        if (mkEc) dir = outPath.parent_path(); // 目录不可建 → 回退产物目录
+        if (dir.empty()) dir = ".";
+    }
     std::string stem = outPath.stem().string();
+    // 最终产物目录（--out-dir 首次构建时不存在）须先建——链接器不建目录。
+    {
+        std::error_code mkEc;
+        fs::path outParent = outPath.parent_path();
+        if (!outParent.empty()) fs::create_directories(outParent, mkEc);
+    }
     fs::path mlirPath = dir / (stem + ".mlir");
     fs::path llPath = dir / (stem + ".ll");
     fs::path rtPath = dir / (stem + "_rt.c");
     fs::path capPath = dir / (stem + ".buildcap");
 
-    // ---- AOT obj 缓存目录（<stem>.sgbuild/obj，设计第零/五章命名）。
-    //      目录不可建（权限/占用）→ 静默降级为无缓存单步直编。 ----
+    // ---- AOT obj 缓存目录（<buildDir>/<stem>.sgbuild/obj，设计第零/五章
+    //      命名；按 stem 分子目录避免同工程多入口互踩）。目录不可建
+    //      （权限/占用）→ 静默降级为无缓存单步直编。 ----
     fs::path cacheDir = dir / (stem + ".sgbuild") / "obj";
     bool cacheOk = false;
     if (useCache) {

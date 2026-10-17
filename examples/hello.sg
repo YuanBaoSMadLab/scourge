@@ -1,0 +1,54 @@
+# hello.sg — Scourge P1 字节码执行端到端示例（SG-BC + 栈式 VM）
+# 运行： scourge run examples/hello.sg
+# 验证： scourge check examples/hello.sg
+# ============================================================================
+
+def fib(n: int) -> int:
+    """递归下降：调用帧、整数加法、比较与分支。"""
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+def safeDiv(a: int, b: int) -> Result[int, str]:
+    """错误即值：除零显式进 Result，is_ok 强制消费。"""
+    if b == 0:
+        return err("除数为零")
+    return ok(a // b)
+
+def panicGuard() -> str:
+    """panic 恢复：try/except 捕获运行时 panic（整除零）。"""
+    x: int = 0
+    try:
+        x = boom(10, 0)
+    except:
+        x = -2
+    if x == -2:
+        return "panic 已捕获"
+    return "未触发"
+
+def boom(a: int, b: int) -> int:
+    return a // b
+
+def main() -> int:
+    print("fib(10) =", fib(10))
+
+    r: Result[int, str] = safeDiv(10, 0)
+    print("is_ok =", r.is_ok())
+    print("fallback =", r.unwrap_or(-1))
+
+    r2: Result[int, str] = safeDiv(10, 2)
+    print("div =", r2.unwrap(0))
+
+    print(panicGuard())
+
+    total: int = 0
+    for i in range(5):
+        total += i
+    print("sum(range(5)) =", total)
+
+    words: List[str] = ["hello", "scourge"]
+    for w in words:
+        print(w)
+    print(words[1], len(words))
+
+    return 0

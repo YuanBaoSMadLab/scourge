@@ -1,0 +1,51 @@
+# train.sg — 05 训练层：单 epoch 逐样本 Adam（可变参数经跨模块传参原地更新）
+# 职责边界：一个 epoch 的 forward+backward+Adam 一步到位；epoch 循环与
+# 评估打印在 main.sg。数据一律经 dataset.sg 纯函数取用。
+# 语义依据：跨模块 List 原地更新可行（std.nn.adam 即此模式），前提是
+# 参数全显式注解——隐式单态化仅限定义模块内部调用。
+import std.autodiff as ad
+import std.nn as nn
+import dataset
+
+# 返回 (推进后的 Adam 时间步 t, 本 epoch 平均损失)。
+# （函数名避内建：epoch 为保留名，故用 run_epoch。）
+def run_epoch(W1: List[float], b1: List[float], W2: List[float], b2: List[float],
+              mW1: List[float], vW1: List[float], mb1: List[float], vb1: List[float],
+              mW2: List[float], vW2: List[float], mb2: List[float], vb2: List[float],
+              lr: float, t: int, nhid: int) -> Tuple[int, float]:
+    nsamp = dataset.n_samples()
+    loss_sum = 0.0
+    s = 0
+    while s < nsamp:
+        T = ad.tape()
+        ids1 = nn.params(T, W1, b1, 2, nhid)
+        ids2 = nn.params(T, W2, b2, nhid, 1)
+        xn: List[int] = []
+        xn.append(ad.const(T, dataset.x0_at(s)))
+        xn.append(ad.const(T, dataset.x1_at(s)))
+        hn = nn.linear_nodes(T, ids1, xn, 2, nhid)
+        ht: List[int] = []
+        for h in hn:
+            ht.append(ad.tanh_(T, h))
+        on = nn.linear_nodes(T, ids2, ht, nhid, 1)
+        yy: List[float] = []
+        yy.append(float(dataset.label_at(s)))
+        loss = nn.mse(T, on, yy, 1)
+        ids: List[int] = []
+        for x in ids1:
+            ids.append(x)
+        for x in ids2:
+            ids.append(x)
+        npar = len(W1) + len(b1) + len(W2) + len(b2)
+        g = nn.gather_grads(T, loss, ids, npar)
+        t = t + 1
+        # 切片分段：g 与 W/b 展平序对齐，直接投喂各自 Adam 状态
+        p1 = len(W1)
+        n2 = len(W2)
+        nn.adam(W1, g[0:p1], mW1, vW1, lr, t, p1)
+        nn.adam(b1, g[p1:p1 + nhid], mb1, vb1, lr, t, nhid)
+        nn.adam(W2, g[p1 + nhid:p1 + nhid + n2], mW2, vW2, lr, t, n2)
+        nn.adam(b2, g[p1 + nhid + n2:], mb2, vb2, lr, t, 1)
+        loss_sum = loss_sum + ad.value(T, loss)
+        s = s + 1
+    return (t, loss_sum / float(nsamp))

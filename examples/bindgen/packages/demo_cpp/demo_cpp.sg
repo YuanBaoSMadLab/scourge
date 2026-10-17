@@ -1,0 +1,22 @@
+# demo_cpp — 由 bindgen 生成（源: D:\Scourge\examples\bindgen\packages/demo_cpp/demo_cpp.bind，许可证 MIT）
+# 经代理 DLL 中转：环境不集成，调用全代理
+capability ffi
+
+@extern("demo_cpp_shim.dll")
+def counter_new(name: str) -> int:
+    pass
+@extern("demo_cpp_shim.dll")
+def counter_add(c: int, v: int) -> int:
+    pass
+@extern("demo_cpp_shim.dll")
+def counter_get(c: int) -> int:
+    pass
+@extern("demo_cpp_shim.dll")
+def counter_name(c: int) -> str:
+    pass
+@extern("demo_cpp_shim.dll")
+def counter_reset(c: int) -> None:
+    pass
+@extern("demo_cpp_shim.dll")
+def counter_free(c: int) -> None:
+    pass

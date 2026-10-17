@@ -1,0 +1,44 @@
+# stats.sg — 统计聚合层（01 代码库度量 CLI）
+# 职责边界：纯计算，无 IO 无打印——把记录列表折叠成扩展名聚合表与
+# 行数直方图；均值/中位/标准差等标量统计直接用语言内建（mean/median/
+# std/min/max），此处不重复实现（单一事实源）。
+
+# 按扩展名聚合文件数：键为扩展名（无点扩展名归入 "none"）。
+# items() 按插入序遍历，调用方直接消费即可获得稳定输出。
+# 元组不能装 Dict（E1007），故聚合表拆成两张独立 Dict 函数——
+# 调用方各取所需，键序一致可对齐消费。
+def ext_file_counts(recs: List[Tuple[str, int, int, int, int, int, int]]) -> Dict[str, int]:
+    ext_files: Dict[str, int] = {}
+    for r in recs:
+        ext = ext_of(r[0])
+        ext_files[ext] = ext_files.get(ext, 0) + 1
+    return ext_files
+
+# 按扩展名聚合行数（与 ext_file_counts 同键序，可配对消费）。
+def ext_line_counts(recs: List[Tuple[str, int, int, int, int, int, int]]) -> Dict[str, int]:
+    ext_lines: Dict[str, int] = {}
+    for r in recs:
+        ext = ext_of(r[0])
+        ext_lines[ext] = ext_lines.get(ext, 0) + r[1]
+    return ext_lines
+
+# 文件名 → 扩展名（无点归 "none"）。
+def ext_of(name: str) -> str:
+    parts = name.split(".")
+    if len(parts) > 1:
+        return parts[len(parts) - 1]
+    return "none"
+
+# 行数分布直方图：四档（0-9 / 10-49 / 50-99 / 100+），返回长度 4 计数表。
+def histogram(lines: List[int]) -> List[int]:
+    hist = [0, 0, 0, 0]
+    for n in lines:
+        if n < 10:
+            hist[0] = hist[0] + 1
+        elif n < 50:
+            hist[1] = hist[1] + 1
+        elif n < 100:
+            hist[2] = hist[2] + 1
+        else:
+            hist[3] = hist[3] + 1
+    return hist

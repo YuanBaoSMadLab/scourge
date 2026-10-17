@@ -161,7 +161,8 @@ void writeFile(const fs::path& p, const std::string& content) {
 } // namespace
 
 BuildOutcome buildBareOnce(const fs::path& inPath, const fs::path& outPath,
-                           bool gpuMode, bool useCache, const CrossOpts& xo) {
+                           bool gpuMode, bool useCache, const CrossOpts& xo,
+                           const fs::path& buildDir) {
     (void)useCache; // v1 无 obj 缓存（产物小；后续并入统一缓存体系）
     BuildOutcome b;
     b.exe = outPath;
@@ -237,9 +238,23 @@ BuildOutcome buildBareOnce(const fs::path& inPath, const fs::path& outPath,
         b.exitCode = 1;
         return b;
     }
-    fs::path dir = outPath.parent_path();
-    if (dir.empty()) dir = ".";
+    // 中间体（.ll/_crt/_rt/.ld）落 build-dir（默认 <源目录>/.sgbuild）；
+    // .elf/.bin 是最终产物，跟 outPath 走。
+    fs::path dir = buildDir.empty() ? inPath.parent_path() / ".sgbuild"
+                                    : buildDir;
+    {
+        std::error_code mkEc;
+        fs::create_directories(dir, mkEc);
+        if (mkEc) dir = outPath.parent_path();
+        if (dir.empty()) dir = ".";
+    }
     std::string stem = outPath.stem().string();
+    // 最终产物目录须先建——链接器不建目录（--out-dir 首次构建场景）。
+    {
+        std::error_code mkEc;
+        fs::path outParent = outPath.parent_path();
+        if (!outParent.empty()) fs::create_directories(outParent, mkEc);
+    }
     fs::path llPath = dir / (stem + ".ll");
     fs::path capPath = dir / (stem + ".buildcap");
     std::string toolOut;

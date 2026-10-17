@@ -1,179 +1,125 @@
-# 演示：网络方向 —— 有状态 JSON API 服务
-# 在 demo02 基础上加入：服务端请求计数（/stats）、内存 KV 存储（/kv GET/POST）、
-# 迭代斐波那契计算（/fib）、查询串解析、按方法分发、完善的错误码。
-capability net
+# main.sg — 02 完整博客站 · 装配入口
+# 架构：主线程 accept/read/路由分发；后台线程经 channel 异步聚合计数——
+# SYNC 消息做应答栅栏（读视图前对齐，保证双模输出确定），QUIT 哨兵 + join 收尾。
+# 职责边界：本文件持有全部可变状态（posts/views/两条 channel）与线程编排，
+# 呈现与 JSON 构造委托 views_html / json_api / stats_hub（纯函数模块）。
+# 路由：GET /（前端 fetch 动态渲染列表）、/style.css、/post/{id}（SSR 详情）、
+#       /api/posts（GET 列表 / POST 发文）、/api/stats（JSON 统计 + Top3）、其余 404。
+# 展示：capability net,thread、thread_spawn/channel 栅栏与哨兵、Dict 计数、
+#       json_decode、跨模块只读传参。
+capability net, thread
 
-def send(conn: int, status: int, body: str) -> None:
-    net_http_write_response(conn, status, "application/json; charset=utf-8", body)
+import views_html
+import json_api
+import stats_hub
 
-def bump(keys: List[str], vals: List[int], key: str) -> None:
-    found: int = -1
-    i: int = 0
-    while i < len(keys):
-        if keys[i] == key:
-            found = i
-        i = i + 1
-    if found < 0:
-        keys.append(key)
-        vals.append(1)
-    else:
-        vals[found] = vals[found] + 1
+views: Dict[str, int] = {}
+ch = channel_new()
+ack = channel_new()
 
-def kv_set(keys: List[str], vals: List[str], k: str, v: str) -> None:
-    found: int = -1
-    i: int = 0
-    while i < len(keys):
-        if keys[i] == k:
-            found = i
-        i = i + 1
-    if found < 0:
-        keys.append(k)
-        vals.append(v)
-    else:
-        vals[found] = v
+def hit_worker() -> None:
+    # 后台聚合器：主线程每收一个请求先发路由串进来；SYNC 应答栅栏；QUIT 退出
+    while True:
+        msg = chan_recv(ch)
+        if msg == "QUIT":
+            break
+        if msg == "SYNC":
+            chan_send(ack, "ok")
+            continue
+        views[msg] = views.get(msg, 0) + 1
 
-def kv_get(keys: List[str], vals: List[str], k: str) -> int:
-    i: int = 0
-    while i < len(keys):
-        if keys[i] == k:
+def barrier() -> None:
+    # 栅栏：等 worker 把此前所有计数落账后再读 views（确定性读）
+    chan_send(ch, "SYNC")
+    chan_recv(ack)
+
+def reply(conn, status, ctype, body) -> None:
+    net_http_write_response(conn, status, ctype, body)
+
+def post_index(posts: List[Tuple[int, str, str]], pid: int) -> int:
+    i = 0
+    for p in posts:
+        if p[0] == pid:
             return i
         i = i + 1
     return -1
 
-def fib(n: int) -> int:
-    if n <= 0:
-        return 0
-    a: int = 0
-    b: int = 1
-    i: int = 0
-    while i < n:
-        t: int = a + b
-        a = b
-        b = t
-        i = i + 1
-    return a
-
-def query_get(q: str, key: str) -> str:
-    pairs: List[str] = q.split("&")
-    i: int = 0
-    while i < len(pairs):
-        kv: List[str] = pairs[i].split("=")
-        if len(kv) >= 2:
-            if kv[0] == key:
-                return kv[1]
-        i = i + 1
-    return ""
-
 def main() -> int:
-    l: int = net_bind("127.0.0.1", 18099)
-    if l < 1:
+    posts: List[Tuple[int, str, str]] = []
+    posts.append((1, "hello scourge", "A staticly typed, AOT-native language."))
+    posts.append((2, "tensors first", "Tensor is a native value, not a library."))
+    posts.append((3, "why ahead of time", "One exe, no runtime, run anywhere."))
+
+    worker = thread_spawn("hit_worker")
+    lfd = net_bind("127.0.0.1", 18099)
+    if lfd < 1:
         print("bind-failed")
         return 1
-    print("server-up port=18099")
+    print("blog-up port=18099")
 
-    paths: List[str] = []
-    path_counts: List[int] = []
-    statuses: List[str] = []
-    status_counts: List[int] = []
-    kvk: List[str] = []
-    kvv: List[str] = []
-    total: int = 0
-
-    served: int = 0
-    while served < 14:
-        c: int = net_accept(l)
-        req: Json = net_http_read_request(c)
+    n = 0
+    while n < 8:
+        c = net_accept(lfd)
+        req = net_http_read_request(c)
         if req.is_null():
             net_close(c)
             continue
-        full: str = req.get("path").as_str()
-        method: str = req.get("method").as_str()
+        route = req.get("path").as_str()
+        method = req.get("method").as_str()
+        chan_send(ch, route)  # 异步计数（含 API 与 404）
+        n = n + 1
 
-        qparts: List[str] = full.split("?")
-        route: str = full
-        query: str = ""
-        if len(qparts) >= 2:
-            route = qparts[0]
-            query = qparts[1]
-
-        total = total + 1
-        bump(paths, path_counts, route)
-        status: int = 200
-
-        if route == "/":
-            send(c, 200, "{\"service\":\"scourge-demo\",\"version\":\"0.9.10\",\"routes\":[\"/\",\"/health\",\"/echo\",\"/sum\",\"/fib\",\"/stats\",\"/kv\"]}")
-        elif route == "/health":
-            send(c, 200, "{\"status\":\"ok\",\"requests\":" + format("{}", total) + "}")
-        elif route == "/echo":
-            send(c, 200, "{\"echo\":\"" + req.get("body").as_str() + "\"}")
-        elif route == "/sum":
+        if route == "/" and method == "GET":
+            reply(c, 200, "text/html; charset=utf-8", views_html.index_html())
+        elif route == "/style.css":
+            reply(c, 200, "text/css; charset=utf-8", views_html.css_text())
+        elif route.startswith("/post/"):
+            pid = -1
             try:
-                sarr: Json = json_decode(req.get("body").as_str())
-                ssum: float = 0.0
-                sk: int = 0
-                while sk < sarr.len():
-                    ssum = ssum + sarr.at(sk).as_float()
-                    sk = sk + 1
-                send(c, 200, "{\"count\":" + format("{}", sarr.len()) + ",\"sum\":" + format("{}", ssum) + "}")
+                pid = int(route[6:])
             except:
-                status = 400
-                send(c, 400, "{\"error\":\"bad-json-array\"}")
-        elif route == "/fib":
-            try:
-                fbody: Json = json_decode(req.get("body").as_str())
-                fn: int = fbody.get("n").as_int()
-                if fn < 0:
-                    fn = 0
-                if fn > 40:
-                    fn = 40
-                send(c, 200, "{\"n\":" + format("{}", fn) + ",\"fib\":" + format("{}", fib(fn)) + "}")
-            except:
-                status = 400
-                send(c, 400, "{\"error\":\"bad-json-need-n\"}")
-        elif route == "/stats":
-            sb: str = "{\"total\":" + format("{}", total) + ",\"by_path\":{"
-            sp: int = 0
-            while sp < len(paths):
-                if sp > 0:
-                    sb = sb + ","
-                sb = sb + "\"" + paths[sp] + "\":" + format("{}", path_counts[sp])
-                sp = sp + 1
-            sb = sb + "},\"by_status\":{"
-            sq: int = 0
-            while sq < len(statuses):
-                if sq > 0:
-                    sb = sb + ","
-                sb = sb + "\"" + statuses[sq] + "\":" + format("{}", status_counts[sq])
-                sq = sq + 1
-            sb = sb + "}}"
-            send(c, 200, sb)
-        elif route == "/kv":
+                pid = -1
+            i = post_index(posts, pid)
+            if i < 0:
+                reply(c, 404, "text/html; charset=utf-8",
+                      views_html.not_found_html())
+            else:
+                barrier()
+                v = views.get("/post/" + str(pid), 0)
+                reply(c, 200, "text/html; charset=utf-8",
+                      views_html.post_html(posts[i][1], posts[i][2], v))
+        elif route == "/api/posts":
             if method == "POST":
                 try:
-                    pbody: Json = json_decode(req.get("body").as_str())
-                    pkey: str = pbody.get("key").as_str()
-                    pval: str = pbody.get("value").as_str()
-                    kv_set(kvk, kvv, pkey, pval)
-                    send(c, 200, "{\"ok\":true,\"key\":\"" + pkey + "\",\"size\":" + format("{}", len(kvk)) + "}")
+                    body = json_decode(req.get("body").as_str())
+                    t = body.get("title").as_str()
+                    txt = body.get("body").as_str()
+                    nid = posts[len(posts) - 1][0] + 1
+                    posts.append((nid, t, txt))
+                    reply(c, 201, "application/json; charset=utf-8",
+                          json_api.post_created_json(nid, t))
                 except:
-                    status = 400
-                    send(c, 400, "{\"error\":\"bad-json-need-key-value\"}")
+                    reply(c, 400, "application/json; charset=utf-8",
+                          json_api.bad_request_json())
             else:
-                gkey: str = query_get(query, "key")
-                gidx: int = kv_get(kvk, kvv, gkey)
-                if gidx >= 0:
-                    send(c, 200, "{\"key\":\"" + gkey + "\",\"value\":\"" + kvv[gidx] + "\"}")
-                else:
-                    status = 404
-                    send(c, 404, "{\"error\":\"no-such-key\"}")
+                barrier()
+                reply(c, 200, "application/json; charset=utf-8",
+                      json_api.posts_json(posts, views))
+        elif route == "/api/stats":
+            barrier()
+            reply(c, 200, "application/json; charset=utf-8",
+                  json_api.stats_json(n, views))
         else:
-            status = 404
-            send(c, 404, "{\"error\":\"not-found\"}")
-
-        bump(statuses, status_counts, format("{}", status))
+            reply(c, 404, "application/json; charset=utf-8",
+                  json_api.not_found_json())
         net_close(c)
-        served = served + 1
 
-    net_close(l)
-    print("server-down served", served, "total", total)
+    # 收尾：哨兵退出 worker，join 后读终账（确定性），关闭全部句柄
+    chan_send(ch, "QUIT")
+    thread_join(worker)
+    chan_close(ch)
+    chan_close(ack)
+    net_close(lfd)
+    print(f"blog-down requests={n} paths={len(views)} hits={sum(views.values())}")
+    print(stats_hub.top_lines(views, 3).trim())
     return 0

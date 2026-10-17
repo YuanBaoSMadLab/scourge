@@ -1,0 +1,400 @@
+# sget.sg — Scourge 包管理器（自举：用 Scourge 写的生态工具）
+# 用法：
+#   sget install <pkg>      三级解析：sget.json registry → 内置系统包 → 报错
+#   sget install <url>      从 URL 安装 .sg 绑定包（存为 packages/<host文件名>）
+#   sget list               列出已安装包
+#   sget uninstall <pkg>    卸载（lock 移除 + 删除包目录）
+#   sget search [词]        浏览 registry 条目
+# registry（sget.json，与 sget 同目录）驱动主流库安装：条目含
+# {desc, api, url, format, dlls, binding}。api=c 绑定直接可用；api=cpp/com
+# 的库（torch/qt/webview2）必须经 C shim 层——安装只放库文件，绑定待社区。
+# 安装动作：curl 下载 + tar 解压（二进制安全，绕开 str 的 NUL 语义）、
+# DLL 拷到 packages/<pkg>/bin 与项目根（LoadLibraryA 搜索序列覆盖）、
+# 绑定文件写入 packages/<pkg>/、lock 记入 sget.lock.json。
+capability net, io, proc, env
+
+# ---- 内置 registry：系统 DLL 绑定包（零下载，Windows 自带） ----
+def pkg_source(name: str) -> str:
+    if name == "user32":
+        return f"""# user32 — Windows USER API 绑定（sget 内置包）
+# 用法：import user32 后调用；调用方模块声明 capability ffi。
+# 契约：str 参数按只读指针传入（const char*）。原地改写缓冲区的 API
+# （CharLowerA/CharUpperA/lstrcpy 族）不可绑定——AOT 字面量在只读段，
+# 改写即崩；VM 侧静默污染值语义。
+capability ffi
+
+@extern("user32.dll")
+def MessageBoxA(hwnd: int, text: str, caption: str, utype: int) -> int:
+    pass
+
+@extern("user32.dll")
+def GetForegroundWindow() -> int:
+    pass
+
+@extern("user32.dll")
+def IsWindow(hwnd: int) -> bool:
+    pass
+
+@extern("user32.dll")
+def MessageBeep(u: int) -> bool:
+    pass
+"""
+    if name == "kernel32":
+        return f"""# kernel32 — Windows 内核基础 API 绑定（sget 内置包）
+capability ffi
+
+@extern("kernel32.dll")
+def GetTickCount() -> int:
+    pass
+
+@extern("kernel32.dll")
+def MulDiv(a: int, b: int, c: int) -> int:
+    pass
+
+@extern("kernel32.dll")
+def Beep(freq: int, dur: int) -> bool:
+    pass
+"""
+    if name == "msvcrt":
+        return f"""# msvcrt — CRT 函数绑定（sget 内置包）
+capability ffi
+
+@extern("msvcrt.dll")
+def rand() -> int:
+    pass
+
+@extern("msvcrt.dll")
+def srand(seed: int) -> None:
+    pass
+
+@extern("msvcrt.dll")
+def atoi(s: str) -> int:
+    pass
+
+@extern("msvcrt.dll")
+def strlen(s: str) -> int:
+    pass
+
+# getenv 不在此绑定：env 已是语言内建（缺失键返回 ""），声明 capability env
+# 后直接调用 env("名称") 即可——跨库声明反而引入双份依赖。
+"""
+    if name == "sqlite3":
+        return f"""# sqlite3 — 嵌入式 SQL 数据库（纯 C API，sget registry 包）
+# 官方 DLL 直接可用；输出指针参数 API（sqlite3_open 的 db**）需指针
+# 内建支持后开放，当前绑定子集为纯读函数。
+capability ffi
+
+@extern("sqlite3.dll")
+def sqlite3_libversion() -> str:
+    pass
+
+@extern("sqlite3.dll")
+def sqlite3_memory_used() -> int:
+    pass
+
+@extern("sqlite3.dll")
+def sqlite3_compileoption_used(s: str) -> bool:
+    pass
+"""
+    return ""
+
+
+def known_pkg(name: str) -> bool:
+    return name == "user32" or name == "kernel32" or name == "msvcrt"
+
+
+# ---- registry（sget.json）：主流库条目 → url/dlls/binding 驱动安装 ----
+# api=c       纯 C API：绑定直接可用（sqlite3/zlib/lua/sdl2…）
+# api=c-legacy  C 兼容层符号（opencv 官方预编译包保留 C API 子集）
+# api=cpp/com C++/COM ABI：@extern 无法直调，安装只放库文件，须经 C shim
+#             （extern "C" 包装 DLL）——torch/qt/webview2 均此类
+def registry_path() -> str:
+    return "sget.json"
+
+
+def load_registry() -> Json:
+    if not exists(registry_path()):
+        return json_decode("null")
+    return json_decode(read_text(registry_path()))
+
+
+def registry_names(reg: Json) -> List[str]:
+    return reg.get("pkgs").keys()
+
+
+def cmd_search(word: str) -> None:
+    reg: Json = load_registry()
+    if reg.is_null():
+        print("sget: 找不到 " + registry_path() + "（registry 索引）")
+        return
+    names: List[str] = registry_names(reg)
+    i: int = 0
+    while i < len(names):
+        n: str = names[i]
+        e: Json = reg.get("pkgs").get(n)
+        d: str = e.get("desc").as_str()
+        if word == "" or n.contains(word) or d.contains(word):
+            print("  " + n + "  [" + e.get("api").as_str() + "]  " + d)
+        i = i + 1
+
+
+# registry 条目安装：curl 下载 + tar 解压（二进制安全——str 的 NUL 语义
+# 装不下 zip/DLL，全部借道子进程）→ DLL 按条目 dlls[] 相对路径拷到
+# packages/<pkg>/bin 与项目根 → 绑定（builtin=内置源码 / bundled=包内
+# 自带 <pkg>.sg / shim=只放库）→ lock。
+def registry_install(name: str, e: Json) -> int:
+    url: str = e.get("url").as_str()
+    binding: str = e.get("binding").as_str()
+    dl: Json = e.get("dlls")
+    if dl.is_null():
+        print("sget:", name, "registry 条目缺 dlls")
+        return 1
+    installed: List[str] = load_pkgs()
+    if installed.contains(name):
+        print("sget:", name, "已安装，覆盖更新")
+    zipPath: str = env("TEMP") + "\\sget_" + name + ".zip"
+    print("sget: 下载", url)
+    rc: int = spawn_wait("curl", ["-L", "-sS", "-o", zipPath, url])
+    if rc != 0:
+        print("sget: 下载失败（curl 退出码 " + str(rc) + "）")
+        return 1
+    spawn_wait("cmd", ["/c", "mkdir", "packages\\" + name + "\\_dl"])
+    rc = spawn_wait("tar", ["-xf", zipPath, "-C", "packages/" + name + "/_dl"])
+    if rc != 0:
+        print("sget: 解压失败（tar 退出码 " + str(rc) + "）")
+        return 1
+    spawn_wait("cmd", ["/c", "mkdir", "packages\\" + name + "\\bin"])
+    i: int = 0
+    while i < dl.len():
+        rel: str = dl.at(i).as_str()
+        # cmd 参数一律反斜杠（正斜杠段会被解析成开关）；copy 目标取文件名
+        win: str = rel.replace("/", "\\")
+        segs: List[str] = rel.split("/")
+        fname: str = segs[len(segs) - 1]
+        rc = spawn_wait("cmd", ["/c", "copy", "/y",
+                                "packages\\" + name + "\\_dl\\" + win, fname])
+        if rc == 0:
+            spawn_wait("cmd", ["/c", "copy", "/y", fname,
+                               "packages\\" + name + "\\bin\\"])
+            print("sget: 部署 DLL", fname)
+        else:
+            print("sget: 警告 DLL 未找到:", rel)
+        i = i + 1
+    if binding == "builtin":
+        write_text("packages/" + name + "/" + name + ".sg", pkg_source(name))
+    elif binding == "bundled":
+        spawn_wait("cmd", ["/c", "copy", "/y",
+                           "packages\\" + name + "\\_dl\\" + name + ".sg",
+                           "packages\\" + name + "\\"])
+    else:
+        print("sget:", name, "是 C++/COM 库——须经 C shim 层调用；库文件已就位，",
+              "绑定待 shim 工程（见 registry 条目注释）")
+    if not installed.contains(name):
+        installed.append(name)
+    save_pkgs(installed)
+    print("sget:", name, "安装完成")
+    return 0
+
+
+
+# ---- lock 读写（手拼 JSON + json_decode 解析） ----
+def lock_path() -> str:
+    return "sget.lock.json"
+
+
+def load_pkgs() -> List[str]:
+    if not exists(lock_path()):
+        return []
+    raw: str = read_text(lock_path())
+    j: Json = json_decode(raw)
+    out: List[str] = []
+    i: int = 0
+    keys: List[str] = j.get("pkgs").keys()
+    while i < len(keys):
+        out.append(keys[i])
+        i = i + 1
+    return out
+
+
+def save_pkgs(pkgs: List[str]) -> None:
+    body = ""
+    i: int = 0
+    while i < len(pkgs):
+        if i > 0:
+            body = body + ", "
+        body = body + f"\"{pkgs[i]}\": \"1\""
+        i = i + 1
+    write_text(lock_path(), "{\n  \"pkgs\": {" + body + "}\n}\n")
+
+
+# ---- 命令实现 ----
+def cmd_install(target: str) -> int:
+    name: str = target
+    src = ""
+    if known_pkg(target):
+        src = pkg_source(target)
+    elif target.startswith("http://") or target.startswith("https://"):
+        # URL 包：下载 .sg 绑定文本，包名取路径末段（去 .sg 后缀）
+        resp: str = net_http_get(target)
+        parts: List[str] = target.split("/")
+        fname: str = parts[len(parts) - 1]
+        if not fname.endswith(".sg"):
+            print("sget: URL 包必须指向 .sg 绑定文件，实际:", fname)
+            return 1
+        segs: List[str] = fname.split(".sg")
+        name = segs[0]
+        if name == "":
+            print("sget: 无法从 URL 推断包名")
+            return 1
+        src = resp
+    else:
+        # registry 命中 → 下载安装（sget.json 条目驱动）
+        reg: Json = load_registry()
+        if not reg.is_null() and not reg.get("pkgs").get(name).is_null():
+            return registry_install(name, reg.get("pkgs").get(name))
+        print("sget: 未知包 '" + target + "'（试 sget search 浏览 registry；内置: user32 kernel32 msvcrt；或 .sg 绑定文件的 http(s) URL）")
+        return 1
+
+    installed: List[str] = load_pkgs()
+    if installed.contains(name):
+        print("sget:", name, "已安装，覆盖更新")
+    else:
+        installed.append(name)
+
+    # 绑定文件入包目录（write_text 不建父目录，先显式创建；cmd 会把
+    # 正斜杠段解析成开关，参数必须用反斜杠）
+    pkg_dir: str = "packages/" + name
+    spawn_wait("cmd", ["/c", "mkdir", "packages\\" + name])
+    write_text(pkg_dir + "/" + name + ".sg", src)
+    # 内置系统包无 DLL 需分发；URL 包约定自带 bin/*.dll → 拷到项目根
+    # （str 是 NUL 结尾语义，二进制 DLL 不能经 read/write_text，走系统 copy）
+    bindir: str = pkg_dir + "/bin"
+    if exists(bindir):
+        dlls: List[str] = list_dir(bindir)
+        i: int = 0
+        while i < len(dlls):
+            f: str = dlls[i]
+            if f.endswith(".dll"):
+                spawn_wait("cmd", ["/c", "copy", "/y",
+                                   bindir + "\\" + f, f])
+                print("sget: 部署 DLL", f)
+            i = i + 1
+
+    installed.append(name)
+    save_pkgs(installed)
+    print("sget:", name, "安装完成 →", pkg_dir + "/" + name + ".sg")
+    print("sget: 主程序 import " + name + " 后即可调用，模块记得 capability ffi")
+    return 0
+
+
+def cmd_list() -> int:
+    pkgs: List[str] = load_pkgs()
+    if len(pkgs) == 0:
+        print("sget: 未安装任何包（试试 sget install user32）")
+        return 0
+    print("已安装", len(pkgs), "个包:")
+    i: int = 0
+    while i < len(pkgs):
+        print("  " + pkgs[i] + "  ->  packages/" + pkgs[i] + "/" +
+              pkgs[i] + ".sg")
+        i = i + 1
+    return 0
+
+
+def cmd_uninstall(name: str) -> int:
+    pkgs: List[str] = load_pkgs()
+    if not pkgs.contains(name):
+        print("sget:", name, "未安装")
+        return 1
+    rest: List[str] = []
+    i: int = 0
+    while i < len(pkgs):
+        if pkgs[i] != name:
+            rest.append(pkgs[i])
+        i = i + 1
+    save_pkgs(rest)
+    # 语言暂无文件删除内建：借系统 shell 删包目录（cmd 会把正斜杠段
+    # 解析成开关，路径必须反斜杠）
+    spawn_wait("cmd", ["/c", "rmdir", "/s", "/q", "packages\\" + name])
+    print("sget:", name, "已卸载")
+    return 0
+
+
+# bindgen 定位：仓库布局下 sget.exe 与 bindgen.exe 是 examples/ 兄弟目录；
+# 散装部署退回 PATH。
+def cmd_bind(name: str) -> int:
+    b: str = "packages/" + name + "/" + name + ".bind"
+    if not exists(b):
+        print("sget:", name, "无绑定声明（" + b + "），无需 bind")
+        return 1
+    bindgen: str = "..\\bindgen\\bindgen.exe"
+    if not exists(bindgen):
+        bindgen = "bindgen.exe"
+    r: int = spawn_wait(bindgen, [b, "packages/" + name])
+    if r != 0:
+        print("sget: bindgen 生成失败（rc =", str(r) + "）")
+        return 1
+    shimbat: str = "packages/" + name + "/shim/build_shim.bat"
+    if exists(shimbat):
+        shimdir: str = shimbat.slice(0, shimbat.find("/build_shim.bat")).replace("/", "\\")
+        rb: int = spawn_wait("cmd", ["/c", "cd", "/d", shimdir, "&&",
+                                     "build_shim.bat"])
+        if rb != 0:
+            print("sget: 代理 shim 编译失败（rc =", str(rb) + "）")
+            return 1
+    bindir: str = "packages/" + name + "/bin"
+    if exists(bindir):
+        dlls: List[str] = list_dir(bindir)
+        i: int = 0
+        while i < len(dlls):
+            f: str = dlls[i]
+            if f.endswith(".dll"):
+                # cmd 会把路径里的正斜杠段解析成开关，必须全反斜杠
+                spawn_wait("cmd", ["/c", "copy", "/y",
+                                   bindir.replace("/", "\\") + "\\" + f, f])
+                print("sget: 部署 DLL", f)
+            i = i + 1
+    print("sget:", name, "绑定完成 — import", name, "后直调")
+    return 0
+
+
+def main() -> int:
+    a: List[str] = args()
+    # args() 不含程序名：sget install user32 → ["install", "user32"]
+    cmd: str = ""
+    arg: str = ""
+    if len(a) >= 1:
+        cmd = a[0]
+    if len(a) >= 2:
+        arg = a[1]
+    if cmd == "" or cmd == "help":
+        print("sget — Scourge 包管理器")
+        print("用法: sget <install|bind|list|search|uninstall> [包名或URL]")
+        print("  install <pkg|url>  安装（registry/URL，装后自动 bind）")
+        print("  bind <pkg>         按包内 .bind 重新生成绑定与代理 shim")
+        return 0
+    if cmd == "list":
+        return cmd_list()
+    if cmd == "search":
+        cmd_search(arg)
+        return 0
+    if cmd == "install":
+        if arg == "":
+            print("sget: install 需要包名或 URL")
+            return 1
+        r: int = cmd_install(arg)
+        if r == 0 and exists("packages/" + arg + "/" + arg + ".bind"):
+            r = cmd_bind(arg)
+        return r
+    if cmd == "bind":
+        if arg == "":
+            print("sget: bind 需要包名")
+            return 1
+        return cmd_bind(arg)
+    if cmd == "uninstall":
+        if arg == "":
+            print("sget: uninstall 需要包名")
+            return 1
+        return cmd_uninstall(arg)
+    print("sget: 未知命令 '" + cmd + "'")
+    return 1

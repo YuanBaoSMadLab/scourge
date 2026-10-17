@@ -1,0 +1,22 @@
+# user32 — Windows USER API 绑定（sget 内置包）
+# 用法：import user32 后调用；调用方模块声明 capability ffi。
+# 契约：str 参数按只读指针传入（const char*）。原地改写缓冲区的 API
+# （CharLowerA/CharUpperA/lstrcpy 族）不可绑定——AOT 字面量在只读段，
+# 改写即崩；VM 侧静默污染值语义。
+capability ffi
+
+@extern("user32.dll")
+def MessageBoxA(hwnd: int, text: str, caption: str, utype: int) -> int:
+    pass
+
+@extern("user32.dll")
+def GetForegroundWindow() -> int:
+    pass
+
+@extern("user32.dll")
+def IsWindow(hwnd: int) -> bool:
+    pass
+
+@extern("user32.dll")
+def MessageBeep(u: int) -> bool:
+    pass

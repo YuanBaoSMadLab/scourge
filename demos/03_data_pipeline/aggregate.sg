@@ -1,0 +1,108 @@
+# aggregate.sg — ETL 聚合报表层（03 销售流水 ETL）
+# 职责边界：纯计算无 IO——把已清洗记录聚合成 类别/区域 两维报表与离群
+# 检测文本。无状态设计：每张报表函数自建六表自聚合（数据量小，避免
+# 跨模块可变 Dict 传参的语义负担），排序统一走「定宽 fmt 键 + sorted +
+# reversed」降序（sorted 无 key 参数的标准替代）。
+capability io
+
+# 单维累加器：六表 Dict 原地更新。跨模块导出（main 的 JSON 摘要也用），
+# 参数必须全显式注解——隐式单态化仅限定义模块内部调用。
+def accum(rev: Dict[str, float], qty: Dict[str, int], cnt: Dict[str, int],
+          sq: Dict[str, float], mn: Dict[str, float], mx: Dict[str, float],
+          k: str, amt: float, q: int) -> None:
+    rev[k] = rev.get(k, 0.0) + amt
+    qty[k] = qty.get(k, 0) + q
+    cnt[k] = cnt.get(k, 0) + 1
+    sq[k] = sq.get(k, 0.0) + amt * amt
+    if amt < mn.get(k, 1e18):
+        mn[k] = amt
+    if amt > mx.get(k, 0.0):
+        mx[k] = amt
+
+# 类别维度控制台表（降序，含均值/标准差/件单价/占比）。
+def cat_console(recs: List[Tuple[str, str, float, int]], grand: float) -> str:
+    rev: Dict[str, float] = {}
+    qty: Dict[str, int] = {}
+    cnt: Dict[str, int] = {}
+    sq: Dict[str, float] = {}
+    mn: Dict[str, float] = {}
+    mx: Dict[str, float] = {}
+    for r in recs:
+        accum(rev, qty, cnt, sq, mn, mx, r[0], r[2], r[3])
+    out = f"{'cat':<8}{'n':>3}{'revenue':>9}{'qty':>5}{'mean':>8}{'std':>7}{'price':>8}{'share%':>8}"
+    keys: List[str] = []
+    for it in rev.items():
+        keys.append(f"{it[1]:012.2f}|{it[0]}")
+    for k in reversed(sorted(keys)):
+        p = k.find("|")
+        c = k[p + 1:]
+        rv = float(k[:p])
+        m = rv / float(cnt[c])
+        sd = sqrt(sq[c] / float(cnt[c]) - m * m)
+        share = 100.0 * rv / grand
+        out = out + "\n" + f"{c:<8}{cnt[c]:>3}{rv:>9.1f}{qty[c]:>5}{m:>8.2f}{sd:>7.2f}{rv / float(qty[c]):>8.2f}{share:>8.2f}"
+    return out
+
+# 类别维度 Markdown 表格行（同时返回头部类别与其营收，供报告摘要）。
+# 返回 (table, top_cat, top_rev)——全标量/str 元组，规避元组装容器限制。
+def cat_markdown(recs: List[Tuple[str, str, float, int]], grand: float) -> Tuple[str, str, float]:
+    rev: Dict[str, float] = {}
+    qty: Dict[str, int] = {}
+    cnt: Dict[str, int] = {}
+    sq: Dict[str, float] = {}
+    mn: Dict[str, float] = {}
+    mx: Dict[str, float] = {}
+    for r in recs:
+        accum(rev, qty, cnt, sq, mn, mx, r[0], r[2], r[3])
+    table = ""
+    keys: List[str] = []
+    for it in rev.items():
+        keys.append(f"{it[1]:012.2f}|{it[0]}")
+    top_cat = ""
+    top_rev = 0.0
+    first = True
+    for k in reversed(sorted(keys)):
+        p = k.find("|")
+        c = k[p + 1:]
+        rv = float(k[:p])
+        m = rv / float(cnt[c])
+        share = 100.0 * rv / grand
+        table = table + f"| {c} | {cnt[c]} | {rv:.1f} | {m:.2f} | {share:.1f}% |\n"
+        if first:
+            top_cat = c
+            top_rev = rv
+            first = False
+    return (table, top_cat, top_rev)
+
+# 区域维度简表（降序）。
+def region_console(recs: List[Tuple[str, str, float, int]]) -> str:
+    rev: Dict[str, float] = {}
+    qty: Dict[str, int] = {}
+    cnt: Dict[str, int] = {}
+    sq: Dict[str, float] = {}
+    mn: Dict[str, float] = {}
+    mx: Dict[str, float] = {}
+    for r in recs:
+        accum(rev, qty, cnt, sq, mn, mx, r[1], r[2], r[3])
+    out = "== by region =="
+    keys: List[str] = []
+    for it in rev.items():
+        keys.append(f"{it[1]:012.2f}|{it[0]}")
+    for k in reversed(sorted(keys)):
+        p = k.find("|")
+        g = k[p + 1:]
+        rv = float(k[:p])
+        m = rv / float(cnt[g])
+        out = out + "\n" + f"{g:<8}n {cnt[g]:>2}  revenue {rv:>7.1f}  mean {m:>6.2f}  min {mn[g]:>5.1f}  max {mx[g]:>5.1f}"
+    return out
+
+# Z-score 离群检测（z > 1.5）：返回 (文本行, 离群条数)。
+def outlier_console(recs: List[Tuple[str, str, float, int]], gmean: float, gstd: float) -> Tuple[str, int]:
+    out = ""
+    oc = 0
+    for r in recs:
+        z = (r[2] - gmean) / gstd
+        if z > 1.5:
+            out = out + f"outlier {r[0]}/{r[1]} amt {r[2]:.1f} z {z:.2f}\n"
+            oc = oc + 1
+    return (out, oc)

@@ -1,0 +1,106 @@
+/* style.css — 莫兰迪柔和色系 */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: #f2efe9;
+    color: #3d3a35;
+    line-height: 1.75;
+}
+
+nav {
+    background: #e5e0d8;
+    padding: 14px 24px;
+    display: flex;
+    gap: 24px;
+    align-items: baseline;
+    border-bottom: 1px solid #d8d2c8;
+}
+
+nav a {
+    color: #6b675f;
+    text-decoration: none;
+    font-size: 15px;
+}
+
+nav a:hover { color: #8a9a8b; }
+
+nav .logo {
+    font-size: 18px;
+    font-weight: 700;
+    color: #5a6b5c;
+    margin-right: 12px;
+}
+
+main {
+    max-width: 720px;
+    margin: 32px auto;
+    padding: 0 20px;
+}
+
+h1 {
+    color: #5a6b5c;
+    font-size: 26px;
+    margin-bottom: 18px;
+}
+
+h2 {
+    color: #5a6b5c;
+    font-size: 20px;
+    margin: 26px 0 10px;
+}
+
+.card {
+    background: #fbf9f5;
+    border: 1px solid #e2ddd3;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+}
+
+.card h2 {
+    margin: 0 0 6px;
+    font-size: 19px;
+}
+
+.card h2 a { color: #5a6b5c; text-decoration: none; }
+.card h2 a:hover { color: #b5a8a0; }
+
+.meta {
+    color: #a09a8e;
+    font-size: 13px;
+    margin-bottom: 8px;
+}
+
+.more { margin-top: 10px; }
+.more a { color: #8a9a8b; text-decoration: none; font-size: 14px; }
+.more a:hover { color: #b5a8a0; }
+
+p { margin: 10px 0; }
+
+blockquote {
+    border-left: 3px solid #b5a8a0;
+    background: #f0ece5;
+    padding: 8px 16px;
+    margin: 12px 0;
+    color: #6b675f;
+}
+
+ul { margin: 10px 0 10px 24px; }
+li { margin: 4px 0; }
+
+ul.archive { list-style: none; margin-left: 0; }
+ul.archive li {
+    padding: 8px 0;
+    border-bottom: 1px dashed #ddd6cb;
+}
+ul.archive a { color: #5a6b5c; text-decoration: none; }
+ul.archive a:hover { color: #b5a8a0; }
+ul.archive .meta { margin-right: 14px; }
+
+footer {
+    text-align: center;
+    color: #a09a8e;
+    font-size: 13px;
+    padding: 28px 0 36px;
+}

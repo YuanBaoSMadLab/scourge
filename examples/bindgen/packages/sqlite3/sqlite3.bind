@@ -1,0 +1,60 @@
+# sqlite3.bind — 真实 C 库生态示范：SQLite amalgamation（public domain）
+# 链 C 源：link "sqlite3.c" 由 C 驱动预编成 .obj 再链入代理 DLL
+# （clang++ 视 .c 为 C++ 会重定义报错，bindgen 已自动分叉）。
+# API 设计：句柄化（sqlite3*/stmt* → handle/long long 过边界）、
+# 出参结构化（open/prepare 的 ppStmt 改为返回值）、失败返回 0。
+library "sqlite3" dll "sqlite3_shim.dll" license "PublicDomain"
+include "sqlite3.h"
+incdir "."
+link "sqlite3.c"
+
+def open_db(path: str, flags: int) -> handle:
+    sqlite3* db = nullptr
+    int rc = sqlite3_open_v2(path, (sqlite3**)&db, (int)flags, nullptr)
+    if (rc != SQLITE_OK) {
+        if (db != nullptr) sqlite3_close(db)
+        return 0
+    }
+    return (long long)(intptr_t)db
+
+def close_db(db: handle) -> none:
+    sqlite3_close((sqlite3*)(intptr_t)db)
+
+def exec_sql(db: handle, sql: str) -> int:
+    return (long long)sqlite3_exec((sqlite3*)(intptr_t)db, sql, nullptr, nullptr, nullptr)
+
+def prepare(db: handle, sql: str) -> handle:
+    sqlite3* stmt = nullptr
+    int rc = sqlite3_prepare_v2((sqlite3*)(intptr_t)db, sql, -1, (sqlite3_stmt**)&stmt, nullptr)
+    if (rc != SQLITE_OK) return 0
+    return (long long)(intptr_t)stmt
+
+def bind_int(stmt: handle, idx: int, v: int) -> int:
+    return (long long)sqlite3_bind_int((sqlite3_stmt*)(intptr_t)stmt, (int)idx, (int)v)
+
+def bind_text(stmt: handle, idx: int, v: str) -> int:
+    return (long long)sqlite3_bind_text((sqlite3_stmt*)(intptr_t)stmt, (int)idx, v, -1, SQLITE_TRANSIENT)
+
+def bind_double(stmt: handle, idx: int, v: f64) -> int:
+    return (long long)sqlite3_bind_double((sqlite3_stmt*)(intptr_t)stmt, (int)idx, v)
+
+def step(stmt: handle) -> int:
+    return (long long)sqlite3_step((sqlite3_stmt*)(intptr_t)stmt)
+
+def column_int(stmt: handle, idx: int) -> int:
+    return (long long)sqlite3_column_int((sqlite3_stmt*)(intptr_t)stmt, (int)idx)
+
+def column_double(stmt: handle, idx: int) -> f64:
+    return sqlite3_column_double((sqlite3_stmt*)(intptr_t)stmt, (int)idx)
+
+def column_text(stmt: handle, idx: int) -> str:
+    return (const char*)sqlite3_column_text((sqlite3_stmt*)(intptr_t)stmt, (int)idx)
+
+def finalize(stmt: handle) -> none:
+    sqlite3_finalize((sqlite3_stmt*)(intptr_t)stmt)
+
+def err_code(db: handle) -> int:
+    return (long long)sqlite3_extended_errcode((sqlite3*)(intptr_t)db)
+
+def err_msg(db: handle) -> str:
+    return sqlite3_errmsg((sqlite3*)(intptr_t)db)

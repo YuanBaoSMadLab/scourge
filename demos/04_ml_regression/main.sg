@@ -1,199 +1,95 @@
-# 演示：AI·ML 主方向 —— autodiff + nn(Adam) 训练 MLP 回归拟合 sin(x)
-# 在 demo04 基础上加入：训练/验证集划分、学习曲线、训练/验证 RMSE、
-# 密集网格预测的 平均/最大 绝对误差统计——一个完整的回归实验流程。
-import std.autodiff as ad
-import std.nn as nn
+# main.sg — 04 sin(x) 回归 · 装配入口（GUI 实时训练窗）
+# 完整实验流程：model.new_param 随机初始化（seed 可复现）→ train.epoch 逐
+# epoch 小批训练 → gui_poll 驱动消息泵并实时刷新 loss（点 X 提前中止，
+# 训练完自动 gui_close 退出，便于脚本验证）→ 训练/验证 RMSE → 密集网格
+# 平均/最大绝对误差。
+# 职责边界：本文件只做 GUI 编排与评估报告；数据在 dataset、模型在 model、
+# 单 epoch 训练步在 train。
+# 展示：capability gui、跨模块训练闭环（可变参数原地更新）、List 切片
+#       分段 Adam、gui_window/label/poll/set_text/close。
+# 注意：gui 域仅 AOT/Windows 可跑（VM 运行到 gui_* 即固定 panic，双模契约）。
+capability gui
 
-def predict(W1: List[float], b1: List[float], W2: List[float], b2: List[float],
-            nin: int, nhid: int, x: float) -> float:
-    T: List[float] = ad.tape()
-    ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
-    ids2: List[int] = nn.params(T, W2, b2, nhid, 1)
-    xn: List[int] = []
-    xn.append(ad.const(T, x))
-    hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
-    ht: List[int] = []
-    h: int = 0
-    while h < nhid:
-        ht.append(ad.tanh_(T, hn[h]))
-        h = h + 1
-    on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, 1)
-    return ad.value(T, on[0])
+import dataset
+import model
+import train
 
 def main() -> int:
-    nin: int = 1
-    nhid: int = 32
-    nout: int = 1
-    p1: int = nin * nhid
+    seed(42)
+    nhid = 32
+    W1: List[float] = model.new_param(nhid, 1.2)
+    b1: List[float] = model.new_param(nhid, 0.3)
+    W2: List[float] = model.new_param(nhid, 1.2)
+    b2: List[float] = [0.0]
+    mW1 = model.zeros(nhid)
+    vW1 = model.zeros(nhid)
+    mb1 = model.zeros(nhid)
+    vb1 = model.zeros(nhid)
+    mW2 = model.zeros(nhid)
+    vW2 = model.zeros(nhid)
+    mb2 = model.zeros(1)
+    vb2 = model.zeros(1)
 
-    W1: List[float] = []
-    b1: List[float] = []
-    W2: List[float] = []
-    b2: List[float] = []
-    i = 0
-    while i < p1:
-        if i % 2 == 0:
-            W1.append(2.0)
-        else:
-            W1.append(-2.0)
-        i = i + 1
-    i = 0
-    while i < nhid:
-        b1.append(-1.5 + 3.0 * float(i) / float(nhid - 1))
-        i = i + 1
-    sg = 0.5
-    i = 0
-    while i < nhid * nout:
-        W2.append(sg)
-        sg = -sg
-        i = i + 1
-    b2.append(0.0)
+    win = gui_window("Scourge - sin(x) regression", 460, 170)
+    lab = gui_label(win, "training...", 16, 14, 420, 24)
+    stat = gui_label(win, "dataset: 40 pts (20 train / 20 val), MLP 1-32-1", 16, 46, 420, 24)
 
-    # 数据集：40 个点，偶数下标作训练、奇数下标作验证
-    xs: List[float] = []
-    ys: List[float] = []
-    tr: List[int] = []
-    va: List[int] = []
-    nsamp: int = 40
-    s: int = 0
-    while s < nsamp:
-        xv: float = 3.14159265 * float(s) / float(nsamp - 1)
-        xs.append(2.0 * xv / 3.14159265 - 1.0)
-        ys.append(sin(xv))
-        if s % 2 == 0:
-            tr.append(s)
-        else:
-            va.append(s)
-        s = s + 1
-    ntr: int = len(tr)
-    nva: int = len(va)
-
-    mW1: List[float] = []
-    vW1: List[float] = []
-    mb1: List[float] = []
-    vb1: List[float] = []
-    mW2: List[float] = []
-    vW2: List[float] = []
-    mb2: List[float] = []
-    vb2: List[float] = []
-    i = 0
-    while i < p1:
-        mW1.append(0.0)
-        vW1.append(0.0)
-        i = i + 1
-    i = 0
-    while i < nhid:
-        mb1.append(0.0)
-        vb1.append(0.0)
-        i = i + 1
-    i = 0
-    while i < nhid * nout:
-        mW2.append(0.0)
-        vW2.append(0.0)
-        i = i + 1
-    mb2.append(0.0)
-    vb2.append(0.0)
-
-    lr: float = 0.02
-    epochs: int = 16000
-    t: int = 0
-    e: int = 0
+    lr = 0.005
+    epochs = 16000
+    t = 0
+    e = 0
+    aborted = False
     while e < epochs:
-        loss_sum: float = 0.0
-        si: int = 0
-        while si < ntr:
-            idx: int = tr[si]
-            T: List[float] = ad.tape()
-            ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
-            ids2: List[int] = nn.params(T, W2, b2, nhid, nout)
-            xn: List[int] = []
-            xn.append(ad.const(T, xs[idx]))
-            hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
-            ht: List[int] = []
-            h: int = 0
-            while h < nhid:
-                ht.append(ad.tanh_(T, hn[h]))
-                h = h + 1
-            on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, nout)
-            yt: List[float] = []
-            yt.append(ys[idx])
-            loss: int = nn.mse(T, on, yt, 1)
-            ids: List[int] = []
-            a: int = 0
-            while a < len(ids1):
-                ids.append(ids1[a])
-                a = a + 1
-            a = 0
-            while a < len(ids2):
-                ids.append(ids2[a])
-                a = a + 1
-            g: List[float] = nn.gather_grads(T, loss, ids, p1 + nhid + nhid * nout + nout)
-            t = t + 1
-            g1: List[float] = []
-            g1b: List[float] = []
-            g2: List[float] = []
-            g2b: List[float] = []
-            j: int = 0
-            while j < p1:
-                g1.append(g[j])
-                j = j + 1
-            j = 0
-            while j < nhid:
-                g1b.append(g[p1 + j])
-                j = j + 1
-            j = 0
-            while j < nhid * nout:
-                g2.append(g[p1 + nhid + j])
-                j = j + 1
-            g2b.append(g[p1 + nhid + nhid * nout])
-            nn.adam(W1, g1, mW1, vW1, lr, t, p1)
-            nn.adam(b1, g1b, mb1, vb1, lr, t, nhid)
-            nn.adam(W2, g2, mW2, vW2, lr, t, nhid * nout)
-            nn.adam(b2, g2b, mb2, vb2, lr, t, nout)
-            loss_sum = loss_sum + ad.value(T, loss)
-            si = si + 1
-        if e == 0 or e == 4000 or e == 8000 or e == 12000 or e == 15999:
-            print("epoch", e, "train_loss", loss_sum / float(ntr))
+        r = train.run_epoch(W1, b1, W2, b2, mW1, vW1, mb1, vb1, mW2, vW2, mb2, vb2, lr, t, nhid)
+        t = r[0]
+        avg = r[1]
+        if e % 250 == 0 or e == epochs - 1:
+            ev = gui_poll(win)  # 驱动消息泵，X 关窗 → 提前中止
+            if ev.get("tag", "") == "close":
+                aborted = True
+                break
+            gui_set_text(lab, f"epoch {e}/{epochs}   loss {avg:.4f}")
+        if e == 0 or e == 8000 or e == epochs - 1:
+            print("epoch", e, "train_loss", avg)
         e = e + 1
 
-    # 训练/验证 RMSE
-    sse_tr: float = 0.0
-    si = 0
-    while si < ntr:
-        idx = tr[si]
-        d: float = predict(W1, b1, W2, b2, nin, nhid, xs[idx]) - ys[idx]
-        sse_tr = sse_tr + d * d
-        si = si + 1
-    sse_va: float = 0.0
-    si = 0
-    while si < nva:
-        idx = va[si]
-        d = predict(W1, b1, W2, b2, nin, nhid, xs[idx]) - ys[idx]
-        sse_va = sse_va + d * d
-        si = si + 1
-    print("train_rmse", sqrt(sse_tr / float(ntr)))
-    print("val_rmse", sqrt(sse_va / float(nva)))
+    gui_close(win)
+    if aborted:
+        print("aborted at epoch", e)
+        return 1
 
-    # 密集网格预测误差统计
-    print("--- dense grid [-1,1] x sin(pi*(x+1)/2) ---")
-    grid: int = 21
-    mae: float = 0.0
-    mxe: float = 0.0
-    gi: int = 0
+    # 训练/验证 RMSE（误差接近 → 泛化良好）；奇偶归属由 dataset 给出
+    sse_tr = 0.0
+    sse_va = 0.0
+    s = 0
+    nsamp = dataset.n_samples()
+    while s < nsamp:
+        d = model.predict(W1, b1, W2, b2, dataset.x_at(s)) - dataset.y_at(s)
+        if dataset.is_train(s) == 1:
+            sse_tr = sse_tr + d * d
+        else:
+            sse_va = sse_va + d * d
+        s = s + 1
+    rmse_tr = sqrt(sse_tr / float(dataset.n_train()))
+    rmse_va = sqrt(sse_va / float(dataset.n_val()))
+    print(f"train_rmse {rmse_tr:.4f}   val_rmse {rmse_va:.4f}")
+
+    # 密集网格 [-1,1]，真值经 dataset.truth（与样本标签同一定义）
+    grid = 21
+    mae = 0.0
+    mxe = 0.0
+    gi = 0
     while gi < grid:
-        gx: float = -1.0 + 2.0 * float(gi) / float(grid - 1)
-        xv: float = (gx + 1.0) / 2.0 * 3.14159265
-        gt: float = sin(xv)
-        pr: float = predict(W1, b1, W2, b2, nin, nhid, gx)
-        ae: float = pr - gt
+        gx = -1.0 + 2.0 * float(gi) / float(grid - 1)
+        gt = dataset.truth(gx)
+        ae = model.predict(W1, b1, W2, b2, gx) - gt
         if ae < 0.0:
             ae = -ae
         mae = mae + ae
         if ae > mxe:
             mxe = ae
         if gi % 5 == 0:
-            print("x", gx, "true", gt, "pred", pr, "abserr", ae)
+            print(f"x {gx:+.2f} true {gt:.3f} pred {model.predict(W1, b1, W2, b2, gx):+.3f} abserr {ae:.3f}")
         gi = gi + 1
-    print("grid_mae", mae / float(grid))
-    print("grid_max_abserr", mxe)
+    print(f"grid_mae {mae / float(grid):.4f}   grid_max_abserr {mxe:.4f}")
     return 0

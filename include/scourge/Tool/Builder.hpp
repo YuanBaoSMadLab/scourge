@@ -55,10 +55,11 @@ struct CrossOpts {
 
 /// 「加载 → 缓存判定 → 全量检查 → MLIR 生成 → 进程内 MLIR→LLVM IR →
 ///  clang 分段编译 → 链接」一条龙。
-/// 中间产物（.mlir / .ll / _rt.c）与可执行文件同目录，便于检视；
-/// obj 缓存（设计文档 5.2 双缓存体系的 AOT 段）位于 <stem>.sgbuild/obj/：
-/// main.obj（键：格式版本/工具链/源指纹/优化档+gpuMode/入口/交叉目标）与
-/// rt.obj（键：格式版本/工具链/gpuMode/运行时源文本/交叉目标，源无关）。
+/// 中间产物（.mlir / .ll / _rt.c）统一落 buildDir（隔离纪律：源码目录只留
+/// 源码）；buildDir 为空 = 默认 <源目录>/.sgbuild/。
+/// obj 缓存（设计文档 5.2 双缓存体系的 AOT 段）位于 <buildDir>/<stem>.sgbuild/
+/// obj/：main.obj（键：格式版本/工具链/源指纹/优化档+gpuMode/入口/交叉目标）
+/// 与 rt.obj（键：格式版本/工具链/gpuMode/运行时源文本/交叉目标，源无关）。
 /// 键全等才命中，任一不符全量重编；缓存写失败静默降级为无缓存直编
 /// （对齐 .sgbc 纪律）。
 /// gpuMode：--gpu 开关——GPU 覆盖集 op（f64 静态形状逐元素/matmul/sum/
@@ -67,7 +68,8 @@ struct CrossOpts {
 BuildOutcome buildOnce(const std::filesystem::path& inPath,
                        const std::filesystem::path& outPath,
                        bool gpuMode = false, bool useCache = true,
-                       const CrossOpts& xo = {});
+                       const CrossOpts& xo = {},
+                       const std::filesystem::path& buildDir = {});
 
 /// 裸机构建（src/Tool/BuilderBare.cpp）：同前端流水线，Stage C 换
 /// freestanding crt 三件套 + ld.lld -T 直链 + objcopy 出 raw bin。
@@ -78,6 +80,7 @@ std::string applyBarePreset(const std::string& name, BareOpts& bo,
 
 BuildOutcome buildBareOnce(const std::filesystem::path& inPath,
                            const std::filesystem::path& outPath, bool gpuMode,
-                           bool useCache, const CrossOpts& xo);
+                           bool useCache, const CrossOpts& xo,
+                           const std::filesystem::path& buildDir = {});
 
 } // namespace scourge

@@ -2,15 +2,15 @@
 # ============================================================================
 #  bootstrap.sh - Scourge 一键构建引导（Linux/macOS）
 #
-#  职责：让用户 clone 后一个脚本拿到可用的 scourge——
+#  职责：让用户 clone 后一个脚本拿到可用的 sg——
 #    1) 检查构建工具链（cmake/ninja/clang）
 #    2) 获取平台预编译 MLIR 库包（默认 GitHub Release 附件；可 --url 覆盖，
 #       或 --llvm-root 指向本机已有 LLVM/MLIR 跳过下载）
-#    3) cmake 配置 + 构建 → build-rel/scourge
+#    3) cmake 配置 + 构建 → build-rel/sg
 #
 #  说明：AOT build 命令运行时另需系统 clang 与链接器（发行版 clang 即可，
-#  apt/dnf 装 clang；这是 scourge 给 .sg 程序做最终链接的外部驱动，与编译
-#  scourge 本身无关）。
+#  apt/dnf 装 clang；这是 sg 给 .sg 程序做最终链接的外部驱动，与编译
+#  sg 本身无关）。
 #  用法：
 #    scripts/bootstrap.sh                 # 全自动（下载库包→构建）
 #    scripts/bootstrap.sh --url <文件>    # 用本地/自定库包 zip|tar.zst
@@ -45,45 +45,62 @@ if [ -n "$LLVM_ROOT" ]; then
     MLIR_ROOT="$LLVM_ROOT"
     echo "[bootstrap] 使用本机 LLVM/MLIR: $MLIR_ROOT"
 else
-    ARCH="$(uname -m)"; OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-    if [ -d "$MLIR_ROOT/lib/cmake/mlir" ]; then
-        echo "[bootstrap] 库包已就位: $MLIR_ROOT（删除该目录可强制重新下载）"
-    else
-        ASSET="${ASSET_PFX}-${OS}-${ARCH}.tar.zst"
-        if [ -z "$URL" ]; then
-            if [ -z "$OWNER_REPO" ]; then
-                echo "未配置库包下载源。三选一：" >&2
-                echo "  1) export SCOURGE_RELEASE_REPO=<owner/repo> 后重跑（自动拼 Release 附件 URL）" >&2
-                echo "  2) --url <本地或远程库包文件>" >&2
-                echo "  3) --llvm-root <本机 LLVM/MLIR 前缀>" >&2
-                exit 1
+        ARCH="$(uname -m)"; OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+        if [ -d "$MLIR_ROOT/lib/cmake/mlir" ]; then
+            echo "[bootstrap] 库包已就位: $MLIR_ROOT（删除该目录可强制重新下载）"
+        else
+            # 零参数一键路径：无包源时自动探测本机 LLVM/MLIR——Debian/Ubuntu
+            # 的 llvm-dev 自带 lib/cmake/mlir（官方 LLVM 预编译包不含 MLIR，
+            # 这是发行版装 llvm-dev 即可一键的原因）。
+            if [ -z "$URL" ] && [ -z "$OWNER_REPO" ]; then
+                for cand in /usr/lib/llvm /usr/lib/llvm-20 /usr/lib/llvm-19 \
+                            /usr/lib/llvm-18 /usr/lib/llvm-17 /usr/local/llvm; do
+                    if [ -d "$cand/lib/cmake/mlir" ]; then
+                        MLIR_ROOT="$cand"
+                        echo "[bootstrap] 自动探测到本机 LLVM/MLIR: $MLIR_ROOT"
+                        break
+                    fi
+                done
             fi
-            URL="https://github.com/${OWNER_REPO}/releases/download/${TAG}/${ASSET}"
+            if [ -d "$MLIR_ROOT/lib/cmake/mlir" ]; then
+                echo "[bootstrap] 使用本机 LLVM/MLIR: $MLIR_ROOT"
+            else
+                ASSET="${ASSET_PFX}-${OS}-${ARCH}.tar.zst"
+                if [ -z "$URL" ]; then
+                    if [ -z "$OWNER_REPO" ]; then
+                        echo "未找到可用 MLIR 库源。三选一：" >&2
+                        echo "  a) 发行版安装：apt install llvm-dev clang（含 MLIR，零配置一键）" >&2
+                        echo "  b) export SCOURGE_RELEASE_REPO=<owner/repo> 后重跑（自动拼 Release 附件 URL）" >&2
+                        echo "  c) --url <本地或远程库包文件> / --llvm-root <本机 LLVM/MLIR 前缀>" >&2
+                        exit 1
+                    fi
+                    URL="https://github.com/${OWNER_REPO}/releases/download/${TAG}/${ASSET}"
+                fi
+                echo "[bootstrap] 获取库包: $URL"
+                mkdir -p "$DEPS_DIR"
+                case "$URL" in
+                    http*|ftp*)
+                        if command -v curl >/dev/null; then curl -fL "$URL" -o "$DEPS_DIR/pkg.d"
+                        else wget -O "$DEPS_DIR/pkg.d" "$URL"; fi ;;
+                    *) cp "$URL" "$DEPS_DIR/pkg.d" ;;
+                esac
+                rm -rf "$MLIR_ROOT"
+                case "$URL" in
+                    *.tar.zst|*.zst) tar --zstd -xf "$DEPS_DIR/pkg.d" -C "$DEPS_DIR" ;;
+                    *.tar.gz|*.tgz)  tar -xzf "$DEPS_DIR/pkg.d" -C "$DEPS_DIR" ;;
+                    *.zip)           unzip -q "$DEPS_DIR/pkg.d" -d "$DEPS_DIR" ;;
+                    *) echo "无法识别的库包格式: $URL" >&2; exit 1 ;;
+                esac
+                rm -f "$DEPS_DIR/pkg.d"
+                [ -d "$MLIR_ROOT/lib/cmake/mlir" ] || { echo "库包结构异常（缺 lib/cmake/mlir）" >&2; exit 1; }
+                echo "[bootstrap] 库包解压至 $MLIR_ROOT（含上游 LICENSE.TXT）"
+            fi
         fi
-        echo "[bootstrap] 获取库包: $URL"
-        mkdir -p "$DEPS_DIR"
-        case "$URL" in
-            http*|ftp*)
-                if command -v curl >/dev/null; then curl -fL "$URL" -o "$DEPS_DIR/pkg.d"
-                else wget -O "$DEPS_DIR/pkg.d" "$URL"; fi ;;
-            *) cp "$URL" "$DEPS_DIR/pkg.d" ;;
-        esac
-        rm -rf "$MLIR_ROOT"
-        case "$URL" in
-            *.tar.zst|*.zst) tar --zstd -xf "$DEPS_DIR/pkg.d" -C "$DEPS_DIR" ;;
-            *.tar.gz|*.tgz)  tar -xzf "$DEPS_DIR/pkg.d" -C "$DEPS_DIR" ;;
-            *.zip)           unzip -q "$DEPS_DIR/pkg.d" -d "$DEPS_DIR" ;;
-            *) echo "无法识别的库包格式: $URL" >&2; exit 1 ;;
-        esac
-        rm -f "$DEPS_DIR/pkg.d"
-        [ -d "$MLIR_ROOT/lib/cmake/mlir" ] || { echo "库包结构异常（缺 lib/cmake/mlir）" >&2; exit 1; }
-        echo "[bootstrap] 库包解压至 $MLIR_ROOT（含上游 LICENSE.TXT）"
     fi
-fi
 
 # ---- AOT clang 版本门卫 ----------------------------------------------------
 # MLIR 产出的 IR 带库包版本的属性（如 nocreateundeforpoison），旧系统 clang 在
-# scourge build 时会报 unterminated attribute group。包内自带 clang 则直接
+# sg build 时会报 unterminated attribute group。包内自带 clang 则直接
 # 导出 SCOURGE_LLVM_BIN；否则按 LLVM_VERSION.txt 比对大版本并警告。
 if [ -x "$MLIR_ROOT/bin/clang" ]; then
     export SCOURGE_LLVM_BIN="$MLIR_ROOT/bin"
@@ -107,7 +124,20 @@ cmake -S "$REPO_ROOT" -B "$REPO_ROOT/build-rel" \
     -G Ninja
 
 echo "[bootstrap] 构建（-j$JOBS）"
-cmake --build "$REPO_ROOT/build-rel" -j"$JOBS" --target scourge scourge_tests
+# 三件套：sg（主编译器）+ sgmcp（MCP 独立入口）+ sget（包管理器自举，
+# 其 AOT 全链成功本身就是 sg build 能力的冒烟）；scourge_tests 为 CTest 单测。
+cmake --build "$REPO_ROOT/build-rel" -j"$JOBS" --target scourge sgmcp sget scourge_tests
 
-echo "[bootstrap] 完成：$(cd "$REPO_ROOT/build-rel" && pwd)/scourge"
-echo "[bootstrap] 冒烟：$("$REPO_ROOT/build-rel/scourge" run "$REPO_ROOT/examples/hello.sg" | tail -1)"
+BIN="$REPO_ROOT/build-rel"
+echo "[bootstrap] 冒烟"
+echo "[bootstrap]   sg:    $($BIN/sg run "$REPO_ROOT/examples/hello.sg" | tail -1)"
+echo "[bootstrap]   sget:  $($BIN/sget list 2>/dev/null | head -1)"
+MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+if printf '%s\n' "$MCP_INIT" | "$BIN/sgmcp" 2>/dev/null | grep -q 'serverInfo'; then
+    echo "[bootstrap]   sgmcp: initialize OK"
+else
+    echo "[bootstrap] 警告: sgmcp initialize 冒烟无 serverInfo 响应" >&2
+fi
+echo "[bootstrap] 完成：$BIN/sg（+ sgmcp、sget）—— 立即可用"
+echo "[bootstrap]   $BIN/sg run <file.sg>      # VM 直跑"
+echo "[bootstrap]   $BIN/sg build <file.sg>    # AOT 产出独立可执行"

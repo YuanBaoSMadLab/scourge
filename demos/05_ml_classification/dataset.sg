@@ -1,0 +1,32 @@
+# dataset.sg — 05 数据层：4x4 棋盘 16 点（纯函数，无状态）
+# 职责边界：只回答"第 s 个点是什么"——坐标与标签；笛卡尔积序（levels×levels）
+# 用线性扫描生成，免整除语义。标签 = (x0>0) XOR (x1>0)（对角同色）。
+# 展示：纯函数数据源——数据定义与训练/评估解耦。
+
+def n_samples() -> int:
+    return 16
+
+def x0_at(s: int) -> float:
+    levels: List[float] = [-1.5, -0.5, 0.5, 1.5]
+    i = 0
+    for a in levels:
+        for b in levels:
+            if i == s:
+                return a
+            i = i + 1
+    return 0.0
+
+def x1_at(s: int) -> float:
+    levels: List[float] = [-1.5, -0.5, 0.5, 1.5]
+    i = 0
+    for a in levels:
+        for b in levels:
+            if i == s:
+                return b
+            i = i + 1
+    return 0.0
+
+def label_at(s: int) -> int:
+    p0 = 1 if x0_at(s) > 0.0 else 0
+    p1 = 1 if x1_at(s) > 0.0 else 0
+    return 1 if p0 != p1 else 0

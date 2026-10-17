@@ -1,0 +1,16 @@
+# sqlite3 — 嵌入式 SQL 数据库（纯 C API，sget registry 包）
+# 官方 DLL 直接可用；输出指针参数 API（sqlite3_open 的 db**）需指针
+# 内建支持后开放，当前绑定子集为纯读函数。
+capability ffi
+
+@extern("sqlite3.dll")
+def sqlite3_libversion() -> str:
+    pass
+
+@extern("sqlite3.dll")
+def sqlite3_memory_used() -> int:
+    pass
+
+@extern("sqlite3.dll")
+def sqlite3_compileoption_used(s: str) -> bool:
+    pass

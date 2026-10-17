@@ -1,0 +1,33 @@
+# model.sg — 05 模型层：MLP 2-16-1 参数初始化与前向推理（纯计算，无 IO）
+# 职责边界：参数的"出生"（随机初始化）与"使用"（推理前向）；
+# 训练步在 train.sg，编排与评估在 main.sg。
+# 展示：std.autodiff/nn 跨包调用、显式类型注解的跨模块 API。
+import std.autodiff as ad
+import std.nn as nn
+
+# Adam 动量/二阶矩表初始化。
+def zeros(n: int) -> List[float]:
+    out: List[float] = []
+    for i in range(n):
+        out.append(0.0)
+    return out
+
+# 随机初始化打破对称（棋盘边界需要足够隐元 + 随机初值）。
+def new_param(n: int, scale: float) -> List[float]:
+    return nn.rand_uniform(n, scale)
+
+# 推理：双输入样本重建 tape（隐层 tanh，线性输出）。只读参数，无副作用。
+def predict(W1: List[float], b1: List[float], W2: List[float], b2: List[float],
+            nhid: int, x0: float, x1: float) -> float:
+    T = ad.tape()
+    ids1 = nn.params(T, W1, b1, 2, nhid)
+    ids2 = nn.params(T, W2, b2, nhid, 1)
+    xn: List[int] = []
+    xn.append(ad.const(T, x0))
+    xn.append(ad.const(T, x1))
+    hn = nn.linear_nodes(T, ids1, xn, 2, nhid)
+    ht: List[int] = []
+    for h in hn:
+        ht.append(ad.tanh_(T, h))
+    on = nn.linear_nodes(T, ids2, ht, nhid, 1)
+    return ad.value(T, on[0])

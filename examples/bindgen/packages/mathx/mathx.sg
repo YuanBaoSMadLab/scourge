@@ -1,0 +1,15 @@
+# mathx — 由 bindgen 生成（源: D:\Scourge\examples\bindgen\packages/mathx/mathx.bind，许可证 MIT）
+capability ffi
+
+@extern("msvcrt.dll")
+def pow(x: float, y: float) -> float:
+    pass
+@extern("msvcrt.dll")
+def fabs(x: float) -> float:
+    pass
+@extern("msvcrt.dll")
+def fmod(x: float, y: float) -> float:
+    pass
+@extern("msvcrt.dll")
+def atoi(s: str) -> int:
+    pass

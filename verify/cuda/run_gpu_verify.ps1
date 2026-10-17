@@ -1,5 +1,5 @@
 # run_gpu_verify.ps1 - five-mode byte-identical verification for the GPU layer.
-# Modes per probe: (1) scourge run  (2) build CPU  (3) build --gpu (cuda default)
+# Modes per probe: (1) sg run  (2) build CPU  (3) build --gpu (cuda default)
 #                  (4) build --gpu with SCOURGE_NO_GPU=1 (cpu fallback)
 #                  (5) build --gpu with SCOURGE_GPU_BACKEND=opencl
 # Compares stdout/stderr bytes (SHA256) and exit codes across all five modes;
@@ -8,7 +8,34 @@
 #         all generated artifacts go to d:\Scourge\build-rel\verify\cuda (git-ignored).
 # ASCII only (PowerShell 5.1 GBK lesson).
 $ErrorActionPreference = "Stop"
-$scourge = "d:\Scourge\build-rel\scourge.exe"
+# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = $null
+try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
+if (-not $repoRoot) {
+    # Walk up to find CMakeLists.txt as fallback
+    $p = $here
+    while ($p -and -not (Test-Path (Join-Path $p 'CMakeLists.txt'))) {
+        $parent = Split-Path $p -Parent
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    $repoRoot = $p
+}
+$exe = $null
+$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cmd) {
+    # Sanity check: ensure it's Scourge, not ast-grep or some other tool
+    $sgOutArr = & $cmd.Source --help 2>&1
+    $sgHelp = ($sgOutArr -join "`n")
+    $sgExit = $LASTEXITCODE
+    if ($sgExit -eq 0 -and $sgHelp -match 'scourge') {
+        $exe = $cmd.Source
+    }
+}
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+# -------------------------------------------------------------------------------------
 $src     = "d:\Scourge\verify\cuda"
 $dir     = "d:\Scourge\build-rel\verify\cuda"
 New-Item -ItemType Directory -Force $dir | Out-Null
@@ -43,6 +70,7 @@ foreach ($name in $probes) {
     $sg = Join-Path $src ("{0}.sg" -f $name)
     $cpuExe = Join-Path $dir ("{0}_cpu.exe" -f $name)
     $gpuExe = Join-Path $dir ("{0}_gpu.exe" -f $name)
+    # intermediates land in --build-dir (kept out of the probe source dir)
     $cpuMlir = Join-Path $dir ("{0}_cpu.mlir" -f $name)
     $gpuMlir = Join-Path $dir ("{0}_gpu.mlir" -f $name)
     $gpuLl = Join-Path $dir ("{0}_gpu.ll" -f $name)
@@ -53,17 +81,17 @@ foreach ($name in $probes) {
     Remove-Item (Join-Path $dir ("{0}_gpu_rt.c" -f $name)) -ErrorAction SilentlyContinue
     Remove-Item (Join-Path $dir ("{0}.sgbc" -f $name)) -ErrorAction SilentlyContinue
 
-    # mode 1: scourge run (VM)
-    $r1 = Invoke-Net $scourge ("run `"{0}`"" -f $sg) ("{0}_run" -f $name) "run"
+    # mode 1: sg run (VM)
+    $r1 = Invoke-Net $exe ("run `"{0}`"" -f $sg) ("{0}_run" -f $name) "run"
 
     # mode 2: build CPU (--no-cache: full pipeline must re-dump .mlir/.ll artifacts
     #          every run; obj-cache hit path skips artifact writing by design)
-    $rb = Invoke-Net $scourge ("build --no-cache `"{0}`" -o `"{1}`"" -f $sg, $cpuExe) ("{0}_bcpu" -f $name) "run"
+    $rb = Invoke-Net $exe ("build --no-cache --build-dir `"{2}`" `"{0}`" -o `"{1}`"" -f $sg, $cpuExe, $dir) ("{0}_bcpu" -f $name) "run"
     if ($rb[0] -ne 0) { Write-Host "[$name] BUILD-CPU FAILED exit=$($rb[0])"; Get-Content ($rb[2]); $fail++; continue }
     $r2 = Invoke-Net $cpuExe "" ("{0}_cpu" -f $name) "cpu"
 
     # mode 3: build --gpu (default backend: cuda)
-    $rg = Invoke-Net $scourge ("build --gpu --no-cache `"{0}`" -o `"{1}`"" -f $sg, $gpuExe) ("{0}_bgpu" -f $name) "run"
+    $rg = Invoke-Net $exe ("build --gpu --no-cache --build-dir `"{2}`" `"{0}`" -o `"{1}`"" -f $sg, $gpuExe, $dir) ("{0}_bgpu" -f $name) "run"
     if ($rg[0] -ne 0) { Write-Host "[$name] BUILD-GPU FAILED exit=$($rg[0])"; Get-Content ($rg[2]); $fail++; continue }
     $r3 = Invoke-Net $gpuExe "" ("{0}_gpu" -f $name) "gpu"
 

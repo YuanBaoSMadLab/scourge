@@ -1,152 +1,69 @@
-# 演示：数据处理方向 —— 多维销售分析 ETL
-# 解析 JSON 销售流水，按「类别」「区域」两个维度分组聚合，
-# 每组计算 计数/总额/总量/均值/最小/最大/标准差/均价，按销售额降序，
-# 输出占比、Grand Total 与离群点（amt > mean + std）检测。
-def group(keys: List[str], counts: List[int], sums: List[float], qtys: List[int],
-          sqs: List[float], mins: List[float], maxs: List[float],
-          key: str, amt: float, qty: int) -> None:
-    found: int = -1
-    i: int = 0
-    while i < len(keys):
-        if keys[i] == key:
-            found = i
-        i = i + 1
-    if found < 0:
-        keys.append(key)
-        counts.append(1)
-        sums.append(amt)
-        qtys.append(qty)
-        sqs.append(amt * amt)
-        mins.append(amt)
-        maxs.append(amt)
-    else:
-        counts[found] = counts[found] + 1
-        sums[found] = sums[found] + amt
-        qtys[found] = qtys[found] + qty
-        sqs[found] = sqs[found] + amt * amt
-        if amt < mins[found]:
-            mins[found] = amt
-        if amt > maxs[found]:
-            maxs[found] = amt
+# main.sg — 03 销售流水 ETL · 装配入口
+# 流程：读 data/sales.json（数据外置）→ clean.sg 清洗校验 → aggregate.sg
+# 两维聚合报表 + Z-score 离群检测 → 内建统计（sum/mean/std/median）→
+# f-string 表格 + write_text 落 Markdown 报告与 JSON 摘要。
+# 职责边界：本文件只做编排与落盘，清洗/聚合/报表逻辑在 clean/aggregate。
+# 展示：json_decode、类型守卫、Dict.get 累加、定宽键降序、三引号报告模板。
+capability io
+
+import clean
+import aggregate
 
 def main() -> int:
-    data: str = "[{\"cat\":\"food\",\"region\":\"north\",\"amt\":12.5,\"qty\":2},{\"cat\":\"book\",\"region\":\"north\",\"amt\":30.0,\"qty\":1},{\"cat\":\"food\",\"region\":\"south\",\"amt\":7.5,\"qty\":1},{\"cat\":\"book\",\"region\":\"south\",\"amt\":20.0,\"qty\":2},{\"cat\":\"tool\",\"region\":\"north\",\"amt\":55.0,\"qty\":1},{\"cat\":\"food\",\"region\":\"east\",\"amt\":10.0,\"qty\":3},{\"cat\":\"toy\",\"region\":\"south\",\"amt\":18.0,\"qty\":2},{\"cat\":\"tool\",\"region\":\"east\",\"amt\":42.0,\"qty\":1},{\"cat\":\"book\",\"region\":\"east\",\"amt\":25.0,\"qty\":1},{\"cat\":\"food\",\"region\":\"north\",\"amt\":15.0,\"qty\":2},{\"cat\":\"toy\",\"region\":\"north\",\"amt\":22.5,\"qty\":3},{\"cat\":\"tool\",\"region\":\"south\",\"amt\":48.0,\"qty\":2},{\"cat\":\"book\",\"region\":\"north\",\"amt\":28.0,\"qty\":1},{\"cat\":\"food\",\"region\":\"east\",\"amt\":9.0,\"qty\":1}]"
-    j: Json = json_decode(data)
-    n: int = j.len()
+    raw = read_text("data/sales.json")
+    recs = clean.clean_all(raw)
+    n = len(recs)
+    dropped = 16 - n  # 原始条数固定 16（见 data/sales.json）
+    if n == 0:
+        print("no valid records")
+        return 1
 
-    rcat: List[str] = []
-    rreg: List[str] = []
-    ramt: List[float] = []
-    rqty: List[int] = []
-    k: int = 0
-    while k < n:
-        rec: Json = j.at(k)
-        rcat.append(rec.get("cat").as_str())
-        rreg.append(rec.get("region").as_str())
-        ramt.append(rec.get("amt").as_float())
-        rqty.append(rec.get("qty").as_int())
-        k = k + 1
+    # 全局标量统计（内建直接作用于金额列）
+    amts: List[float] = []
+    for r in recs:
+        amts.append(r[2])
+    grand = sum(amts)
+    gmean = mean(amts)
+    gstd = std(amts)
 
-    # 全局统计（用于离群检测）
-    gsum: float = 0.0
-    gsq: float = 0.0
-    k = 0
-    while k < n:
-        gsum = gsum + ramt[k]
-        gsq = gsq + ramt[k] * ramt[k]
-        k = k + 1
-    gmean: float = gsum / float(n)
-    gvar: float = gsq / float(n) - gmean * gmean
-    gstd: float = sqrt(gvar)
-    thresh: float = gmean + gstd
+    print(f"== by category (kept {n}, dropped {dropped}, revenue {grand:.1f}) ==")
+    print(aggregate.cat_console(recs, grand))
+    print(aggregate.region_console(recs))
 
-    # 按类别分组
-    cat_keys: List[str] = []
-    cat_count: List[int] = []
-    cat_sum: List[float] = []
-    cat_qty: List[int] = []
-    cat_sq: List[float] = []
-    cat_min: List[float] = []
-    cat_max: List[float] = []
-    # 按区域分组
-    reg_keys: List[str] = []
-    reg_count: List[int] = []
-    reg_sum: List[float] = []
-    reg_qty: List[int] = []
-    reg_sq: List[float] = []
-    reg_min: List[float] = []
-    reg_max: List[float] = []
+    print("== global ==")
+    print(f"orders {n}  revenue {grand:.1f}  mean {gmean:.2f}  std {gstd:.2f}  median {median(amts):.2f}  avg_order {grand / float(n):.2f}")
+    print("== outliers (z > 1.5) ==")
+    ol = aggregate.outlier_console(recs, gmean, gstd)
+    print(ol[0].trim())
+    print(f"outlier_count {ol[1]}")
 
-    k = 0
-    while k < n:
-        group(cat_keys, cat_count, cat_sum, cat_qty, cat_sq, cat_min, cat_max, rcat[k], ramt[k], rqty[k])
-        group(reg_keys, reg_count, reg_sum, reg_qty, reg_sq, reg_min, reg_max, rreg[k], ramt[k], rqty[k])
-        k = k + 1
+    # 落盘：Markdown 报告 + JSON 摘要（类别维度再聚一次取表与头部类别）
+    md = aggregate.cat_markdown(recs, grand)
+    write_text("sales-report.md", f"""# sales pipeline report
 
-    grand: float = 0.0
-    c: int = 0
-    while c < len(cat_sum):
-        grand = grand + cat_sum[c]
-        c = c + 1
+- records: kept {n}, dropped {dropped}
+- revenue: total {grand:.1f}, mean order {gmean:.2f}, std {gstd:.2f}, median {median(amts):.2f}
+- top category: {md[1]} ({md[2]:.1f}, share {100.0 * md[2] / grand:.1f}%)
+- outliers (z > 1.5): {ol[1]}
 
-    print("== by category (sorted by revenue desc) ==")
-    order: List[int] = []
-    c = 0
-    while c < len(cat_keys):
-        order.append(c)
-        c = c + 1
-    a: int = 0
-    while a < len(order):
-        mx: int = a
-        b: int = a + 1
-        while b < len(order):
-            if cat_sum[order[b]] > cat_sum[order[mx]]:
-                mx = b
-            b = b + 1
-        if mx != a:
-            tmp: int = order[a]
-            order[a] = order[mx]
-            order[mx] = tmp
-        a = a + 1
-
-    r: int = 0
-    while r < len(order):
-        idx: int = order[r]
-        cnt: int = cat_count[idx]
-        mean: float = cat_sum[idx] / float(cnt)
-        var: float = cat_sq[idx] / float(cnt) - mean * mean
-        std: float = sqrt(var)
-        price: float = cat_sum[idx] / float(cat_qty[idx])
-        share: float = 100.0 * cat_sum[idx] / grand
-        print(cat_keys[idx], "n", cnt, "revenue", cat_sum[idx], "qty", cat_qty[idx], "mean", mean, "min", cat_min[idx], "max", cat_max[idx], "std", std, "price", price, "share%", share)
-        r = r + 1
-
-    print("== by region ==")
-    c = 0
-    while c < len(reg_keys):
-        cnt: int = reg_count[c]
-        mean: float = reg_sum[c] / float(cnt)
-        var: float = reg_sq[c] / float(cnt) - mean * mean
-        std: float = sqrt(var)
-        price: float = reg_sum[c] / float(reg_qty[c])
-        print(reg_keys[c], "n", cnt, "revenue", reg_sum[c], "qty", reg_qty[c], "mean", mean, "std", std, "price", price)
-        c = c + 1
-
-    print("== grand total ==")
-    tq: int = 0
-    c = 0
-    while c < len(rqty):
-        tq = tq + rqty[c]
-        c = c + 1
-    print("records", n, "revenue", grand, "qty", tq, "avg_order", grand / float(n))
-
-    print("== outliers (amt > mean+std =", thresh, ") ==")
-    k = 0
-    oc: int = 0
-    while k < n:
-        if ramt[k] > thresh:
-            print("outlier", rcat[k], rreg[k], "amt", ramt[k])
-            oc = oc + 1
-        k = k + 1
-    print("outlier_count", oc)
+| cat | n | revenue | mean | share |
+|---|---|---|---|---|
+{md[0]}""")
+    jparts: List[str] = []
+    rev: Dict[str, float] = {}
+    cnt: Dict[str, int] = {}
+    agg_r: Dict[str, float] = {}
+    agg_q: Dict[str, int] = {}
+    agg_c: Dict[str, int] = {}
+    agg_s: Dict[str, float] = {}
+    agg_mn: Dict[str, float] = {}
+    agg_mx: Dict[str, float] = {}
+    for r in recs:
+        aggregate.accum(agg_r, agg_q, agg_c, agg_s, agg_mn, agg_mx, r[0], r[2], r[3])
+    for it in agg_c.items():
+        c = it[0]
+        m = agg_r[c] / float(it[1])
+        jparts.append(f'{{"cat":"{c}","n":{it[1]},"revenue":{agg_r[c]:.1f},"avg":{m:.2f}}}')
+    write_text("sales-summary.json", "[" + ",".join(jparts) + "]")
+    print("report -> sales-report.md / sales-summary.json")
     return 0

@@ -1,4 +1,4 @@
-﻿# ============================================================================
+# ============================================================================
 #  verify_linux.ps1 — Linux/嵌入式交叉编译验证（跨平台支持 0.9.4）
 # ----------------------------------------------------------------------------
 #  验证内容：探针源码 x 目标矩阵（x86_64/aarch64/riscv64/arm）的 musl 静态
@@ -12,7 +12,7 @@
 #    * 嵌入式 = 嵌入式 Linux（aarch64/riscv64/armv7 交叉 ELF）；裸金属
 #      freestanding（-nostdlib + 移植层）为后续路线，不在本验证范围。
 #
-#  依赖：build-rel\scourge.exe、D:\LLVM\bin（lld/llvm-readelf）、
+#  依赖：build-rel\sg.exe、D:\LLVM\bin（lld/llvm-readelf）、
 #        D:\musl-sysroot\<triple>（build_musl_sysroot.sh + build_builtins.sh 产物）
 # ============================================================================
 $ErrorActionPreference = 'Stop'
@@ -20,7 +20,34 @@ $root = 'd:\Scourge\build-rel\verify\linux'
 $srcDir = 'd:\Scourge\verify\linux'
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-$scourge = 'd:\Scourge\build-rel\scourge.exe'
+# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = $null
+try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
+if (-not $repoRoot) {
+    # Walk up to find CMakeLists.txt as fallback
+    $p = $here
+    while ($p -and -not (Test-Path (Join-Path $p 'CMakeLists.txt'))) {
+        $parent = Split-Path $p -Parent
+        if (-not $parent -or $parent -eq $p) { break }
+        $p = $parent
+    }
+    $repoRoot = $p
+}
+$exe = $null
+$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($cmd) {
+    # Sanity check: ensure it's Scourge, not ast-grep or some other tool
+    $sgOutArr = & $cmd.Source --help 2>&1
+    $sgHelp = ($sgOutArr -join "`n")
+    $sgExit = $LASTEXITCODE
+    if ($sgExit -eq 0 -and $sgHelp -match 'scourge') {
+        $exe = $cmd.Source
+    }
+}
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+# -------------------------------------------------------------------------------------
 $readelf = 'D:\LLVM\bin\llvm-readelf.exe'
 $utf8nb = New-Object System.Text.UTF8Encoding($false)
 
@@ -61,7 +88,7 @@ function Check([bool]$cond, [string]$name) {
 
 # Windows 侧基线：同探针 VM 模式输出（供 WSL 对拍用，落盘）
 $baseOut = Join-Path $root 'baseline_vm.out'
-$p = Start-Process -FilePath $scourge -ArgumentList @('run', (Join-Path $root 'linux_probe.sg')) -RedirectStandardOutput $baseOut -RedirectStandardError (Join-Path $root 'baseline_vm.err') -Wait -PassThru -NoNewWindow
+$p = Start-Process -FilePath $exe -ArgumentList @('run', (Join-Path $root 'linux_probe.sg')) -RedirectStandardOutput $baseOut -RedirectStandardError (Join-Path $root 'baseline_vm.err') -Wait -PassThru -NoNewWindow
 Check ($p.ExitCode -eq 0) "VM baseline exit 0 (got $($p.ExitCode))"
 
 foreach ($t in $targets) {
@@ -73,7 +100,7 @@ foreach ($t in $targets) {
               '--target', $t.triple,
               '--sysroot', ('D:/musl-sysroot/' + $tag),
               '--static', '-o', $elf)
-    $p = Start-Process -FilePath $scourge -ArgumentList $args -RedirectStandardOutput $outF -RedirectStandardError $errF -Wait -PassThru -NoNewWindow
+    $p = Start-Process -FilePath $exe -ArgumentList $args -RedirectStandardOutput $outF -RedirectStandardError $errF -Wait -PassThru -NoNewWindow
     Check ($p.ExitCode -eq 0) "$tag build exit 0 (got $($p.ExitCode))"
     if ($p.ExitCode -ne 0) {
         Write-Output ("  stderr: " + [System.IO.File]::ReadAllText($errF))
@@ -90,7 +117,7 @@ foreach ($t in $targets) {
                '--target', $t.triple,
                '--sysroot', ('D:/musl-sysroot/' + $tag),
                '--static', '-o', $elf2)
-    $p2 = Start-Process -FilePath $scourge -ArgumentList $args2 -RedirectStandardOutput (Join-Path $root ($tag + '.relink.out')) -RedirectStandardError (Join-Path $root ($tag + '.relink.err')) -Wait -PassThru -NoNewWindow
+    $p2 = Start-Process -FilePath $exe -ArgumentList $args2 -RedirectStandardOutput (Join-Path $root ($tag + '.relink.out')) -RedirectStandardError (Join-Path $root ($tag + '.relink.err')) -Wait -PassThru -NoNewWindow
     Check ($p2.ExitCode -eq 0) "$tag cache relink exit 0"
     if (Test-Path $elf2) {
         Check ((Get-Item $elf2).Length -gt 0) "$tag relink ELF non-empty"

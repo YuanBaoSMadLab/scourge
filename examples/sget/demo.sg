@@ -1,0 +1,19 @@
+# sget 生态闭环演示：import 安装的包，直接调用 Windows API / CRT
+import user32
+import kernel32
+import msvcrt
+
+capability ffi, proc, env
+
+def main() -> int:
+    # kernel32：系统启动毫秒数（真·Windows API）
+    print("GetTickCount > 0:", kernel32.GetTickCount() > 0)
+    # kernel32：整数缩放（避免除法溢出的经典 API）
+    print("MulDiv(7, 3, 2) =", kernel32.MulDiv(7, 3, 2))
+    # user32：前台窗口句柄有效性（int 句柄在 DLL 边界来回传递）
+    hwnd: int = user32.GetForegroundWindow()
+    print("IsWindow(GetForegroundWindow()):", user32.IsWindow(hwnd))
+    # msvcrt：CRT 函数
+    print("atoi(\"1234\") + 1 =", msvcrt.atoi("1234") + 1)
+    print("strlen(\"ffi\") =", msvcrt.strlen("ffi"))
+    return 0

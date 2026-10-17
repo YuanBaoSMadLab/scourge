@@ -1,0 +1,19 @@
+# demo_cpp.bind — Python 风格绑定声明（bindgen 输入）
+# 头文件 MIT 协议 → 代理 shim 直接 include 集成；C++ 类操作摊平成
+# C 函数，Scourge 侧只见 @extern。环境不集成，一切调用经代理 DLL。
+library "demo_cpp" dll "demo_cpp_shim.dll" license "MIT"
+include "demo_cpp.hpp"
+incdir "."
+
+def counter_new(name: str) -> handle:
+    return (long long)(intptr_t)(new demo::Counter(name))
+def counter_add(c: handle, v: int) -> int:
+    return ((demo::Counter*)(intptr_t)c)->add((int)v)
+def counter_get(c: handle) -> int:
+    return ((demo::Counter*)(intptr_t)c)->get()
+def counter_name(c: handle) -> str:
+    return ((demo::Counter*)(intptr_t)c)->name()
+def counter_reset(c: handle) -> none:
+    ((demo::Counter*)(intptr_t)c)->reset()
+def counter_free(c: handle) -> none:
+    delete (demo::Counter*)(intptr_t)c

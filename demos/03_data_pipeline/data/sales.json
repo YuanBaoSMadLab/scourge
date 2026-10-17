@@ -1,0 +1,18 @@
+[
+ {"cat":"food","region":"north","amt":12.5,"qty":2},
+ {"cat":"book","region":"north","amt":30.0,"qty":1},
+ {"cat":"food","region":"south","amt":7.5,"qty":1},
+ {"cat":"book","region":"south","amt":20.0,"qty":2},
+ {"cat":"tool","region":"north","amt":55.0,"qty":1},
+ {"cat":"food","region":"east","amt":10.0,"qty":3},
+ {"cat":"toy","region":"south","amt":18.0,"qty":2},
+ {"cat":"tool","region":"east","amt":42.0,"qty":1},
+ {"cat":"book","region":"east","amt":25.0,"qty":1},
+ {"cat":"food","region":"north","amt":15.0,"qty":2},
+ {"cat":"toy","region":"north","amt":22.5,"qty":3},
+ {"cat":"tool","region":"south","amt":48.0,"qty":2},
+ {"cat":"book","region":"north","amt":28.0,"qty":1},
+ {"cat":"food","region":"east","amt":9.0,"qty":1},
+ {"cat":"food","region":"west","amt":0,"qty":1},
+ {"cat":"toy","region":"west","amt":-5.0,"qty":1}
+]
