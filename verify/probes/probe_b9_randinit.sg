@@ -1,0 +1,139 @@
+# ============================================================================
+# probe_b9_randinit.sg — 批 9②：nn.rand_uniform 随机初始化打破对称
+# ----------------------------------------------------------------------------
+# XOR 训练不再人工交替符号初始化：nn.rand_uniform（内建 random()，
+# splitmix64 双模逐位一致）+ seed() 固定可复现 + nn.adam。
+# 验收：免对称打破辅助即收敛 4/4，且双模逐字节一致。
+# 期望输出（双模一致，共 6 行）：
+#   --- XOR evaluation ---
+#   in 0.0 0.0 pred 0.0 class 0 target 0
+#   in 0.0 1.0 pred 1.0 class 1 target 1
+#   in 1.0 0.0 pred 1.0 class 1 target 1
+#   in 1.0 1.0 pred 0.0 class 0 target 0
+#   accuracy 4 / 4
+# ============================================================================
+import std.autodiff as ad
+import std.nn as nn
+
+def main() -> int:
+    seed(20260417)
+    nin: int = 2
+    nhid: int = 8
+    p1: int = nin * nhid
+    W1: List[float] = nn.rand_uniform(p1, 1.2)
+    b1: List[float] = nn.rand_uniform(nhid, 0.3)
+    W2: List[float] = nn.rand_uniform(nhid, 1.2)
+    b2: List[float] = [0.0]
+
+    xs0: List[float] = [0.0, 0.0, 1.0, 1.0]
+    xs1: List[float] = [0.0, 1.0, 0.0, 1.0]
+    yt: List[float] = [0.0, 1.0, 1.0, 0.0]
+
+    mW1: List[float] = []
+    vW1: List[float] = []
+    mb1: List[float] = []
+    vb1: List[float] = []
+    mW2: List[float] = []
+    vW2: List[float] = []
+    mb2: List[float] = []
+    vb2: List[float] = []
+    i: int = 0
+    while i < p1:
+        mW1.append(0.0)
+        vW1.append(0.0)
+        i = i + 1
+    i = 0
+    while i < nhid:
+        mW1.append(0.0)
+        vW1.append(0.0)
+        mb1.append(0.0)
+        vb1.append(0.0)
+        mW2.append(0.0)
+        vW2.append(0.0)
+        i = i + 1
+    mb2.append(0.0)
+    vb2.append(0.0)
+
+    lr: float = 0.05
+    epochs: int = 3000
+    nparam: int = p1 + nhid + nhid + 1
+    e: int = 0
+    while e < epochs:
+        s: int = 0
+        while s < 4:
+            T: List[float] = ad.tape()
+            ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
+            ids2: List[int] = nn.params(T, W2, b2, nhid, 1)
+            xn: List[int] = []
+            xn.append(ad.const(T, xs0[s]))
+            xn.append(ad.const(T, xs1[s]))
+            hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
+            ht: List[int] = []
+            h: int = 0
+            while h < nhid:
+                ht.append(ad.tanh_(T, hn[h]))
+                h = h + 1
+            on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, 1)
+            yy: List[float] = []
+            yy.append(yt[s])
+            loss: int = nn.mse(T, on, yy, 1)
+            ids: List[int] = []
+            a: int = 0
+            while a < len(ids1):
+                ids.append(ids1[a])
+                a = a + 1
+            a = 0
+            while a < len(ids2):
+                ids.append(ids2[a])
+                a = a + 1
+            g: List[float] = nn.gather_grads(T, loss, ids, nparam)
+            g1: List[float] = []
+            g1b: List[float] = []
+            g2: List[float] = []
+            j: int = 0
+            while j < p1:
+                g1.append(g[j])
+                j = j + 1
+            j = 0
+            while j < nhid:
+                g1b.append(g[p1 + j])
+                g2.append(g[p1 + nhid + j])
+                j = j + 1
+            t: int = e * 4 + s + 1
+            nn.adam(W1, g1, mW1, vW1, lr, t, p1)
+            nn.adam(b1, g1b, mb1, vb1, lr, t, nhid)
+            nn.adam(W2, g2, mW2, vW2, lr, t, nhid)
+            nn.adam(b2, [g[p1 + nhid + nhid]], mb2, vb2, lr, t, 1)
+            s = s + 1
+        e = e + 1
+
+    print("--- XOR evaluation ---")
+    correct: int = 0
+    s = 0
+    while s < 4:
+        T: List[float] = ad.tape()
+        ids1: List[int] = nn.params(T, W1, b1, nin, nhid)
+        ids2: List[int] = nn.params(T, W2, b2, nhid, 1)
+        xn: List[int] = []
+        xn.append(ad.const(T, xs0[s]))
+        xn.append(ad.const(T, xs1[s]))
+        hn: List[int] = nn.linear_nodes(T, ids1, xn, nin, nhid)
+        ht: List[int] = []
+        h: int = 0
+        while h < nhid:
+            ht.append(ad.tanh_(T, hn[h]))
+            h = h + 1
+        on: List[int] = nn.linear_nodes(T, ids2, ht, nhid, 1)
+        pred: float = ad.value(T, on[0])
+        cls: int = 0
+        if pred >= 0.5:
+            cls = 1
+        tgt: int = 0
+        if yt[s] >= 0.5:
+            tgt = 1
+        if cls == tgt:
+            correct = correct + 1
+        print("in", xs0[s], xs1[s], "pred", pred, "class", cls, "target", tgt)
+        s = s + 1
+    print("accuracy", correct, "/", 4)
+    return 0

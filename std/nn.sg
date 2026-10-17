@@ -19,6 +19,16 @@ import std.autodiff
 
 # ---- 参数化 ----------------------------------------------------------------
 
+def rand_uniform(n: int, scale: float) -> List[float]:
+    """均匀随机表：random() ∈ [0,1) 线性映射到 [-scale, scale)。
+    消费语言内建 random()（splitmix64，VM/AOT 逐位一致），调用前 seed()
+    即可复现。用途：ML 权重随机初始化——打破对称（常值/交替符号初始化
+    会使多隐元获得相同梯度，隐层学不出差异，XOR 类问题卡在部分正确）。"""
+    out: List[float] = []
+    for i in range(n):
+        out.append((random() * 2.0 - 1.0) * scale)
+    return out
+
 def params(T: List[float], W: List[float], b: List[float], nin: int,
            nout: int) -> List[int]:
     """把 W/b 全部登记为 tape 参数叶子，返回节点 id 表

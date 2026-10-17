@@ -40,7 +40,42 @@ else {
     }
 }
 
-# --- probe 2: bare Tuple (no params) rejected at compile time, both modes ---
+# --- probe 2: nn.rand_uniform XOR training (random init breaks symmetry,
+# --- fixed seed; dual-mode identical, 6 lines) ---
+$stem = 'probe_b9_randinit'
+$sg = "d:\Scourge\verify\probes\$stem.sg"
+Remove-Item "$dir\$stem.*" -Recurse -Force -ErrorAction SilentlyContinue
+$p1 = Start-Process -FilePath $exe -ArgumentList @("run", $sg) -NoNewWindow -Wait -PassThru `
+      -RedirectStandardOutput "$dir\$stem.run.out" -RedirectStandardError "$dir\$stem.run.err"
+if ($p1.ExitCode -ne 0) { Write-Host "$stem VM-FAIL"; Get-Content "$dir\$stem.run.err" -First 5; $fail++ }
+else {
+    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", $sg, "-o", "$dir\$stem.exe") -NoNewWindow -Wait -PassThru `
+          -RedirectStandardOutput "$dir\$stem.build.out" -RedirectStandardError "$dir\$stem.build.err"
+    if ($p2.ExitCode -ne 0) { Write-Host "$stem BUILD-FAIL"; Get-Content "$dir\$stem.build.err" -First 5; $fail++ }
+    else {
+        $p3 = Start-Process -FilePath "$dir\$stem.exe" -NoNewWindow -Wait -PassThru `
+              -RedirectStandardOutput "$dir\$stem.aot.out" -RedirectStandardError "$dir\$stem.aot.err"
+        if ($p3.ExitCode -ne 0) { Write-Host "$stem AOT-FAIL"; Get-Content "$dir\$stem.aot.err" -First 5; $fail++ }
+        else {
+            $r1 = (Get-Content "$dir\$stem.run.out") -join "`n"
+            $r3 = (Get-Content "$dir\$stem.aot.out") -join "`n"
+            $e1 = (Get-FileHash "$dir\$stem.run.err").Hash
+            $e3 = (Get-FileHash "$dir\$stem.aot.err").Hash
+            if ($r1 -eq $r3 -and $e1 -eq $e3 -and $r1.Split("`n").Count -eq 6 -and
+                $r1.Contains("accuracy 4 / 4")) {
+                Write-Host "$stem IDENTICAL (XOR 4/4)"
+            }
+            else {
+                Write-Host "$stem DIFFER"
+                Write-Host "--- run:"; Get-Content "$dir\$stem.run.out"
+                Write-Host "--- aot:"; Get-Content "$dir\$stem.aot.out"
+                $fail++
+            }
+        }
+    }
+}
+
+# --- probe 3: bare Tuple (no params) rejected at compile time, both modes ---
 $rej = "$dir\probe_b9_tuple_reject.sg"
 Set-Content -Path $rej -Value "def main() -> int:`r`n    x: Tuple = (1, 2)`r`n    print(x)`r`n    return 0`r`n" -Encoding ASCII
 foreach ($mode in @("run", "build")) {
