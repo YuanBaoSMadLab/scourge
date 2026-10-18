@@ -23,7 +23,7 @@
 
 ## 这是一门什么语言
 
-Scourge 把"确定性"作为第一原则：同一段 `.sg` 源码，经 `sg run` 在字节码虚拟机上执行，与经 `sg build` 降级为 MLIR → LLVM IR → 原生可执行文件，**运行结果逐字节一致，panic 消息逐字相同**。所有程序在编译期完成类型、形状与契约的全量验证，把运行时事故拦在执行之前。
+Scourge 把"确定性"作为第一原则：同一段 `.sg` 源码，经 `scg run` 在字节码虚拟机上执行，与经 `scg build` 降级为 MLIR → LLVM IR → 原生可执行文件，**运行结果逐字节一致，panic 消息逐字相同**。所有程序在编译期完成类型、形状与契约的全量验证，把运行时事故拦在执行之前。
 
 它同时为机器可消费而设计：静态检查结果可输出结构化 JSON 诊断，内置 MCP（Model Context Protocol）服务器，AI 代理可以像使用人类工具一样使用整套工具链。同一套确定性原则也延伸到裸机世界：仓库里带着 STM32F4 裸机运行时、链接脚本与 Renode 仿真配置——AOT 产物可以不依赖任何操作系统，直接落在 Cortex-M 上。
 
@@ -36,7 +36,7 @@ Scourge 把"确定性"作为第一原则：同一段 `.sg` 源码，经 `sg run`
 | 进程内 MLIR | 无外部 `mlir-opt` / `mlir-translate` 依赖，一条命令产出原生可执行 |
 | 裸机嵌入式 | STM32F4 裸机运行时 + Renode 仿真；AOT 产物无 OS 依赖落地 Cortex-M |
 | 中文诊断 | 面向中文开发者的编译期诊断与运行时 panic 消息 |
-| MCP 原生 | 独立 `sgmcp` 入口，stdio JSON-RPC，AI 代理开箱即用 |
+| MCP 原生 | 独立 `scourge-mcp` 入口，stdio JSON-RPC，AI 代理开箱即用 |
 | 自举包管理器 | `sget` 由 Scourge 自身 AOT 编译产出——构建成功即全链冒烟 |
 
 ## 三件套
@@ -45,15 +45,15 @@ Scourge 把"确定性"作为第一原则：同一段 `.sg` 源码，经 `sg run`
 
 | 可执行 | 定位 | 典型用法 |
 |---|---|---|
-| `sg` | 主编译器 | `sg run x.sg` 直跑 ｜ `sg build x.sg` 产出独立可执行 ｜ `sg check` 静态验证 ｜ `sg repl` 交互会话 |
-| `sgmcp` | MCP 独立入口 | stdio JSON-RPC 服务器，与 `sg mcp` 共用实现、零分叉 |
-| `sget` | 包管理器 | `sget list` 查看本地包；由 `sg build` 自举而来 |
+| `scg` | 主编译器 | `scg run x.sg` 直跑 ｜ `scg build x.sg` 产出独立可执行 ｜ `scg check` 静态验证 ｜ `scg repl` 交互会话 |
+| `scourge-mcp` | MCP 独立入口 | stdio JSON-RPC 服务器，与 `scg mcp` 共用实现、零分叉 |
+| `sget` | 包管理器 | `sget list` 查看本地包；由 `scg build` 自举而来 |
 
-构建产物纪律：`sg build` 产物落 `<源目录>/out/`，中间产物与缓存落 `<源目录>/.sgbuild/`——源码树永不污染。
+构建产物纪律：`scg build` 产物落 `<源目录>/out/`，中间产物与缓存落 `<源目录>/.sgbuild/`——源码树永不污染。
 
 ## 安装包
 
-Windows 提供 Inno Setup 安装包（`Scourge-0.1.0-win-x64-x86-setup.exe` 与 `Scourge-0.1.0-win-arm64-setup.exe`，后者为 x64 二进制经 Windows on ARM 兼容层运行），安装时可勾选**加入系统 PATH**；安装后 `sg run` / `sg check` / `sg repl` / `sgmcp` / `sget` 零配置可用——`std/` 标准库随编译器安装布局解析，无需任何环境变量。Linux 提供 `scourge-0.1.0-linux-x86_64-bin.tar.gz` 二进制包，解压即用（要求 glibc ≥ 2.39，Ubuntu 24.04 / Debian trixie 原生兼容），`std/` 标准库随包解析，无需环境变量；偏好源码构建仍走下方 `bootstrap.sh`。
+Windows 提供 Inno Setup 安装包（`Scourge-0.1.0-win-x64-x86-setup.exe` 与 `Scourge-0.1.0-win-arm64-setup.exe`，后者为 x64 二进制经 Windows on ARM 兼容层运行），安装时可勾选**加入系统 PATH**；安装后 `scg run` / `scg check` / `scg repl` / `scourge-mcp` / `sget` 零配置可用——`std/` 标准库随编译器安装布局解析，无需任何环境变量。Linux 提供 `scourge-0.1.0-linux-x86_64-bin.tar.gz` 二进制包，解压即用（要求 glibc ≥ 2.39，Ubuntu 24.04 / Debian trixie 原生兼容），`std/` 标准库随包解析，无需环境变量；偏好源码构建仍走下方 `bootstrap.sh`。
 
 ## 30 秒上手
 
@@ -64,7 +64,7 @@ Windows 提供 Inno Setup 安装包（`Scourge-0.1.0-win-x64-x86-setup.exe` 与 
 ```bash
 git clone https://github.com/YuanBaoSMadLab/scourge.git scourge && cd scourge
 scripts/bootstrap.sh                     # 探测工具链 → 取 MLIR → 构建 → 冒烟
-build-rel/sg run examples/hello.sg
+build-rel/scg run examples/hello.sg
 ```
 
 **Windows（PowerShell）**
@@ -72,7 +72,7 @@ build-rel/sg run examples/hello.sg
 ```powershell
 git clone https://github.com/YuanBaoSMadLab/scourge.git scourge; cd scourge
 scripts\bootstrap.ps1                    # 探测工具链 → 取 MLIR → 构建 → 冒烟
-build-rel\sg.exe run examples\hello.sg
+build-rel\scg.exe run examples\hello.sg
 ```
 
 引导脚本完成后即可使用三件套；`sget` 的自举成功本身就是 AOT 全链路的端到端冒烟。
@@ -145,7 +145,7 @@ def run_epoch(W1: List[float], b1: List[float], ..., lr: float, t: int) -> Tuple
 - **GPU 仅极大矩阵有收益**：≤512² 因驱动固定开销反而更慢，≥1024² 约 1.15× 微弱领先；
 - **生态从零起步**：没有第三方张量库与包仓库，`std.nn` / `std.autodiff` / `sget` 是全部家底；
 - **语义仍在收紧**：`@` 声明形态与文档存在差异等已知缺口见 [docs/22-已知缺口与避坑.md](docs/22-已知缺口与避坑.md)；
-- **AOT 产物构建依赖外部工具链**：需系统 clang 与 MSVC/SDK（Windows）；`sg run`（VM）才是零依赖开箱即用的路径。
+- **AOT 产物构建依赖外部工具链**：需系统 clang 与 MSVC/SDK（Windows）；`scg run`（VM）才是零依赖开箱即用的路径。
 
 ## 架构
 
@@ -153,9 +153,9 @@ def run_epoch(W1: List[float], b1: List[float], ..., lr: float, t: int) -> Tuple
 flowchart LR
     A[".sg 源码"] --> B["前端<br/>Lexer → Parser → Sema<br/>类型 · 形状 · 契约 · 单态化"]
     B --> C["SG-BC 字节码"]
-    C --> D["栈式 VM<br/>sg run"]
+    C --> D["栈式 VM<br/>scg run"]
     C --> E["进程内 MLIR<br/>Lang 方言 → linalg / scf / affine"]
-    E --> F["LLVM IR → 原生可执行<br/>sg build"]
+    E --> F["LLVM IR → 原生可执行<br/>scg build"]
     D -. 行为逐字节一致 .-> F
     B --> G[".sgi 接口摘要<br/>JSON 诊断 · MCP"]
 ```
@@ -163,7 +163,7 @@ flowchart LR
 - **src/Sema** — 类型检查、形状统一、隐式单态化、契约检查
 - **src/BC** — 字节码编译器 + 栈式虚拟机（含网络 / 系统 / JSON 内建）
 - **src/AOT** — Lang 自定义方言 → linalg/affine/scf → LLVM IR，全程进程内
-- **src/Tool** — `sg` / `sgmcp` / `sget` 三入口驱动
+- **src/Tool** — `scg` / `scourge-mcp` / `sget` 三入口驱动
 
 ## 文档
 
@@ -180,13 +180,13 @@ flowchart LR
 
 ## MCP：为 AI 代理而生
 
-`sgmcp` 以 stdio JSON-RPC 2.0 提供 MCP 服务器，任何 MCP 客户端即可接入：
+`scourge-mcp` 以 stdio JSON-RPC 2.0 提供 MCP 服务器，任何 MCP 客户端即可接入：
 
 ```json
 {
   "mcpServers": {
     "scourge": {
-      "command": "/path/to/build-rel/sgmcp",
+      "command": "/path/to/build-rel/scourge-mcp",
       "args": []
     }
   }

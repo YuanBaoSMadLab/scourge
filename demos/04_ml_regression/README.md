@@ -8,15 +8,15 @@ autodiff + nn(Adam) 拟合 sin(x)，MLP 1-32-1，GUI 窗口实时刷新 epoch/lo
 
 ```powershell
 # 方式一：一键构建 + 运行（推荐）
-sg  # 编译器需先在仓库根构建
+scg  # 编译器需先在仓库根构建
 powershell -File build.ps1
 
 # 方式二：手动（在仓库根执行；import std.* 由仓库根 std/ 解析）
-sg build demos\04_ml_regression\main.sg
+scg build demos\04_ml_regression\main.sg
 demos\04_ml_regression\out\main.exe
 ```
 
-> gui 域仅 AOT/Windows 可跑：VM（`sg run`）运行到 `gui_*` 即固定 panic，
+> gui 域仅 AOT/Windows 可跑：VM（`scg run`）运行到 `gui_*` 即固定 panic，
 > 属双模契约的一部分（与 verify_b6 探针同口径）。
 
 ## 模块结构（多文件 import 协作）
@@ -52,4 +52,4 @@ grid_mae 0.0062   grid_max_abserr 0.0183
 - **数据即模块**：dataset.sg 只回答"第 s 个样本是什么"，训练/评估/网格
   三处共用同一真值定义 `truth()`，杜绝平行实现。
 - **import std.***：从仓库根构建即可解析（std/ 在仓库根），无需设
-  SCOURGE_PACKAGES；`sg run` 同理。
+  SCOURGE_PACKAGES；`scg run` 同理。

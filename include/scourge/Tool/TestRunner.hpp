@@ -2,7 +2,7 @@
 //  Copyright (c) 2026 Scourge Project. All rights reserved.
 //  Scourge 测试框架 — 显式测试 + 契约属性测试（设计文档第六章第 5 条）
 // ----------------------------------------------------------------------------
-//  命令形态：scourge test [--json] [--seed N] [--runs N] <file.sg>
+//  命令形态：scg test [--json] [--seed N] [--runs N] <file.sg>
 //
 //  两类预言（"契约即测试预言"）：
 //   * 显式测试：同级 <stem>.sgt 内顶层 def test_*() -> bool；返回 False

@@ -6,8 +6,8 @@
 
 | 模式 | 命令 | 管线 | 适用 |
 |---|---|---|---|
-| 字节码 VM | `sg run` | 检查 → SG-BC 字节码 → 虚拟机 | 调试、保存即跑、REPL |
-| AOT 原生 | `sg build` | 检查 → MLIR → LLVM IR → clang 链接 | 发布、性能、分发 |
+| 字节码 VM | `scg run` | 检查 → SG-BC 字节码 → 虚拟机 | 调试、保存即跑、REPL |
+| AOT 原生 | `scg build` | 检查 → MLIR → LLVM IR → clang 链接 | 发布、性能、分发 |
 
 **双模一致（在 AOT 覆盖集内）**：同一程序的 stdout、panic 消息（stderr）、退出码逐字节一致。这不是"尽量一致"而是被测试固化的纪律——`examples\` 全部示例（含 hello.sg）都经过双模逐字节比对；本书附录 C 的 12 个 AOT 可构建测试（`t03`/`t06`/`t07`/`t08`/`t13`/`t16`/`t19` 等）输出均与 VM 字节级一致。
 
@@ -28,8 +28,8 @@ build 时，张量 op 分两路：
 ## 14.3 验证双模一致：diff 三件套
 
 ```powershell
-sg run t16_dual_mode.sg > run.txt
-sg build t16_dual_mode.sg -o t16.exe
+scg run t16_dual_mode.sg > run.txt
+scg build t16_dual_mode.sg -o t16.exe
 .\t16.exe > build.txt
 diff run.txt build.txt        # 期望无差异
 ```
@@ -53,7 +53,7 @@ diff run.txt build.txt        # 期望无差异
 
 ## 14.4 AOT 当前不支持的构造（显式报 E1007）
 
-以下构造进入 `build` 时显式报 `E1007`，与"张量静默降级禁止"同一纪律——不会退化为错误代码，这些程序请用 `sg run`。**当前仍拦 4 类**：
+以下构造进入 `build` 时显式报 `E1007`，与"张量静默降级禁止"同一纪律——不会退化为错误代码，这些程序请用 `scg run`。**当前仍拦 4 类**：
 
 | 构造 | 触发示例 | E1007 消息片段 | 当前状态 |
 |---|---|---|---|
@@ -65,7 +65,7 @@ diff run.txt build.txt        # 期望无差异
 | 读取 int 列表下标 | `xs[i]`（xs: List[int]） | AOT 暂不支持：该元素类型的列表下标读取 | **解锁**（双模一致） |
 | `async def` | `async def f: ...`（模块顶层） | AOT 暂不支持：async def | **顶层仍拦**；函数内嵌套形态  可 build（同步语义） |
 
-> 上表以 `sg` 双模实测为准（探针见附录 C）。`Dict`/`Option` 本就无运行时，不在上表之列。
+> 上表以 `scg` 双模实测为准（探针见附录 C）。`Dict`/`Option` 本就无运行时，不在上表之列。
 
 ## 14.5 坑一：张量全局变量
 
@@ -89,8 +89,8 @@ def main():
 官方文档（04-工具链参考 §11）描述的 `build --gpu` 路径已验证可用。本书在 RTX 5060 Ti 16GB 上实测：
 
 ```powershell
-sg build t18_bench_512.sg -o t18_cpu512.exe        # CPU 路径
-sg build --gpu t18_bench_512.sg -o t18_gpu512.exe   # GPU 路径
+scg build t18_bench_512.sg -o t18_cpu512.exe        # CPU 路径
+scg build --gpu t18_bench_512.sg -o t18_gpu512.exe   # GPU 路径
 ```
 
 **实测 crossover（同一公式、同机、数值逐位一致；CPU 列为当前 AOT 实测）：**

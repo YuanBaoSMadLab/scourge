@@ -23,7 +23,7 @@ One source, two execution modes: VM interpretation and AOT native compilation �
 
 ## What is Scourge
 
-Scourge treats determinism as a first principle: the same `.sg` source runs on the bytecode VM via `sg run` and compiles to MLIR → LLVM IR → a native executable via `sg build`, with **byte-for-byte identical results and identical panic messages**. Every program is fully verified at compile time — types, tensor shapes, and contracts — so runtime failures are caught before execution ever starts.
+Scourge treats determinism as a first principle: the same `.sg` source runs on the bytecode VM via `scg run` and compiles to MLIR → LLVM IR → a native executable via `scg build`, with **byte-for-byte identical results and identical panic messages**. Every program is fully verified at compile time — types, tensor shapes, and contracts — so runtime failures are caught before execution ever starts.
 
 It is also designed for machine consumption: the checker emits structured JSON diagnostics, and a built-in MCP (Model Context Protocol) server lets AI agents drive the entire toolchain like any human tool. The same determinism extends to bare metal: the repo ships an STM32F4 bare-metal runtime, linker scripts, and Renode simulation configs — AOT artifacts can land on a Cortex-M with no operating system underneath.
 
@@ -35,7 +35,7 @@ It is also designed for machine consumption: the checker emits structured JSON d
 | First-class tensors | `Tensor[float, (2, 3)]` — shapes live in the type system; tensor ops lower to linalg |
 | In-process MLIR | No external `mlir-opt` / `mlir-translate`; one command produces a native executable |
 | Bare-metal embedded | STM32F4 bare-metal runtime + Renode simulation; AOT artifacts land on Cortex-M with no OS dependency |
-| Native MCP | Standalone `sgmcp` entry over stdio JSON-RPC — agents work out of the box |
+| Native MCP | Standalone `scourge-mcp` entry over stdio JSON-RPC — agents work out of the box |
 | Self-hosted package manager | `sget` is itself AOT-compiled by Scourge — bootstrapping is the end-to-end smoke test |
 
 > Note: compiler diagnostics and runtime panic messages are written in Chinese.
@@ -46,15 +46,15 @@ A build produces three executables (in `build-rel/`):
 
 | Binary | Role | Typical usage |
 |---|---|---|
-| `sg` | Main compiler | `sg run x.sg` (VM) ｜ `sg build x.sg` (native executable) ｜ `sg check` (static verification) ｜ `sg repl` |
-| `sgmcp` | Standalone MCP entry | stdio JSON-RPC server; shares one implementation with `sg mcp` |
-| `sget` | Package manager | `sget list`; bootstrapped by `sg build` itself |
+| `scg` | Main compiler | `scg run x.sg` (VM) ｜ `scg build x.sg` (native executable) ｜ `scg check` (static verification) ｜ `scg repl` |
+| `scourge-mcp` | Standalone MCP entry | stdio JSON-RPC server; shares one implementation with `scg mcp` |
+| `sget` | Package manager | `sget list`; bootstrapped by `scg build` itself |
 
-Build hygiene: `sg build` outputs go to `<source dir>/out/`; intermediates and caches go to `<source dir>/.sgbuild/` — the source tree is never polluted.
+Build hygiene: `scg build` outputs go to `<source dir>/out/`; intermediates and caches go to `<source dir>/.sgbuild/` — the source tree is never polluted.
 
 ## Installers
 
-Windows ships Inno Setup installers (`Scourge-0.1.0-win-x64-x86-setup.exe` and `Scourge-0.1.0-win-arm64-setup.exe`; the latter carries x64 binaries that run under the Windows-on-ARM compatibility layer). You can opt into **adding Scourge to the system PATH** during setup; after install, `sg run` / `sg check` / `sg repl` / `sgmcp` / `sget` work with zero configuration — the `std/` standard library is resolved relative to the compiler's install layout, no environment variables needed. Linux gets `scourge-0.1.0-linux-x86_64-bin.tar.gz`, a binary release: extract and run — no environment variables, `std/` resolved from the package layout (requires glibc ≥ 2.39; native on Ubuntu 24.04 / Debian trixie). Source builds via `bootstrap.sh` below still work.
+Windows ships Inno Setup installers (`Scourge-0.1.0-win-x64-x86-setup.exe` and `Scourge-0.1.0-win-arm64-setup.exe`; the latter carries x64 binaries that run under the Windows-on-ARM compatibility layer). You can opt into **adding Scourge to the system PATH** during setup; after install, `scg run` / `scg check` / `scg repl` / `scourge-mcp` / `sget` work with zero configuration — the `std/` standard library is resolved relative to the compiler's install layout, no environment variables needed. Linux gets `scourge-0.1.0-linux-x86_64-bin.tar.gz`, a binary release: extract and run — no environment variables, `std/` resolved from the package layout (requires glibc ≥ 2.39; native on Ubuntu 24.04 / Debian trixie). Source builds via `bootstrap.sh` below still work.
 
 ## Quick Start
 
@@ -65,7 +65,7 @@ Prerequisites: `cmake ≥ 3.28`, `ninja`, `clang`; the MLIR libraries come from 
 ```bash
 git clone https://github.com/YuanBaoSMadLab/scourge.git scourge && cd scourge
 scripts/bootstrap.sh                     # toolchain check → fetch MLIR → build → smoke test
-build-rel/sg run examples/hello.sg
+build-rel/scg run examples/hello.sg
 ```
 
 **Windows (PowerShell)**
@@ -73,7 +73,7 @@ build-rel/sg run examples/hello.sg
 ```powershell
 git clone https://github.com/YuanBaoSMadLab/scourge.git scourge; cd scourge
 scripts\bootstrap.ps1                    # toolchain check → fetch MLIR → build → smoke test
-build-rel\sg.exe run examples\hello.sg
+build-rel\scg.exe run examples\hello.sg
 ```
 
 Once bootstrap finishes, all three binaries are ready; `sget` bootstrapping successfully is itself an end-to-end smoke test of the whole AOT pipeline.
@@ -146,7 +146,7 @@ All numbers below come from single-machine measurements (Windows 11 x64 · 16 co
 - **GPU only pays off for very large matrices**: at ≤512² driver overhead dominates; at ≥1024² it leads by a marginal ≈1.15×;
 - **The ecosystem starts from zero**: no third-party tensor libraries or package registry — `std.nn` / `std.autodiff` / `sget` is the whole inventory;
 - **Semantics are still tightening**: known gaps (e.g. the `@` declaration form differs from docs) are catalogued in [docs/22-已知缺口与避坑.md](docs/22-已知缺口与避坑.md) (Chinese);
-- **Building AOT binaries needs an external toolchain**: system clang plus MSVC/SDK on Windows; `sg run` (VM) is the zero-dependency out-of-box path.
+- **Building AOT binaries needs an external toolchain**: system clang plus MSVC/SDK on Windows; `scg run` (VM) is the zero-dependency out-of-box path.
 
 ## Architecture
 
@@ -154,9 +154,9 @@ All numbers below come from single-machine measurements (Windows 11 x64 · 16 co
 flowchart LR
     A[".sg source"] --> B["Frontend<br/>Lexer → Parser → Sema<br/>types · shapes · contracts · monomorphization"]
     B --> C["SG-BC bytecode"]
-    C --> D["Stack VM<br/>sg run"]
+    C --> D["Stack VM<br/>scg run"]
     C --> E["In-process MLIR<br/>Lang dialect → linalg / scf / affine"]
-    E --> F["LLVM IR → native binary<br/>sg build"]
+    E --> F["LLVM IR → native binary<br/>scg build"]
     D -. byte-for-byte equivalence .-> F
     B --> G[".sgi interface digest<br/>JSON diagnostics · MCP"]
 ```
@@ -164,7 +164,7 @@ flowchart LR
 - **src/Sema** — type checking, shape unification, implicit monomorphization, contract checking
 - **src/BC** — bytecode compiler + stack VM (network / system / JSON builtins included)
 - **src/AOT** — custom Lang dialect → linalg/affine/scf → LLVM IR, fully in-process
-- **src/Tool** — drivers for the three entries: `sg` / `sgmcp` / `sget`
+- **src/Tool** — drivers for the three entries: `scg` / `scourge-mcp` / `sget`
 
 ## Documentation
 
@@ -172,13 +172,13 @@ The complete 26-chapter language manual lives in [docs/](docs/) (written in Chin
 
 ## MCP: Built for AI Agents
 
-`sgmcp` serves MCP over stdio JSON-RPC 2.0; any MCP client can attach:
+`scourge-mcp` serves MCP over stdio JSON-RPC 2.0; any MCP client can attach:
 
 ```json
 {
   "mcpServers": {
     "scourge": {
-      "command": "/path/to/build-rel/sgmcp",
+      "command": "/path/to/build-rel/scourge-mcp",
       "args": []
     }
   }

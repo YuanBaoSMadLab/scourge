@@ -9,15 +9,15 @@ autodiff + nn(Adam) 学 2D 棋盘非线性边界：4x4 网格 16 点，标签 =
 
 ```powershell
 # 方式一：一键构建 + 运行（推荐）
-sg  # 编译器需先在仓库根构建
+scg  # 编译器需先在仓库根构建
 powershell -File build.ps1
 
 # 方式二：手动（在仓库根执行；import std.* 由仓库根 std/ 解析）
-sg build demos\05_ml_classification\main.sg
+scg build demos\05_ml_classification\main.sg
 demos\05_ml_classification\out\main.exe
 
 # VM 直跑（无 gui/IO 依赖，双模均可）
-sg run demos\05_ml_classification\main.sg
+scg run demos\05_ml_classification\main.sg
 ```
 
 ## 模块结构（多文件 import 协作）

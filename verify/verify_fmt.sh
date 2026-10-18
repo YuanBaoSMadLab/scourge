@@ -42,15 +42,15 @@ dual_ps1() {
 CB="$REPO_ROOT/verify/probes"
 
 # ---- Part 1：可运行探针，双模字节比对 ----
-for sg in "$CB"/probe_fmt_acc_*.sg; do
-    [ -e "$sg" ] || continue
-    dual_ps1 "$(basename "$sg" .sg)" "$sg" 1
+for scg in "$CB"/probe_fmt_acc_*.sg; do
+    [ -e "$scg" ] || continue
+    dual_ps1 "$(basename "$scg" .sg)" "$scg" 1
 done
 
 # ---- Part 2：负例必须被 check 拒绝（退出码非零）----
 check_fail() {
-    local stem="$1" sg="$2" rc
-    "$SCOURGE" check "$sg" >"$WORK/$stem.chk.out" 2>"$WORK/$stem.chk.err"; rc=$?
+    local stem="$1" scg="$2" rc
+    "$SCOURGE" check "$scg" >"$WORK/$stem.chk.out" 2>"$WORK/$stem.chk.err"; rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "$stem EXPECTED-FAIL-BUT-PASSED"; _FAIL=$((_FAIL+1))
     else

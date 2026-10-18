@@ -4,7 +4,7 @@
 # ASCII only: Windows PowerShell 5.1 parses BOM-less ps1 as ANSI.
 # probe_cap writes probe_cap_tmp.txt relative to CWD: both modes are pinned
 # to the same working dir so outputs are comparable; cleaned between runs.
-# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+# --- scg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = $null
 try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
@@ -19,7 +19,7 @@ if (-not $repoRoot) {
     $repoRoot = $p
 }
 $exe = $null
-$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+$cmd = Get-Command scg -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($cmd) {
     # Sanity check: ensure it's Scourge, not ast-grep or some other tool
     $sgOutArr = & $cmd.Source --help 2>&1
@@ -29,8 +29,8 @@ if ($cmd) {
         $exe = $cmd.Source
     }
 }
-if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
-if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\scg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "scg not found: no Scourge scg in PATH and $(Join-Path $repoRoot 'build-rel\scg.exe') does not exist" }
 # -------------------------------------------------------------------------------------
 $dir = "d:\Scourge\build-rel\verify_cap"
 $src = "d:\Scourge\verify\cap"
@@ -39,14 +39,14 @@ $fail = 0
 
 # ---- Part 1: runnable probes, dual-mode byte comparison ----
 foreach ($stem in @('probe_cap', 'probe_cap_pure')) {
-    $sg = "$src\$stem.sg"
+    $scg = "$src\$stem.sg"
     Remove-Item "$dir\$stem.*" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item "$dir\probe_cap_tmp.txt" -Force -ErrorAction SilentlyContinue
-    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", $sg) -NoNewWindow -Wait -PassThru `
+    $p1 = Start-Process -FilePath $exe -ArgumentList @("run", $scg) -NoNewWindow -Wait -PassThru `
           -WorkingDirectory $dir `
           -RedirectStandardOutput "$dir\$stem.run.out" -RedirectStandardError "$dir\$stem.run.err"
     Remove-Item "$dir\probe_cap_tmp.txt" -Force -ErrorAction SilentlyContinue
-    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", $sg, "-o", "$dir\$stem.exe") -NoNewWindow -Wait -PassThru `
+    $p2 = Start-Process -FilePath $exe -ArgumentList @("build", $scg, "-o", "$dir\$stem.exe") -NoNewWindow -Wait -PassThru `
           -WorkingDirectory $dir `
           -RedirectStandardOutput "$dir\$stem.build.out" -RedirectStandardError "$dir\$stem.build.err"
     if ($p2.ExitCode -ne 0) { Write-Host "$stem BUILD-FAIL"; Get-Content "$dir\$stem.build.err"; $fail++; continue }
@@ -70,9 +70,9 @@ foreach ($stem in @('probe_cap', 'probe_cap_pure')) {
 
 # ---- Part 2: negative probe -> E5004 on run AND build paths ----
 $stem = 'neg_cap_io'
-$sg = "$src\$stem.sg"
+$scg = "$src\$stem.sg"
 foreach ($mode in @('run', 'build')) {
-    $p = Start-Process -FilePath $exe -ArgumentList @($mode, $sg) -NoNewWindow -Wait -PassThru `
+    $p = Start-Process -FilePath $exe -ArgumentList @($mode, $scg) -NoNewWindow -Wait -PassThru `
          -WorkingDirectory $dir `
          -RedirectStandardOutput "$dir\$stem.$mode.out" -RedirectStandardError "$dir\$stem.$mode.err"
     $txt = Get-Content "$dir\$stem.$mode.err" -Raw -ErrorAction SilentlyContinue

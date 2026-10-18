@@ -15,12 +15,12 @@ SRC="$REPO_ROOT/verify/cap"
 # ---- Part 1：可运行探针，双模字节比对（CWD 钉死在产物目录 + elapsed_ms 过滤）----
 # lib.sh _vm/_aot 不支持钉 CWD，此处按 PS1 直调（低层特判）。
 for stem in probe_cap probe_cap_pure; do
-    sg="$SRC/$stem.sg"
+    scg="$SRC/$stem.sg"
     clean "$stem"
     rm -f "$WORK/probe_cap_tmp.txt"
-    ( cd "$WORK" && "$SCOURGE" run "$sg" ) >"$WORK/$stem.run.out" 2>"$WORK/$stem.run.err"; rc1=$?
+    ( cd "$WORK" && "$SCOURGE" run "$scg" ) >"$WORK/$stem.run.out" 2>"$WORK/$stem.run.err"; rc1=$?
     rm -f "$WORK/probe_cap_tmp.txt"
-    ( cd "$WORK" && "$SCOURGE" build "$sg" -o "$WORK/$stem$SRCEXT" ) >"$WORK/$stem.build.out" 2>"$WORK/$stem.build.err"; rc2=$?
+    ( cd "$WORK" && "$SCOURGE" build "$scg" -o "$WORK/$stem$SRCEXT" ) >"$WORK/$stem.build.out" 2>"$WORK/$stem.build.err"; rc2=$?
     if [ "$rc2" -ne 0 ]; then
         echo "$stem BUILD-FAIL"; head -20 "$WORK/$stem.build.err"; _FAIL=$((_FAIL+1)); continue
     fi

@@ -25,13 +25,13 @@ case "$(uname -s)" in
     *)                    SRCEXT=.bin ;;
 esac
 
-sg="$REPO_ROOT/verify/probes/probe_http_acc_server.sg"
+scg="$REPO_ROOT/verify/probes/probe_http_acc_server.sg"
 stem="probe_http_acc_server"
 client="$REPO_ROOT/verify/http_test_client.py"
 
 # ---- Part 1：build AOT 服务端（失败即 exit 1，与 PS1 一致）----
 clean "$stem"
-"$SCOURGE" build "$sg" -o "$WORK/$stem$SRCEXT" >"$WORK/$stem.build.out" 2>"$WORK/$stem.build.err"
+"$SCOURGE" build "$scg" -o "$WORK/$stem$SRCEXT" >"$WORK/$stem.build.out" 2>"$WORK/$stem.build.err"
 if [ $? -ne 0 ]; then
     echo "$stem BUILD-FAIL"; cat "$WORK/$stem.build.err"; exit 1
 fi
@@ -43,7 +43,7 @@ for mode in aot vm; do
     if [ "$mode" = "aot" ]; then
         "$WORK/$stem$SRCEXT" >"$log" 2>"$WORK/$stem.$mode.err" & srv=$!
     else
-        "$SCOURGE" run "$sg" >"$log" 2>"$WORK/$stem.$mode.err" & srv=$!
+        "$SCOURGE" run "$scg" >"$log" 2>"$WORK/$stem.$mode.err" & srv=$!
     fi
     # PS1 为 1.2s；Windows 下 python 启动略慢，超时放宽 2 倍
     sleep 2.4

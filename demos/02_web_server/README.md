@@ -23,7 +23,7 @@
 ```powershell
 powershell -File build.ps1          # 构建 + 启动（另开终端 curl 打请求）
 # 手动：
-sg build demos\02_web_server\main.sg
+scg build demos\02_web_server\main.sg
 demos\02_web_server\out\main.exe
 ```
 

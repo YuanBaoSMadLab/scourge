@@ -67,11 +67,11 @@ if ! "$PY" -c "import socket; socket.create_connection(('127.0.0.1', 23456), 1).
 fi
 
 # ---- probe_f_*（排除 probe_f_server）+ probe_g_sleep：双模字节比对 ----
-for sg in "$PB"/probe_f_*.sg; do
-    [ -e "$sg" ] || continue
-    stem="$(basename "$sg" .sg)"
+for scg in "$PB"/probe_f_*.sg; do
+    [ -e "$scg" ] || continue
+    stem="$(basename "$scg" .sg)"
     case "$stem" in probe_f_server) continue ;; esac
-    dual_ps1 "$stem" "$sg" 1
+    dual_ps1 "$stem" "$scg" 1
 done
 dual_ps1 probe_g_sleep "$PB/probe_g_sleep.sg" 1
 
@@ -81,16 +81,16 @@ if [ -n "$srvProc" ]; then
 fi
 
 # ---- probe_f_server：先 build AOT，再 VM/AOT 各起服务端 + python 客户端 ----
-sg="$PB/probe_f_server.sg"
+scg="$PB/probe_f_server.sg"
 stem="probe_f_server"
 client="$PB/net_test_client.py"
 clean "$stem"
-"$SCOURGE" build "$sg" -o "$WORK/$stem$SRCEXT" >"$WORK/$stem.build.out" 2>"$WORK/$stem.build.err"
+"$SCOURGE" build "$scg" -o "$WORK/$stem$SRCEXT" >"$WORK/$stem.build.out" 2>"$WORK/$stem.build.err"
 if [ $? -ne 0 ]; then
     echo "$stem BUILD-FAIL"; _FAIL=$((_FAIL+1))
 else
-    # Run 1: VM（sg run），Run 2: AOT exe 直启（PS1 0.9s，放宽 2 倍）
-    "$SCOURGE" run "$sg" >"$WORK/$stem.run.out" 2>"$WORK/$stem.run.err" & p1=$!
+    # Run 1: VM（scg run），Run 2: AOT exe 直启（PS1 0.9s，放宽 2 倍）
+    "$SCOURGE" run "$scg" >"$WORK/$stem.run.out" 2>"$WORK/$stem.run.err" & p1=$!
     sleep 1.8
     "$PY" "$client" >"$WORK/$stem.client.out" 2>"$WORK/$stem.client.err"
     wait "$p1"

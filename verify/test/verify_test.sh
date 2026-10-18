@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# verify_test.sh - 测试框架验证（sg test，属性测试 + .sgt 运行器）。
+# verify_test.sh - 测试框架验证（scg test，属性测试 + .sgt 运行器）。
 # 移植自 verify_test.ps1：mathlib 探针刻意不完美（证明 oracle 有效）——
 # 显式用例 pass/fail/panic，属性 pass/fail（fact 反例 n=0）/skip，
 # 总退出码 1；ok.sg（全对契约）须退出 0。ok.sg 由本脚本内联写出。
@@ -28,7 +28,7 @@ def ident(x: int) -> int:
     return x
 EOF
 
-# Run-Test 移植：sg test <args...>，stdout/stderr 落盘后读回
+# Run-Test 移植：scg test <args...>，stdout/stderr 落盘后读回
 run_test() {  # $1=tag，其余为 test 子命令参数
     local tag="$1"; shift
     "$SCOURGE" test "$@" >"$WORK/$tag.out" 2>"$WORK/$tag.err"

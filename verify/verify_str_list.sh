@@ -41,9 +41,9 @@ dual_ps1() {
 
 CB="$REPO_ROOT/verify/probes"
 
-for sg in "$CB"/probe_c_acc_*.sg "$CB"/probe_d_acc_*.sg; do
-    [ -e "$sg" ] || continue
-    dual_ps1 "$(basename "$sg" .sg)" "$sg" 1
+for scg in "$CB"/probe_c_acc_*.sg "$CB"/probe_d_acc_*.sg; do
+    [ -e "$scg" ] || continue
+    dual_ps1 "$(basename "$scg" .sg)" "$scg" 1
 done
 
 suite_done

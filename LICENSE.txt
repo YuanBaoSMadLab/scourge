@@ -21,7 +21,7 @@ SOFTWARE.
 
 Third-Party Notices
 
-The AOT pipeline of the "sg" executable statically links LLVM and
+The AOT pipeline of the "scg" executable statically links LLVM and
 MLIR, which are licensed under the Apache License 2.0 with the LLVM
 Exceptions Notice:
 

@@ -35,12 +35,12 @@ dual_ps1() {
     fi
 }
 
-for sg in "$REPO_ROOT/release/examples/train_linreg.sg" \
+for scg in "$REPO_ROOT/release/examples/train_linreg.sg" \
           "$REPO_ROOT/release/examples/attention_softmax.sg" \
           "$REPO_ROOT"/verify/ovf_*.sg \
           "$REPO_ROOT"/verify/dvz_*.sg; do
-    [ -e "$sg" ] || continue
-    dual_ps1 "$(basename "$sg" .sg)" "$sg"
+    [ -e "$scg" ] || continue
+    dual_ps1 "$(basename "$scg" .sg)" "$scg"
 done
 
 suite_done

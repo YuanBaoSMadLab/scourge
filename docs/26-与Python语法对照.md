@@ -82,7 +82,7 @@
 | `import a` / `from a import b` / `import a as c` | 仅 `import a` | ⚠️ 另两种拒绝 |
 | 包/点分路径 | 拒绝 | |
 | `pip` / 包管理器 | 无 | 生态早期 |
-| `python -c` / REPL | `sg repl`（同语义） | 一致体验 |
+| `python -c` / REPL | `scg repl`（同语义） | 一致体验 |
 | 类型注解（可选） | 可选；跨模块被导入的函数须注解参数 | 返回类型可推断 |
 | docstring | docstring + **契约**（requires/ensures） | ⚠️ 功能扩展 |
 | 装饰器（任意） | 七个白名单 | ⚠️ |

@@ -45,7 +45,7 @@ OutputBaseFilename={#OutName}
 DisableProgramGroupPage=yes
 
 [Tasks]
-Name: "addpath"; Description: "将 Scourge 添加到系统 PATH（sg / sget / sgmcp 全局可用）| Add Scourge to the system PATH"; \
+Name: "addpath"; Description: "将 Scourge 添加到系统 PATH（scg / sget / scourge-mcp 全局可用）| Add Scourge to the system PATH"; \
     GroupDescription: "附加任务 | Additional tasks:"
 
 [Files]

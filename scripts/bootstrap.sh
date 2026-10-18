@@ -2,15 +2,15 @@
 # ============================================================================
 #  bootstrap.sh - Scourge 一键构建引导（Linux/macOS）
 #
-#  职责：让用户 clone 后一个脚本拿到可用的 sg——
+#  职责：让用户 clone 后一个脚本拿到可用的 scg——
 #    1) 检查构建工具链（cmake/ninja/clang）
 #    2) 获取平台预编译 MLIR 库包（默认 GitHub Release 附件；可 --url 覆盖，
 #       或 --llvm-root 指向本机已有 LLVM/MLIR 跳过下载）
-#    3) cmake 配置 + 构建 → build-rel/sg
+#    3) cmake 配置 + 构建 → build-rel/scg
 #
 #  说明：AOT build 命令运行时另需系统 clang 与链接器（发行版 clang 即可，
-#  apt/dnf 装 clang；这是 sg 给 .sg 程序做最终链接的外部驱动，与编译
-#  sg 本身无关）。
+#  apt/dnf 装 clang；这是 scg 给 .sg 程序做最终链接的外部驱动，与编译
+#  scg 本身无关）。
 #  用法：
 #    scripts/bootstrap.sh                 # 全自动（下载库包→构建）
 #    scripts/bootstrap.sh --url <文件>    # 用本地/自定库包 zip|tar.zst
@@ -100,7 +100,7 @@ else
 
 # ---- AOT clang 版本门卫 ----------------------------------------------------
 # MLIR 产出的 IR 带库包版本的属性（如 nocreateundeforpoison），旧系统 clang 在
-# sg build 时会报 unterminated attribute group。包内自带 clang 则直接
+# scg build 时会报 unterminated attribute group。包内自带 clang 则直接
 # 导出 SCOURGE_LLVM_BIN；否则按 LLVM_VERSION.txt 比对大版本并警告。
 if [ -x "$MLIR_ROOT/bin/clang" ]; then
     export SCOURGE_LLVM_BIN="$MLIR_ROOT/bin"
@@ -135,21 +135,21 @@ cmake -S "$REPO_ROOT" -B "$REPO_ROOT/build-rel" \
     -G Ninja
 
 echo "[bootstrap] 构建（-j$JOBS）"
-# 三件套：sg（主编译器）+ sgmcp（MCP 独立入口）+ sget（包管理器自举，
-# 其 AOT 全链成功本身就是 sg build 能力的冒烟；目标名 sget_bootstrap 避开
+# 三件套：scg（主编译器）+ scourge-mcp（MCP 独立入口）+ sget（包管理器自举，
+# 其 AOT 全链成功本身就是 scg build 能力的冒烟；目标名 sget_bootstrap 避开
 # Linux 下目标名与产物文件名同名冲突）；scourge_tests 为 CTest 单测。
-cmake --build "$REPO_ROOT/build-rel" -j"$JOBS" --target scourge sgmcp sget_bootstrap scourge_tests
+cmake --build "$REPO_ROOT/build-rel" -j"$JOBS" --target scourge scourge-mcp sget_bootstrap scourge_tests
 
 BIN="$REPO_ROOT/build-rel"
 echo "[bootstrap] 冒烟"
-echo "[bootstrap]   sg:    $($BIN/sg run "$REPO_ROOT/examples/hello.sg" | tail -1)"
+echo "[bootstrap]   scg:    $($BIN/scg run "$REPO_ROOT/examples/hello.sg" | tail -1)"
 echo "[bootstrap]   sget:  $($BIN/sget list 2>/dev/null | head -1)"
 MCP_INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
-if printf '%s\n' "$MCP_INIT" | "$BIN/sgmcp" 2>/dev/null | grep -q 'serverInfo'; then
-    echo "[bootstrap]   sgmcp: initialize OK"
+if printf '%s\n' "$MCP_INIT" | "$BIN/scourge-mcp" 2>/dev/null | grep -q 'serverInfo'; then
+    echo "[bootstrap]   scourge-mcp: initialize OK"
 else
-    echo "[bootstrap] 警告: sgmcp initialize 冒烟无 serverInfo 响应" >&2
+    echo "[bootstrap] 警告: scourge-mcp initialize 冒烟无 serverInfo 响应" >&2
 fi
-echo "[bootstrap] 完成：$BIN/sg（+ sgmcp、sget）—— 立即可用"
-echo "[bootstrap]   $BIN/sg run <file.sg>      # VM 直跑"
-echo "[bootstrap]   $BIN/sg build <file.sg>    # AOT 产出独立可执行"
+echo "[bootstrap] 完成：$BIN/scg（+ scourge-mcp、sget）—— 立即可用"
+echo "[bootstrap]   $BIN/scg run <file.sg>      # VM 直跑"
+echo "[bootstrap]   $BIN/scg build <file.sg>    # AOT 产出独立可执行"

@@ -43,17 +43,17 @@ dual_ps1() {
 CB="$REPO_ROOT/verify/probes"
 
 # ---- Part 1：可运行探针，双模字节比对 ----
-for sg in "$CB"/probe_m_acc_*.sg; do
-    [ -e "$sg" ] || continue
-    stem="$(basename "$sg" .sg)"
+for scg in "$CB"/probe_m_acc_*.sg; do
+    [ -e "$scg" ] || continue
+    stem="$(basename "$scg" .sg)"
     case "$stem" in *_panic_type) continue ;; esac   # 静态拒绝负例，归 Part 2
-    dual_ps1 "$stem" "$sg" 1
+    dual_ps1 "$stem" "$scg" 1
 done
 
 # ---- Part 2：负例必须被 check 拒绝（退出码非零）----
 check_fail() {
-    local stem="$1" sg="$2" rc
-    "$SCOURGE" check "$sg" >"$WORK/$stem.chk.out" 2>"$WORK/$stem.chk.err"; rc=$?
+    local stem="$1" scg="$2" rc
+    "$SCOURGE" check "$scg" >"$WORK/$stem.chk.out" 2>"$WORK/$stem.chk.err"; rc=$?
     if [ "$rc" -eq 0 ]; then
         echo "$stem EXPECTED-FAIL-BUT-PASSED"; _FAIL=$((_FAIL+1))
     else

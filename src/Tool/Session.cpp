@@ -322,8 +322,8 @@ std::filesystem::path resolveModulePath(
     std::filesystem::path c2 = cwd / rel / leaf;
     if (!(c2 == c1) && note(c2)) return c2;
 
-    // 编译器安装布局（先于包缓存）：std/ 与可执行同根——build-rel/sg.exe
-    // 解析仓库根 std/，<install>/bin/sg.exe 解析 <install>/std/（rel 首段
+    // 编译器安装布局（先于包缓存）：std/ 与可执行同根——build-rel/scg.exe
+    // 解析仓库根 std/，<install>/bin/scg.exe 解析 <install>/std/（rel 首段
     // 即 "std"，此处不重复拼接）。安装包用户 import std.* 零配置；
     // 未命中静默落入包缓存候选。
     std::filesystem::path c25 =

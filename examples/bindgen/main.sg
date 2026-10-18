@@ -98,10 +98,10 @@ def parse_def(line: str) -> str:
             ret = ret.slice(0, len(ret) - 1).trim()
     return name + "|" + params + "|" + ret
 
-# 单个函数落盘：绑定侧恒生成；shim 侧仅当有函数体。sg/shim 列表是引用
+# 单个函数落盘：绑定侧恒生成；shim 侧仅当有函数体。scg/shim 列表是引用
 # 传递（append 共享语义）。返回 0=直通 / 1=进 shim / -1=参数错误。
 def flush_fn(name: str, params_csv: str, ret: str, body0: List[str],
-             dll: str, sg: List[str], shim: List[str]) -> int:
+             dll: str, scg: List[str], shim: List[str]) -> int:
     pnames: List[str] = []
     ptypes: List[str] = []
     if params_csv != "":
@@ -117,7 +117,7 @@ def flush_fn(name: str, params_csv: str, ret: str, body0: List[str],
                 pnames.append(p.slice(0, ci).trim())
                 ptypes.append(p.slice(ci + 1, len(p)).trim())
             i = i + 1
-    sg.append("@extern(\"" + dll + "\")")
+    scg.append("@extern(\"" + dll + "\")")
     sig: str = "def " + name + "("
     k: int = 0
     while k < len(pnames):
@@ -126,8 +126,8 @@ def flush_fn(name: str, params_csv: str, ret: str, body0: List[str],
         sig = sig + pnames[k] + ": " + sg_type(ptypes[k])
         k = k + 1
     sig = sig + ") -> " + sg_type(ret) + ":"
-    sg.append(sig)
-    sg.append("    pass")
+    scg.append(sig)
+    scg.append("    pass")
     body: List[str] = []
     for b0 in body0:
         if b0 != "":
@@ -167,7 +167,7 @@ def process(path: str, outdir: str) -> int:
     includes: List[str] = []
     incdirs: List[str] = []
     links: List[str] = []
-    sg: List[str] = []
+    scg: List[str] = []
     shim: List[str] = []
     total: int = 0
     shimmed: int = 0
@@ -191,7 +191,7 @@ def process(path: str, outdir: str) -> int:
                 cur_body.append(line)
                 continue
             r: int = flush_fn(cur_name, cur_params, cur_ret, cur_body, dll,
-                              sg, shim)
+                              scg, shim)
             if r < 0:
                 return 1
             total = total + 1
@@ -238,7 +238,7 @@ def process(path: str, outdir: str) -> int:
             return 1
     if in_def:
         r: int = flush_fn(cur_name, cur_params, cur_ret, cur_body, dll,
-                          sg, shim)
+                          scg, shim)
         if r < 0:
             return 1
         total = total + 1
@@ -254,7 +254,7 @@ def process(path: str, outdir: str) -> int:
     if len(shim) > 0:
         hdr = hdr + "\n# 经代理 DLL 中转：环境不集成，调用全代理"
     sg2: List[str] = [hdr, "capability ffi", ""]
-    for l in sg:
+    for l in scg:
         sg2.append(l)
     write_text(outdir + "/" + pkg + ".sg", "\n".join(sg2) + "\n")
     # ---- 产物 2/3：代理 shim（仅当存在带函数体的 def）----

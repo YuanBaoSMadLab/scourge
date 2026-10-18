@@ -8,15 +8,15 @@
 
 ```powershell
 # 方式一：一键构建 + 运行（推荐；可透传程序参数）
-sg  # 编译器需先在仓库根构建
+scg  # 编译器需先在仓库根构建
 powershell -File build.ps1 --top=3
 
 # 方式二：手动（在仓库根执行，产物落 out/、中间产物落 .sgbuild/）
-sg build demos\01_system_tool\main.sg
+scg build demos\01_system_tool\main.sg
 demos\01_system_tool\out\main.exe --path=. --top=5
 
 # VM 直跑（字节码缓存落 .sgbuild/）
-sg run demos\01_system_tool\main.sg
+scg run demos\01_system_tool\main.sg
 ```
 
 ## 模块结构（多文件 import 协作）
@@ -41,7 +41,7 @@ scan.sg                     42    185    1719    31
 files 4  total_lines 196  total_words 780  total_bytes 7744
 mean 49.0  median 48.5  std 5.87  min 42  max 57
 == by extension ==
-sg       files 4  lines 196  avg 49.0
+scg       files 4  lines 196  avg 49.0
 == histogram ==   0-9 0   10-49 2   50-99 2   100+ 0
 report -> ./metrics-report.md
 ```

@@ -8,15 +8,15 @@
 
 ```powershell
 # 方式一：一键构建 + 运行（推荐；报告落在 demo 目录）
-sg  # 编译器需先在仓库根构建
+scg  # 编译器需先在仓库根构建
 powershell -File build.ps1
 
 # 方式二：手动（在仓库根执行，产物落 out/、中间产物落 .sgbuild/）
-sg build demos\03_data_pipeline\main.sg
+scg build demos\03_data_pipeline\main.sg
 demos\03_data_pipeline\out\main.exe   # 需在 demo 目录下运行（data/ 相对路径）
 
 # VM 直跑（字节码缓存落 .sgbuild/）
-sg run demos\03_data_pipeline\main.sg
+scg run demos\03_data_pipeline\main.sg
 ```
 
 ## 目录结构

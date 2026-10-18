@@ -86,9 +86,9 @@ target_include_directories(scourge_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 add_executable(scourge src/Tool/main.cpp src/Tool/Repl.cpp src/Tool/McpServer.cpp
     src/Tool/Builder.cpp src/Tool/BuilderBare.cpp src/Tool/TestRunner.cpp)
 target_link_libraries(scourge PRIVATE scourge_core)
-# 交付名 sg.exe（目标名保持 scourge，避免全链 target 引用翻改）——
-# `sg run xxx` 短名直达，语言小写双字母主命令。
-set_target_properties(scourge PROPERTIES OUTPUT_NAME sg)
+# 交付名 scg.exe（目标名保持 scourge，避免全链 target 引用翻改）——
+# `scg run xxx` 短名直达，语言小写双字母主命令。
+set_target_properties(scourge PROPERTIES OUTPUT_NAME scg)
 # POSIX 运行时（BuilderRTSys.hpp 的 @extern dlopen 路径）需要 dl；
 # CMAKE_DL_LIBS 在 Windows 上为空，无需平台分支。
 target_link_libraries(scourge PRIVATE ${CMAKE_DL_LIBS})
@@ -98,13 +98,13 @@ if(WIN32)
 endif()
 
 # ---------------------------------------------------------------------------
-# sgmcp.exe：MCP 服务器独立入口（与 sg mcp 子命令共用 McpServer，零分叉）
+# scourge-mcp.exe：MCP 服务器独立入口（与 scg mcp 子命令共用 McpServer，零分叉）
 # ---------------------------------------------------------------------------
-add_executable(sgmcp src/Tool/McpMain.cpp src/Tool/Repl.cpp
+add_executable(scourge-mcp src/Tool/McpMain.cpp src/Tool/Repl.cpp
     src/Tool/McpServer.cpp)
-target_link_libraries(sgmcp PRIVATE scourge_core ${CMAKE_DL_LIBS})
+target_link_libraries(scourge-mcp PRIVATE scourge_core ${CMAKE_DL_LIBS})
 if(WIN32)
-    target_link_libraries(sgmcp PRIVATE ws2_32)
+    target_link_libraries(scourge-mcp PRIVATE ws2_32)
 endif()
 
 # ---- 进程内 MLIR/LLVM（build 命令阶段 2+3 内联，摆脱 mlir-opt/mlir-translate）----
@@ -225,7 +225,7 @@ endif()
 target_link_libraries(scourge PRIVATE scourge_aot)
 
 # ---------------------------------------------------------------------------
-# sget.exe：包管理器自举（源码即产物——用 sg 编译 Scourge 写的 sget）。
+# sget.exe：包管理器自举（源码即产物——用 scg 编译 Scourge 写的 sget）。
 # 命令面 install/uninstall/list/search/bind 见 examples/sget/main.sg 头注释；
 # 依赖 examples/sget/main.sg 变更才重跑（AOT 缓存命中时仅链接，秒级）。
 # SCOURGE_BOOTSTRAP_SGET=OFF 可跳过（无 AOT 工具链的 CI 场景）。
@@ -241,7 +241,7 @@ if(SCOURGE_BOOTSTRAP_SGET)
                 -o "${SCOURGE_SGET_OUT}"
         DEPENDS scourge "${CMAKE_CURRENT_SOURCE_DIR}/examples/sget/main.sg"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/examples/sget"
-        COMMENT "sget: 自举构建包管理器（sg build examples/sget/main.sg）"
+        COMMENT "sget: 自举构建包管理器（scg build examples/sget/main.sg）"
         VERBATIM)
     # 目标名 sget_bootstrap：Linux 下产物名无后缀（sget），若目标也叫 sget，
     # CMake 生成的 phony 规则会与 CUSTOM_COMMAND 输出规则同名冲突（ninja

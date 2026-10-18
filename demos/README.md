@@ -18,11 +18,11 @@
 
 ```powershell
 # AOT 构建 → 产物落 <demo>/out/main.exe（无运行时依赖，随处分发）
-sg build demos\01_system_tool\main.sg
+scg build demos\01_system_tool\main.sg
 demos\01_system_tool\out\main.exe --top=3
 
 # VM 直跑（SG-BC 字节码，缓存落 <demo>/.sgbuild/）
-sg run demos\01_system_tool\main.sg
+scg run demos\01_system_tool\main.sg
 ```
 
 **产物目录纪律**（编译器内建约定）：最终产物 → `out/`，中间产物与缓存
@@ -60,7 +60,7 @@ files 6  total_lines 268  total_words 1076  total_bytes 10517
 mean 44.7  median 48.5  std 14.41  min 15  max 57
 == by extension ==
 md       files 2  lines 72  avg 36.0
-sg       files 4  lines 196  avg 49.0
+scg       files 4  lines 196  avg 49.0
 == histogram ==   0-9 0   10-49 3   50-99 3   100+ 0
 report -> ./metrics-report.md
 ```

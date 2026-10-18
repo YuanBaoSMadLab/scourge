@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $root = 'd:\Scourge\build-rel\verify\bench'
 if (Test-Path $root) { Remove-Item -Recurse -Force $root }
 New-Item -ItemType Directory -Force -Path $root | Out-Null
-# --- sg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
+# --- scg executable probe: PATH first (verify is Scourge), fallback repo build-rel ----
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = $null
 try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
@@ -19,7 +19,7 @@ if (-not $repoRoot) {
     $repoRoot = $p
 }
 $exe = $null
-$cmd = Get-Command sg -ErrorAction SilentlyContinue | Select-Object -First 1
+$cmd = Get-Command scg -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($cmd) {
     # Sanity check: ensure it's Scourge, not ast-grep or some other tool
     $sgOutArr = & $cmd.Source --help 2>&1
@@ -29,8 +29,8 @@ if ($cmd) {
         $exe = $cmd.Source
     }
 }
-if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\sg.exe' }
-if (-not $exe -or -not (Test-Path $exe)) { throw "sg not found: no Scourge sg in PATH and $(Join-Path $repoRoot 'build-rel\sg.exe') does not exist" }
+if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\scg.exe' }
+if (-not $exe -or -not (Test-Path $exe)) { throw "scg not found: no Scourge scg in PATH and $(Join-Path $repoRoot 'build-rel\scg.exe') does not exist" }
 # -------------------------------------------------------------------------------------
 
 foreach ($f in @('bench_fib.sg', 'bench_call.sg', 'bench_loop.sg')) {
@@ -52,7 +52,7 @@ function Run-Cmd([string]$exe, [string[]]$argList, [string]$cwd) {
 }
 
 # Best-of-3 elapsed for VM and AOT (timer noise reduction).
-function Best-Elapsed([string]$tag, [string[]]$exeArgs, [string]$sg) {
+function Best-Elapsed([string]$tag, [string[]]$exeArgs, [string]$scg) {
     $best = $null
     for ($k = 0; $k -lt 3; $k++) {
         $line = Run-Cmd $exe $exeArgs $root

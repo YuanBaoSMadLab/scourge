@@ -37,7 +37,7 @@ mk_probe() {
     rm -f "$tmp"
 }
 
-# run_probe <sg> <tag>：run --no-cache，失败打印诊断并 exit 1（与 PS1 一致）
+# run_probe <scg> <tag>：run --no-cache，失败打印诊断并 exit 1（与 PS1 一致）
 run_probe() {
     local sgf="$1" tag="$2" rc
     "$SCOURGE" run --no-cache "$sgf" >"$WORK/$tag.out" 2>"$WORK/$tag.err"

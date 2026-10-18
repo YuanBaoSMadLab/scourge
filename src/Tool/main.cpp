@@ -3,14 +3,14 @@
 //  Scourge 工具链 — 单二进制驱动（设计文档第九章 9.1：argv0 分发）
 // ----------------------------------------------------------------------------
 //  命令面（P1 双模执行 + P2 外部协作）：
-//    scourge check [--json] [-j N] <file.sg>...  全量验证（解析→类型→形状→契约）
-//    scourge interface [--out <f>] <file>        生成 .sgi 接口文件
-//    scourge run [--no-cache] [--watch] <file>   编译 SG-BC 字节码并执行
+//    scg check [--json] [-j N] <file.sg>...  全量验证（解析→类型→形状→契约）
+//    scg interface [--out <f>] <file>        生成 .sgi 接口文件
+//    scg run [--no-cache] [--watch] <file>   编译 SG-BC 字节码并执行
 //                                                （.sgbc 缓存；--watch 保存即重跑）
-//    scourge repl                                会话式求值（REPL，:help 查看会话命令）
-//    scourge mcp                                 MCP 服务器（stdio JSON-RPC 2.0，
+//    scg repl                                会话式求值（REPL，:help 查看会话命令）
+//    scg mcp                                 MCP 服务器（stdio JSON-RPC 2.0，
 //                                                供外部 AI 代理零胶水接入）
-//    scourge version / help
+//    scg version / help
 //
 //  编译会话（加载 + DAG 分层并行检查）在 Tool/Session，run 执行核心在
 //  Tool/Runner，REPL 在 Tool/Repl，MCP 服务器在 Tool/McpServer，测试框架
@@ -78,7 +78,7 @@ int cmdCheck(const std::vector<std::string>& args) {
         }
     }
     if (files.empty()) {
-        std::cerr << "用法: sg check [--json] [-j N] <file.sg>...\n";
+        std::cerr << "用法: scg check [--json] [-j N] <file.sg>...\n";
         return 2;
     }
 
@@ -114,7 +114,7 @@ int cmdInterface(const std::vector<std::string>& args) {
         }
     }
     if (inFile.empty()) {
-        std::cerr << "用法: sg interface [--out <file>] <file.sg>\n";
+        std::cerr << "用法: scg interface [--out <file>] <file.sg>\n";
         return 2;
     }
 
@@ -269,13 +269,13 @@ int cmdRun(const std::vector<std::string>& args) {
             scriptArgs.push_back(a); // 文件名后的一切原样透传（可含 -- 开头）
     }
     if (inFile.empty() || args.size() > 3 + scriptArgs.size()) {
-        std::cerr << "用法: sg run [--no-cache] [--watch] <file.sg> [args...]\n";
+        std::cerr << "用法: scg run [--no-cache] [--watch] <file.sg> [args...]\n";
         return 2;
     }
 
     fs::path inPath(inFile);
     if (inPath.extension() != ".sg") {
-        // `sg run main` 短名：省略 .sg 后缀（存在 main.sg 才生效）。
+        // `scg run main` 短名：省略 .sg 后缀（存在 main.sg 才生效）。
         fs::path cand = inPath;
         cand += ".sg";
         std::error_code ec;
@@ -377,7 +377,7 @@ int cmdBuild(const std::vector<std::string>& args) {
         }
     }
     if (inFile.empty() || args.size() > 44) {
-        std::cerr << "用法: sg build [--gpu] [--no-cache] [--out-dir <dir>] "
+        std::cerr << "用法: scg build [--gpu] [--no-cache] [--out-dir <dir>] "
                      "[--build-dir <dir>] "
                      "[--target <triple>|--target=<triple>] "
                      "[--sysroot <dir>] [--cpu <c>] [--march <a>] [--static] "
@@ -461,7 +461,7 @@ int cmdBuild(const std::vector<std::string>& args) {
 
     fs::path inPath(inFile);
     if (inPath.extension() != ".sg" && !xo.bare.enabled) {
-        // `sg build main` 短名：省略 .sg 后缀（存在 main.sg 才生效）。
+        // `scg build main` 短名：省略 .sg 后缀（存在 main.sg 才生效）。
         fs::path cand = inPath;
         cand += ".sg";
         std::error_code ec;
@@ -563,7 +563,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> args(argv + (argc > 1 ? 1 : 0), argv + argc);
     if (args.empty()) {
         std::cout << kScourgeVersionLabel
-              << "\n用法: sg <check|interface|run|build|test|repl|mcp|version|help> ...\n";
+              << "\n用法: scg <check|interface|run|build|test|repl|mcp|version|help> ...\n";
         return 2;
     }
     const std::string cmd = args[0];
@@ -597,7 +597,7 @@ int main(int argc, char** argv) {
             << "                                      测试框架：<stem>.sgt 显式测试 +\n"
             << "                                      @pure 契约属性测试（自动预言）\n"
             << "  mcp                                 MCP 服务器模式（stdio JSON-RPC 2.0，供 AI 代理接入；\n"
-            << "                                      亦可用独立入口 sgmcp.exe）\n"
+            << "                                      亦可用独立入口 scourge-mcp.exe）\n"
             << "  version                             版本信息\n"
             << "  help                                本帮助\n";
         return 0;
@@ -609,19 +609,19 @@ int main(int argc, char** argv) {
     if (cmd == "test") return runTests(rest);
     if (cmd == "repl") {
         if (!rest.empty()) {
-            std::cerr << "用法: sg repl\n";
+            std::cerr << "用法: scg repl\n";
             return 2;
         }
         return cmdRepl();
     }
     if (cmd == "mcp") {
         if (!rest.empty()) {
-            std::cerr << "用法: sg mcp（stdio JSON-RPC，无命令行参数）\n";
+            std::cerr << "用法: scg mcp（stdio JSON-RPC，无命令行参数）\n";
             return 2;
         }
         return cmdMcp();
     }
 
-    std::cerr << "未知命令 '" << cmd << "'（sg help 查看用法）\n";
+    std::cerr << "未知命令 '" << cmd << "'（scg help 查看用法）\n";
     return 2;
 }

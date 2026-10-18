@@ -12,13 +12,13 @@ esac
 
 export PROBE_H_VAR=probe-value-123
 
-sg="$REPO_ROOT/verify/probes/probe_h_sys.sg"
+scg="$REPO_ROOT/verify/probes/probe_h_sys.sg"
 stem="probe_h_sys"
 clean "$stem"
 
 # VM run 携带脚本参数；lib.sh _vm 不支持参数，此处按 PS1 直调（低层特判）
-"$SCOURGE" run "$sg" x --flag y >"$WORK/$stem.run.out" 2>"$WORK/$stem.run.err"; rc1=$?
-"$SCOURGE" build "$sg" -o "$WORK/$stem$SRCEXT" >"$WORK/$stem.build.out" 2>"$WORK/$stem.build.err"; rc2=$?
+"$SCOURGE" run "$scg" x --flag y >"$WORK/$stem.run.out" 2>"$WORK/$stem.run.err"; rc1=$?
+"$SCOURGE" build "$scg" -o "$WORK/$stem$SRCEXT" >"$WORK/$stem.build.out" 2>"$WORK/$stem.build.err"; rc2=$?
 if [ "$rc2" -ne 0 ]; then
     echo "$stem BUILD-FAIL"; cat "$WORK/$stem.build.err"; exit 1
 fi
