@@ -1,0 +1,13 @@
+# 脚本模式混合形态：前置 def + 顶层赋值/调用 + 循环 + 后置 def（选择性搬移）
+def twice(n):
+    return n * 2
+
+x = 3
+print(x)
+print(twice(x))
+for i in range(3):
+    print(i)
+
+def greet():
+    return "hi"
+print(greet())

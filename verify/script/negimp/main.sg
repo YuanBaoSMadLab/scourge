@@ -1,0 +1,6 @@
+# 负例入口：import 脚本模块（含顶层可执行语句）→ E1007 双通道拒绝
+import scriptmod
+
+def main() -> int:
+    print(scriptmod.helper())
+    return 0

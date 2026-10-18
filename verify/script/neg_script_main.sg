@@ -1,0 +1,4 @@
+# 负例：脚本模式与 def main 互斥（E2007，双通道静态拒绝）
+print("conflict")
+def main() -> int:
+    return 0

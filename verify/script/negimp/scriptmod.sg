@@ -1,0 +1,5 @@
+# 被导入的脚本模块（含顶层可执行语句——入口将被合成，故拒绝被 import）
+print("top-level side effect")
+
+def helper() -> int:
+    return 42

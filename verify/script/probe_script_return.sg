@@ -1,0 +1,2 @@
+print("bye")
+return 7

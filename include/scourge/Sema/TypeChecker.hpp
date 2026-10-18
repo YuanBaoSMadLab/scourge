@@ -88,6 +88,10 @@ public:
     /// 检查一个模块；返回其导出符号（调用方存入 registry 供下游模块使用）。
     ModuleSymbols check(Module& m);
 
+    /// 脚本模式：本模块含顶层可执行语句，入口 main 已由 Sema 合成
+    /// （互斥模式——此类文件不得再写 def main，也不可被 import）。
+    bool isScript() const { return isScript_; }
+
     /// 取走本轮检查积累的表达式类型注解表（move 语义；检查器实例即弃）。
     ExprTypeMap takeExprTypes() { return std::move(exprTypes_); }
 
@@ -145,6 +149,7 @@ private:
 
     // ---- 主流程 ---------------------------------------------------------------
     void collectTopLevel(Module& m, ModuleSymbols& out);
+    void desugarScript_(Module& m); ///< 脚本模式脱糖：顶层可执行语句→合成 main
     void checkFunction(FuncDef& f, ModuleSymbols& out);
     /// 以给定签名检查函数体（checkFunction 与单态化实例共用的主体；
     /// 上下文保存/恢复保证调用者体检查中途的嵌套实例化可重入）。
@@ -249,6 +254,7 @@ private:
     bool inPureFn_ = false;
     int blockDepth_ = 0;            ///< 嵌套块深度（if/while/for/try 体；defer 顶层限制）
     bool inDefer_ = false;          ///< 当前在 defer 块内（禁 return/break/continue/defer）
+    bool isScript_ = false;         ///< 脚本模式旗标（desugarScript_ 置位，check 每模块重置）
     ExprTypeMap exprTypes_;         ///< 表达式类型注解表（单一事实源，见上）
     std::unordered_set<const Expr*> promoteF64_; ///< 边界 int→float 提升集
     /// Tensor 上下文偏好（单发旗标）：赋值目标为 Tensor 注解/既有 Tensor

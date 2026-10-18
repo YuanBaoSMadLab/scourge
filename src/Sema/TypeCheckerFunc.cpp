@@ -24,10 +24,16 @@ ModuleSymbols TypeChecker::check(Module& m) {
     out.name = m.name;
     declaredCaps_ = 0; // 每模块重置：声明/使用都是模块局部的
     capUses_.clear();
+    isScript_ = false;
     // 隐式单态化（批 9-③）：实例注册目标与克隆体所有权，逐模块重置。
     curOut_ = &out;
     monoDefs_.clear();
     monoDepth_ = 0;
+
+    // 脚本模式脱糖（互斥模式）：顶层可执行语句并入合成入口 main——收集/
+    // 检查/双后端（VM 入口、AOT 包壳）按普通模块消费，单一事实源在 Sema，
+    // VM/AOT 零特判（双模一致的实现根基）。
+    desugarScript_(m);
 
     scope_.push(); // 模块作用域
     collectTopLevel(m, out);
@@ -65,6 +71,101 @@ ModuleSymbols TypeChecker::check(Module& m) {
                         "'——在模块首部添加 capability " + dom);
     }
     return out;
+}
+
+// ============================================================================
+// 脚本模式脱糖（顶层可执行语句 → 合成入口 main，互斥模式）
+// ============================================================================
+
+void TypeChecker::desugarScript_(Module& m) {
+    // REPL 会话模块豁免：__repl__ 是求值包装保留名（Tool/Repl 跨层契约）。
+    // 会话的顶层语句（preamble）走模块全局路径、求值入口独立（entryFunc=
+    // __repl__）；若被脱糖，顶层定义会搬进永不执行的合成 main，破坏会话
+    // 语义。文件模式撞名则安全退化：顶层语句走 collectTopLevel 老处方。
+    for (const auto& s : m.body)
+        if (s->kind == Stmt::Kind::FuncDef &&
+            static_cast<const FuncDef&>(*s).name == "__repl__")
+            return;
+    // 判定：模块体含"可执行"顶层语句（非 def/import/capability，docstring
+    // 除外）即脚本模式。顶层赋值一并并入入口体——脚本顶层变量是入口局部
+    // 变量（Python 手感）；模块全局路径仅服务于被 import 的声明模块，两
+    // 者互斥后互不干扰。
+    size_t firstExec = m.body.size();
+    for (size_t i = 0; i < m.body.size(); ++i) {
+        const Stmt& s = *m.body[i];
+        switch (s.kind) {
+        case Stmt::Kind::FuncDef:
+        case Stmt::Kind::Import:
+        case Stmt::Kind::Capability:
+            break;
+        case Stmt::Kind::ExprStmt: {
+            auto& es = static_cast<const ExprStmt&>(s);
+            if (i == 0 && es.expr && es.expr->kind == Expr::Kind::StrLit)
+                break; // docstring 保留为模块声明（collectTopLevel 同规则）
+            firstExec = i;
+            break;
+        }
+        default:
+            firstExec = i;
+            break;
+        }
+        if (firstExec != m.body.size()) break;
+    }
+    if (firstExec == m.body.size()) return; // 纯声明模块，入口仪式照旧
+    // 互斥（定案）：脚本文件不得再写 def main——单一入口来源，杜绝
+    // "顶层语句与 main 谁先执行"的不可判定语义。
+    for (const auto& s : m.body) {
+        if (s->kind == Stmt::Kind::FuncDef &&
+            static_cast<const FuncDef&>(*s).name == "main") {
+            diag_.error(Errc::E2007_DuplicateDefinition, file_, s->range,
+                        "脚本模式冲突：文件已含顶层可执行语句（入口自动合成），"
+                        "def main 与之互斥；删除顶层语句或删除 def main 二选一");
+            return;
+        }
+    }
+    isScript_ = true;
+    SourceRange entryRange = m.body[firstExec]->range;
+    auto mainDef =
+        std::make_unique<FuncDef>(entryRange, "main", entryRange);
+    auto retInt =
+        std::make_unique<TypeExpr>(TypeExpr::Kind::Named, entryRange);
+    retInt->name = "int"; // 退出码契约：类型不符由函数检查期统一报 E2001
+    mainDef->retType = std::move(retInt);
+    // 选择性搬移（保持原相对顺序）：可执行语句进入口体；裸 return 补 0
+    // （脚本模式专属放行：return 即退出码，可省略——末尾非 return 时由
+    // 收尾补 return 0）。def/import/capability/docstring 留在模块体。
+    for (size_t i = 0; i < m.body.size(); ++i) {
+        Stmt& s = *m.body[i];
+        bool isDecl = s.kind == Stmt::Kind::FuncDef ||
+                      s.kind == Stmt::Kind::Import ||
+                      s.kind == Stmt::Kind::Capability;
+        if (!isDecl && s.kind == Stmt::Kind::ExprStmt) {
+            auto& es = static_cast<const ExprStmt&>(s);
+            if (i == 0 && es.expr && es.expr->kind == Expr::Kind::StrLit)
+                isDecl = true; // docstring
+        }
+        if (isDecl) continue;
+        if (s.kind == Stmt::Kind::Return) {
+            auto& r = static_cast<Return&>(s);
+            if (!r.value)
+                r.value = std::make_unique<IntLit>(r.range, 0);
+        }
+        mainDef->body.push_back(std::move(m.body[i]));
+    }
+    // 末尾非 return → 补 return 0（退出码 0，脚本可完全省略 return）。
+    if (mainDef->body.empty() ||
+        mainDef->body.back()->kind != Stmt::Kind::Return)
+        mainDef->body.push_back(
+            std::make_unique<Return>(entryRange,
+                                     std::make_unique<IntLit>(entryRange, 0)));
+    // 压缩被搬空的语句槽，声明保持原相对顺序，合成 main 追加在尾部
+    // （收集期先声明导入绑定，函数检查循环最后检查 main——名字解析天然
+    // 有序）。
+    size_t w = 0;
+    for (size_t i = 0; i < m.body.size(); ++i)
+        if (m.body[i]) m.body[w++] = std::move(m.body[i]);
+    m.body.resize(w);
+    m.body.push_back(std::move(mainDef));
 }
 
 void TypeChecker::checkFunction(FuncDef& f, ModuleSymbols& out) {

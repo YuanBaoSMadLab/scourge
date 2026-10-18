@@ -557,6 +557,16 @@ void Session::checkModule(const std::string& name) {
     DiagEngine local(src_);
     TypeChecker checker(src_, local, *snapshot);
     auto syms = std::make_shared<ModuleSymbols>(checker.check(*lit->second.mod));
+    // 脚本模块不可被 import（互斥定案）：依赖层发现入口被合成即拒绝，
+    // 堵住"顶层语句悄悄不执行"的静默语义破洞。入口模块自身豁免——
+    // 脚本模式正是为它而生。
+    if (name != entryStem_ && checker.isScript()) {
+        local.error(Errc::E1007_UnsupportedFeature, lit->second.mod->file,
+                    SourceRange(),
+                    "模块 '" + name +
+                        "' 含顶层可执行语句（脚本模式），不可被 import——"
+                        "脚本只能作为运行入口；请将逻辑包进 def main");
+    }
     ExprTypeMap localTypes = checker.takeExprTypes();
     std::unordered_set<const Expr*> localPromotes = checker.takePromoteF64();
 

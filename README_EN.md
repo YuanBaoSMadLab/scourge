@@ -30,6 +30,7 @@ It is also designed for machine consumption: the checker emits structured JSON d
 | Feature | Description |
 |---|---|
 | Dual-mode equivalence | `run` (VM) and `build` (AOT) are byte-for-byte identical, panics included |
+| Script mode, zero ceremony | Tiny programs run as bare top-level statements (entry auto-synthesized); scale up to `def main` when needed — both forms dual-mode equivalent |
 | Full compile-time verification | Types, tensor shapes, contracts (docstrings are the contract carrier), forced error consumption |
 | Deterministic error model | Errors as values (`Result[T, E]`) plus recoverable panics (`try/except`) |
 | First-class tensors | `Tensor[float, (2, 3)]` — shapes live in the type system; tensor ops lower to linalg |

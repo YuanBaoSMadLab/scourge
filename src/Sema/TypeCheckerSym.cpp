@@ -17,13 +17,15 @@ namespace scourge {
 // 模块级：收集顶层符号
 // ============================================================================
 
-// 模块顶层非法语句的处方消息（两处 switch 臂共用，单一事实源）：附 main()
-// 骨架示例——F-3 入口仪式是 AI 起手最高频翻车点（顶层 print 必错），
-// 示例直接可抄，报错即自解释。
+// 模块顶层非法语句的处方消息（两处 switch 臂共用，单一事实源）：给出
+// 两种入口形态——完整 main 骨架与脚本模式（顶层语句自动合成入口，二者
+// 互斥）。此消息现主要服务 REPL 会话路径（preamble 非赋值语句），文件
+// 模式脚本已被 desugarScript_ 前置放行。
 static const char kTopLevelOnlyMsg[] =
     "模块顶层仅允许 def / import / 赋值 / capability"
-    "（保证 .sgi 可静态生成；docstring 除外）；程序入口需"
-    " def main() -> int，示例:\n"
+    "（保证 .sgi 可静态生成；docstring 除外）。入口两种写法二选一："
+    "完整骨架 def main() -> int，或脚本模式（直接写顶层语句，入口自动"
+    "合成、与 def main 互斥、文件不可被 import），示例:\n"
     "  def main() -> int:\n"
     "      print(\"hi\")\n"
     "      return 0";
