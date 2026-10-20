@@ -101,7 +101,9 @@ dual() {
     local stem="$1" src="$2"
     clean "$stem"
     _vm "$stem" "$src"
-    if [ $VM_RC -ne 0 ] && ! grep -q . "$WORK/$stem.run.err" 2>/dev/null; then
+    # RUN-ABORT 判定仅认"非零退出 + stderr 非空"（诊断型失败）；脚本模式
+    # 的顶层 return 退出码（如 7）非零但 stderr 为空，属合法正例，走三比。
+    if [ $VM_RC -ne 0 ] && [ -s "$WORK/$stem.run.err" ]; then
         echo "$stem RUN-ABORT (exit $VM_RC)"; cat "$WORK/$stem.run.err"; _FAIL=$((_FAIL+1)); return
     fi
     _aot "$stem" "$src"
