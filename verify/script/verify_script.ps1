@@ -11,8 +11,9 @@ foreach ($n in @('http_proxy', 'https_proxy', 'no_proxy')) {
         [Environment]::SetEnvironmentVariable($n, $null, 'Process')
     }
 }
-# --- scg executable probe: PATH first (sanity: --help mentions scourge),
-# fallback repo build-rel\scg.exe -------------------------------------------
+# --- scg executable probe: repo build-rel FIRST (version-drift guard: PATH
+# may carry a stale installed compiler that lacks current diagnostics), then
+# PATH as fallback (sanity: --help mentions scourge) --------------------------
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = $null
 try { $repoRoot = git -C $here rev-parse --show-toplevel 2>$null } catch {}
@@ -26,16 +27,20 @@ if (-not $repoRoot) {
     $repoRoot = $p
 }
 $exe = $null
-$cmd = Get-Command scg -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($cmd) {
-    $helpArr = & $cmd.Source --help 2>&1
-    $helpTxt = ($helpArr -join "`n")
-    if ($LASTEXITCODE -eq 0 -and $helpTxt -match 'scourge') {
-        $exe = $cmd.Source
+$repoExe = Join-Path $repoRoot 'build-rel\scg.exe'
+if (Test-Path $repoExe) {
+    $exe = $repoExe
+} else {
+    $cmd = Get-Command scg -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) {
+        $helpArr = & $cmd.Source --help 2>&1
+        $helpTxt = ($helpArr -join "`n")
+        if ($LASTEXITCODE -eq 0 -and $helpTxt -match 'scourge') {
+            $exe = $cmd.Source
+        }
     }
 }
-if (-not $exe) { $exe = Join-Path $repoRoot 'build-rel\scg.exe' }
-if (-not $exe -or -not (Test-Path $exe)) { throw "scg not found: no Scourge scg in PATH and $(Join-Path $repoRoot 'build-rel\scg.exe') does not exist" }
+if (-not $exe -or -not (Test-Path $exe)) { throw "scg not found: $repoExe does not exist and no Scourge scg in PATH" }
 # ---------------------------------------------------------------------------
 $dir = Join-Path $repoRoot 'build-rel\verify\script'
 New-Item -ItemType Directory -Force $dir | Out-Null
