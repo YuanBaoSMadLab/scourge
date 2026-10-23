@@ -28,13 +28,13 @@ Scourge 语言的 VS Code 支持：语法高亮、一键运行、AOT 构建、�
       "request": "launch",
       "name": "Scourge: Run File",
       "program": "${workspaceFolder}/main.sg",
-      "sgPath": "d:/Scourge/build-rel/sg.exe"
+      "sgPath": "d:/Scourge/build-rel/scg.exe"
     }
   ]
 }
 ```
 
-- `program` 必填；`args` 可传附加参数（如 `["--no-cache"]`）；`sgPath` 缺省用 `sg` on PATH。
+- `program` 必填；`args` 可传附加参数（如 `["--no-cache"]`）；`sgPath` 缺省用 `scg` on PATH（编译器交付名，32f3374 起由 sg.exe 改名以避让 miniconda 同名工具）。
 - **panic 跳转**：进程崩溃时，调试控制台的 panic 行（`panic: ... at <函数> (<文件>:<行>)`）带源码定位，点击即跳。
 - **断点边界（诚实声明）**：Scourge 运行时（VM 与 AOT）当前没有 PC 级停机/单步钩子，因此本扩展不提供断点与单步——断点图标会显示为未绑定（灰色）。这是语言运行时的能力边界，不是扩展缺陷；待运行时提供调试钩子后可在 `sgdebug.js` 中平移接入。
 
@@ -42,7 +42,7 @@ Scourge 语言的 VS Code 支持：语法高亮、一键运行、AOT 构建、�
 
 | 设置 | 默认 | 说明 |
 |---|---|---|
-| `scourge.executablePath` | `""` | sg 可执行文件路径；留空按 工作区 `build-rel/sg.exe` → `build/scourge.exe` → PATH 探测 |
+| `scourge.executablePath` | `""` | scg 可执行文件路径；留空按 工作区 `build-rel/scg.exe` → `build/scourge.exe` → PATH 探测 |
 | `scourge.checkOnSave` | `true` | 保存时运行 check |
 | `scourge.checkOnType` | `true` | 编辑防抖 600ms 后台 check |
 | `scourge.checkTimeoutMs` | `10000` | 单次 check 超时（毫秒） |
@@ -57,7 +57,7 @@ code --install-extension scourge-lang-0.1.0.vsix
 ## 诊断数据流
 
 ```
-编辑器事件 ──防抖──▶ sg check --json <file>
+编辑器事件 ──防抖──▶ scg check --json <file>
                         │ stdout: [{code,severity,message,file,line,col,
                         │           end_line,end_col,fixits[],notes[]}]
                         ▼

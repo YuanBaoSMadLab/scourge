@@ -89,7 +89,7 @@ function session() {
         // cwd 无效会让 spawn 报误导性的 ENOENT（指向 exe 而非 cwd）——先验证再传
         let cwd = launchArgs.cwd ? path.resolve(launchArgs.cwd) : path.dirname(program);
         if (!fs.existsSync(cwd)) cwd = process.cwd();
-        const sgPath = launchArgs.sgPath || 'sg'; // DAP 内不做复杂探测：launch config 或 PATH
+        const sgPath = launchArgs.sgPath || 'scg'; // 编译器交付名 scg（32f3374 起改名）；launch config 或 PATH
         const args = ['run', program].concat(launchArgs.args || []);
         sendOutput('console', `scourge: ${sgPath} ${args.join(' ')}\n`);
         try {
