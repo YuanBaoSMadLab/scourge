@@ -1,0 +1,166 @@
+{
+  "name": "scourge-lang",
+  "displayName": "Scourge Language",
+  "description": "Scourge 语言支持：语法高亮、运行、AOT 构建、实时纠错（check --json 诊断 + 快速修复）与运行级调试（DAP）",
+  "version": "0.1.0",
+  "publisher": "YuanBaoSMadLab",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YuanBaoSMadLab/scourge"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Debuggers",
+    "Linters"
+  ],
+  "activationEvents": [
+    "onLanguage:scourge"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "scourge",
+        "aliases": [
+          "Scourge",
+          "scourge",
+          "sg"
+        ],
+        "extensions": [
+          ".sg",
+          ".sgt"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "scourge",
+        "scopeName": "source.scourge",
+        "path": "./syntaxes/scourge.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "scourge",
+        "path": "./snippets/scourge.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "scourge.run",
+        "title": "Scourge: Run File",
+        "category": "Scourge"
+      },
+      {
+        "command": "scourge.build",
+        "title": "Scourge: Build AOT Executable",
+        "category": "Scourge"
+      },
+      {
+        "command": "scourge.check",
+        "title": "Scourge: Check File",
+        "category": "Scourge"
+      },
+      {
+        "command": "scourge.repl",
+        "title": "Scourge: Open REPL",
+        "category": "Scourge"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "scourge.run",
+        "key": "ctrl+alt+r",
+        "when": "editorTextFocus && resourceLangId == scourge"
+      },
+      {
+        "command": "scourge.build",
+        "key": "ctrl+alt+b",
+        "when": "editorTextFocus && resourceLangId == scourge"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "scourge",
+        "label": "Scourge Debug",
+        "program": "./sgdebug.js",
+        "runtime": "node",
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "要运行的 .sg 源文件路径"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "传给 sg run 的附加参数（如 --no-cache）",
+                "default": []
+              },
+              "cwd": {
+                "type": "string",
+                "description": "工作目录（默认为源文件所在目录）"
+              },
+              "sgPath": {
+                "type": "string",
+                "description": "sg 可执行文件路径（默认取 scourge.executablePath 设置或自动探测）"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "预留：当前运行时无停机钩子，此选项仅影响日志",
+                "default": false
+              }
+            }
+          }
+        },
+        "configurationSnippets": [
+          {
+            "label": "Scourge: Run 当前文件",
+            "body": {
+              "type": "scourge",
+              "request": "launch",
+              "name": "Scourge: Run File",
+              "program": "^\"\\${workspaceFolder}/main.sg\""
+            }
+          }
+        ]
+      }
+    ],
+    "configuration": {
+      "title": "Scourge",
+      "properties": {
+        "scourge.executablePath": {
+          "type": "string",
+          "default": "",
+          "description": "sg 可执行文件完整路径；留空则按 工作区 build-rel\\sg.exe → build\\scourge.exe → PATH 顺序自动探测"
+        },
+        "scourge.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "保存 .sg 文件时运行 sg check --json 并显示诊断"
+        },
+        "scourge.checkOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "编辑 .sg 文件时防抖后台检查（600ms）"
+        },
+        "scourge.checkTimeoutMs": {
+          "type": "number",
+          "default": 10000,
+          "description": "单次 check 进程超时（毫秒），超时杀进程并忽略本轮结果"
+        }
+      }
+    }
+  }
+}

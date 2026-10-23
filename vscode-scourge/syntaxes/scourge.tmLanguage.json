@@ -1,0 +1,189 @@
+{
+  "name": "Scourge",
+  "scopeName": "source.scourge",
+  "fileTypes": [
+    "sg",
+    "sgt"
+  ],
+  "patterns": [
+    {
+      "include": "#docstring"
+    },
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#decorator"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#capability"
+    },
+    {
+      "include": "#defname"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#keyword-control"
+    },
+    {
+      "include": "#keyword-decl"
+    },
+    {
+      "include": "#keyword-logical"
+    },
+    {
+      "include": "#reserved"
+    },
+    {
+      "include": "#constants"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#builtins"
+    },
+    {
+      "include": "#methods"
+    },
+    {
+      "include": "#calls"
+    },
+    {
+      "include": "#operators"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.scourge"
+    },
+    "docstring": {
+      "begin": "\"\"\"",
+      "end": "\"\"\"",
+      "name": "string.quoted.double.block.scourge",
+      "patterns": [
+        {
+          "include": "#contract"
+        },
+        {
+          "include": "#escapes"
+        }
+      ]
+    },
+    "contract": {
+      "comment": "docstring 契约前缀（requires/ensures/invariant），语言层面是函数契约的载体",
+      "match": "(?x) ^ (\\s*) \\b(requires|ensures|invariant)\\b (\\s*:)",
+      "captures": {
+        "2": {
+          "name": "keyword.control.contract.scourge"
+        },
+        "3": {
+          "name": "punctuation.separator.contract.scourge"
+        }
+      }
+    },
+    "string": {
+      "begin": "\"",
+      "end": "(\"|$)",
+      "name": "string.quoted.double.scourge",
+      "patterns": [
+        {
+          "include": "#escapes"
+        }
+      ]
+    },
+    "escapes": {
+      "comment": "词法层支持的转义：\\\\ \\\" \\n \\t \\r（\\0 \\x 序列亦被 Lexer 接受）",
+      "match": "(?x) \\\\( x[0-9A-Fa-f]{2} | n | t | r | 0 | \\\\ | \" | ' )",
+      "name": "constant.character.escape.scourge"
+    },
+    "decorator": {
+      "match": "(?x) ^ (\\s*) (@) ([A-Za-z_]\\w*)",
+      "captures": {
+        "2": {
+          "name": "punctuation.definition.annotation.scourge"
+        },
+        "3": {
+          "name": "entity.other.attribute-name.annotation.scourge"
+        }
+      }
+    },
+    "capability": {
+      "comment": "capability 声明（词法层是普通标识符，按上下文特判高亮）",
+      "match": "(?x) ^ (\\s*) (capability) (\\s+) ([A-Za-z_]\\w*)",
+      "captures": {
+        "2": {
+          "name": "keyword.declaration.scourge"
+        },
+        "4": {
+          "name": "entity.other.attribute-name.scourge"
+        }
+      }
+    },
+    "defname": {
+      "match": "(?x) ^ (\\s*) (def) (\\s+) ([A-Za-z_]\\w*)",
+      "captures": {
+        "2": {
+          "name": "keyword.declaration.scourge"
+        },
+        "4": {
+          "name": "entity.name.function.scourge"
+        }
+      }
+    },
+    "number": {
+      "match": "(?x) \\b ( \\d+\\.\\d+ | \\d+ ) (?!\\w)",
+      "name": "constant.numeric.scourge"
+    },
+    "keyword-control": {
+      "match": "(?x) \\b( if | elif | else | while | for | in | break | continue | pass | return | try | except | defer | assert )\\b",
+      "name": "keyword.control.scourge"
+    },
+    "keyword-decl": {
+      "match": "\\b(def|import|from|as)\\b",
+      "name": "keyword.declaration.scourge"
+    },
+    "keyword-logical": {
+      "match": "\\b(and|or|not)\\b",
+      "name": "keyword.operator.logical.scourge"
+    },
+    "reserved": {
+      "match": "\\b(async|await)\\b",
+      "name": "keyword.other.reserved.scourge"
+    },
+    "constants": {
+      "match": "\\b(True|False|None)\\b",
+      "name": "constant.language.scourge"
+    },
+    "types": {
+      "match": "\\b(int|float|bool|str|List|Dict|Set|Tensor|Result|Json)\\b",
+      "name": "storage.type.scourge"
+    },
+    "builtins": {
+      "comment": "全局内建（docs/23 速查单一事实源；Json 成员方法归 #methods）",
+      "match": "(?x) \\b( print | str | len | abs | sqrt | exp | log | sin | cos | tan | asin | acos | atan | sinh | cosh | tanh | atan2 | floor | ceil | trunc | round | sum | max | min | transpose | reshape | range | ok | err | seed | random | sorted | reversed | sha256 | crc32 | json_decode | input | read_text | write_text | append_text | exists | list_dir | net_http_get | net_connect | net_send | net_recv | net_close | net_bind | net_accept | net_set_timeout | net_udp_send | env | has_env | set_env | unset_env | system | spawn_wait | now | sleep | epoch | epoch_ms | localtime | gmtime | signal_caught | signal_reset | data_ptr )\\b",
+      "name": "support.function.builtin.scourge"
+    },
+    "methods": {
+      "comment": "成员方法（str/List/Json/Result），仅句点后匹配避免误吞全局名",
+      "match": "(?x) (?<=\\.) \\b( upper | lower | trim | trim_start | trim_end | split | join | replace | find | index | count | contains | startswith | endswith | append | get | at | keys | dump | is_obj | is_list | is_str | is_int | is_float | is_bool | is_null | as_int | as_float | as_bool | as_str | is_ok | unwrap | unwrap_or )\\b",
+      "name": "support.function.method.scourge"
+    },
+    "calls": {
+      "comment": "普通调用点：标识符后紧跟左括号",
+      "match": "(?x) \\b ([A-Za-z_]\\w*) (?=\\s*\\()",
+      "name": "variable.function.scourge"
+    },
+    "operators": {
+      "comment": "操作符表 = Lexer.cpp kOps3/kOps2/kOps1（最长匹配）",
+      "match": "(?x) ( \\*\\*= | //= | -> | == | != | <= | >= | \\+= | -= | \\*= | /= | %= | @= | \\*\\* | // | \\+ | - | \\* | / | % | @ | = | < | > | ! | & | \\| | \\? | \\. | , | : | ; )",
+      "name": "keyword.operator.scourge"
+    }
+  }
+}
