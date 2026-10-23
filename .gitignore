@@ -95,3 +95,6 @@ verify/stdlib/*_rt.c
 # verify 探针就地运行/对拍产物（各脚本临时输出）
 *.out
 verify/types/_*
+
+# VS Code 扩展打包产物（vsce 重打包即再生，不入库）
+vscode-scourge/*.vsix

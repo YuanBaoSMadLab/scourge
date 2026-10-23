@@ -1,0 +1,106 @@
+{
+  "def 函数": {
+    "prefix": "def",
+    "body": [
+      "def ${1:name}(${2:args}) -> ${3:int}:",
+      "\t${4:pass}"
+    ],
+    "description": "函数定义（参数须显式注解）"
+  },
+  "def 带契约": {
+    "prefix": "defc",
+    "body": [
+      "@pure",
+      "def ${1:name}(${2:x: int}) -> ${3:int}:",
+      "\t\"\"\"${4:说明}。",
+      "\trequires: ${5:True}",
+      "\tensures: ${6:result >= 0}",
+      "\t\"\"\"",
+      "\t${7:pass}"
+    ],
+    "description": "docstring 契约函数（requires/ensures）"
+  },
+  "if/elif/else": {
+    "prefix": "ifelif",
+    "body": [
+      "if ${1:cond}:",
+      "\t${2:pass}",
+      "elif ${3:cond2}:",
+      "\t${4:pass}",
+      "else:",
+      "\t${5:pass}"
+    ],
+    "description": "多分支条件"
+  },
+  "for range": {
+    "prefix": "for",
+    "body": [
+      "for ${1:i} in range(${2:n}):",
+      "\t${3:pass}"
+    ],
+    "description": "计数循环"
+  },
+  "while": {
+    "prefix": "while",
+    "body": [
+      "while ${1:cond}:",
+      "\t${2:pass}"
+    ],
+    "description": "条件循环"
+  },
+  "try/except": {
+    "prefix": "try",
+    "body": [
+      "try:",
+      "\t${1:pass}",
+      "except:",
+      "\t${2:pass}"
+    ],
+    "description": "panic 捕获（恰好一个裸 except）"
+  },
+  "defer": {
+    "prefix": "defer",
+    "body": [
+      "defer:",
+      "\t${1:print(\"cleanup\")}"
+    ],
+    "description": "函数级 LIFO 清理块"
+  },
+  "Result 构造": {
+    "prefix": "ok",
+    "body": [
+      "return ok(${1:value})"
+    ],
+    "description": "Result 成功出口"
+  },
+  "err 构造": {
+    "prefix": "err",
+    "body": [
+      "return err(${2:\"msg\"})"
+    ],
+    "description": "Result 失败出口"
+  },
+  "extern 声明": {
+    "prefix": "extern",
+    "body": [
+      "@extern(${1:\"msvcrt.dll\"})",
+      "def ${2:fname}(${3:fmt: str}, ...) -> ${4:int}:",
+      "\tpass"
+    ],
+    "description": "C ABI 动态库声明（须 capability ffi）"
+  },
+  "import": {
+    "prefix": "import",
+    "body": [
+      "import ${1:module}"
+    ],
+    "description": "模块导入"
+  },
+  "capability": {
+    "prefix": "cap",
+    "body": [
+      "capability ${1|ffi,fs,net,env,proc,time,sig|}"
+    ],
+    "description": "能力声明（模块顶层）"
+  }
+}
