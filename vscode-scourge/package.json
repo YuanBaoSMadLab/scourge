@@ -114,7 +114,7 @@
               },
               "sgPath": {
                 "type": "string",
-                "description": "sg 可执行文件路径（默认取 scourge.executablePath 设置或自动探测）"
+                "description": "scg 可执行文件路径（默认取 scourge.executablePath 设置或自动探测）"
               },
               "stopOnEntry": {
                 "type": "boolean",
@@ -143,7 +143,7 @@
         "scourge.executablePath": {
           "type": "string",
           "default": "",
-          "description": "sg 可执行文件完整路径；留空则按 工作区 build-rel\\sg.exe → build\\scourge.exe → PATH 顺序自动探测"
+          "description": "scg 可执行文件完整路径；留空则按 工作区 build-rel\\scg.exe → build\\scourge.exe → PATH 顺序自动探测"
         },
         "scourge.checkOnSave": {
           "type": "boolean",

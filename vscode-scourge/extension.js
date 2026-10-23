@@ -22,6 +22,8 @@ const checkTimer = new Map();
 
 // ---------------------------------------------------------------------------
 // sg 可执行文件探测：设置 → 工作区 build-rel/build → PATH
+// 命名契约：32f3374 起编译器交付名是 scg.exe（sg 与 miniconda 撞 PATH），
+// 因此 scg 恒优先于 sg（sg 仅作旧构建残留的回退）。
 // 返回 null 时命令与诊断都会提示用户设置 scourge.executablePath
 // ---------------------------------------------------------------------------
 function resolveSgPath() {
@@ -33,23 +35,24 @@ function resolveSgPath() {
     }
     for (const ws of vscode.workspace.workspaceFolders || []) {
         const candidates = [
-            path.join(ws.uri.fsPath, 'build-rel', 'sg.exe'),
             path.join(ws.uri.fsPath, 'build-rel', 'scg.exe'),
-            path.join(ws.uri.fsPath, 'build', 'scourge.exe'),
-            path.join(ws.uri.fsPath, 'build', 'sg.exe')
+            path.join(ws.uri.fsPath, 'build-rel', 'sg.exe'),
+            path.join(ws.uri.fsPath, 'build', 'scg.exe'),
+            path.join(ws.uri.fsPath, 'build', 'scourge.exe')
         ];
         for (const c of candidates) if (fs.existsSync(c)) return c;
     }
     const extRoot = path.dirname(__dirname); // 扩展若装在仓库内，再向上找一层
     const near = [
-        path.join(extRoot, 'build-rel', 'sg.exe'),
-        path.join(path.dirname(extRoot), 'build-rel', 'sg.exe'),
+        path.join(extRoot, 'build-rel', 'scg.exe'),
+        path.join(path.dirname(extRoot), 'build-rel', 'scg.exe'),
+        path.join(path.dirname(extRoot), 'build', 'scg.exe'),
         path.join(path.dirname(extRoot), 'build', 'scourge.exe')
     ];
     for (const c of near) if (fs.existsSync(c)) return c;
     for (const dir of (process.env.PATH || '').split(path.delimiter)) {
         if (!dir) continue;
-        for (const n of ['sg.exe', 'scg.exe', 'scourge.exe']) {
+        for (const n of ['scg.exe', 'scourge.exe', 'sg.exe']) {
             const p = path.join(dir, n);
             if (fs.existsSync(p)) return p;
         }
