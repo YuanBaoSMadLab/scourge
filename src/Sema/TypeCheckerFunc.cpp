@@ -86,8 +86,18 @@ void TypeChecker::desugarScript_(Module& m) {
         if (s->kind == Stmt::Kind::FuncDef &&
             static_cast<const FuncDef&>(*s).name == "__repl__")
             return;
+    // 顶层赋值的模式归属（判定与搬移两处消费的单一谓词）：带注解
+    // （NAME: T = v）是模块全局声明——0.9.7 的既定形态，函数体须能引用
+    // 模块常量（docs 02 词法作用域：SCALE 示例），搬进入口体会让全部
+    // def 变成悬空引用（E2003 假错 + 依赖层误判脚本不可 import）；
+    // 裸赋值（x = v）才是脚本模式语句（入口局部，Python 手感）。
+    // 处方语义：函数体内要引用的顶层名必须带注解。
+    auto isModuleAssign = [](const Stmt& s) {
+        return s.kind == Stmt::Kind::Assign &&
+               static_cast<const Assign&>(s).ann != nullptr;
+    };
     // 判定：模块体含"可执行"顶层语句（非 def/import/capability，docstring
-    // 除外）即脚本模式。顶层赋值一并并入入口体——脚本顶层变量是入口局部
+    // 除外）即脚本模式。裸赋值并入入口体——脚本顶层变量是入口局部
     // 变量（Python 手感）；模块全局路径仅服务于被 import 的声明模块，两
     // 者互斥后互不干扰。
     size_t firstExec = m.body.size();
@@ -106,6 +116,7 @@ void TypeChecker::desugarScript_(Module& m) {
             break;
         }
         default:
+            if (isModuleAssign(s)) break; // 注解常量：模块声明，非脚本语句
             firstExec = i;
             break;
         }
@@ -138,7 +149,8 @@ void TypeChecker::desugarScript_(Module& m) {
         Stmt& s = *m.body[i];
         bool isDecl = s.kind == Stmt::Kind::FuncDef ||
                       s.kind == Stmt::Kind::Import ||
-                      s.kind == Stmt::Kind::Capability;
+                      s.kind == Stmt::Kind::Capability ||
+                      isModuleAssign(s); // 注解常量留模块层（函数可引用）
         if (!isDecl && s.kind == Stmt::Kind::ExprStmt) {
             auto& es = static_cast<const ExprStmt&>(s);
             if (i == 0 && es.expr && es.expr->kind == Expr::Kind::StrLit)
