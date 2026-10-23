@@ -54,6 +54,12 @@ npx --yes @vscode/vsce package --no-dependencies
 code --install-extension scourge-lang-0.1.0.vsix
 ```
 
+## 版本漂移（假诊断头号来源）
+
+扩展用什么编译器，决定诊断对不对。探测顺序：设置值 → **工作区 `build-rel/scg.exe`**（仓库开发版，永远最新）→ 扩展旁路径 → PATH（`scg` → `scourge` → `sg`）。
+
+在 Scourge 仓库内打开 `.sg` 文件自动用开发版；在仓库外打开时用 PATH 上的安装版——**若文件用了安装版还没有的新语法（如脚本模式顶层语句），安装版会报假错误**（例如脚本模式代码被旧版报 E1007）。排查手段：输出通道（"Scourge"）首行 `[compiler] scourge <版本> @ <路径>` 一眼定位所用编译器；修复手段：设置 `scourge.executablePath` 指向最新编译器，或更新安装版。
+
 ## 诊断数据流
 
 ```

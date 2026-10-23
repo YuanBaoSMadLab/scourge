@@ -72,8 +72,31 @@ function reportNoSg() {
 }
 
 // ---------------------------------------------------------------------------
-// 诊断调度：代际防乱序 + 防抖
+// 诊断调度：代际防乱序 + 防抖 + 全局并发闸门
+// check 子进程是 ~96MB 级重进程：Trae/VS Code 恢复会话时可能一次打开
+// 几十个 .sg 标签页，不封顶并发就是 16 个编译器同时起（实测进程风暴）。
 // ---------------------------------------------------------------------------
+const MAX_PARALLEL_CHECKS = 2;
+let inFlightChecks = 0;
+const checkWaiters = [];
+
+function acquireCheckSlot() {
+    if (inFlightChecks < MAX_PARALLEL_CHECKS) {
+        inFlightChecks++;
+        return Promise.resolve();
+    }
+    return new Promise((res) => checkWaiters.push(res));
+}
+
+function releaseCheckSlot() {
+    inFlightChecks--;
+    const next = checkWaiters.shift();
+    if (next) {
+        inFlightChecks++;
+        next();
+    }
+}
+
 function scheduleCheck(doc, delayMs) {
     if (doc.languageId !== 'scourge' || doc.uri.scheme !== 'file') return;
     const key = doc.uri.toString();
@@ -91,17 +114,55 @@ async function checkDocument(doc) {
     const key = doc.uri.toString();
     const gen = (checkGen.get(key) | 0) + 1;
     checkGen.set(key, gen);
+    await acquireCheckSlot();
+    // 排队期间文件可能又变了：过代际直接放弃，让最新请求接管
+    if (checkGen.get(key) !== gen) { releaseCheckSlot(); return; }
     const t0 = Date.now();
     try {
         const cfg = vscode.workspace.getConfiguration('scourge');
         const raw = await sgcheck.runCheck(sg, doc.uri.fsPath, cfg.get('checkTimeoutMs'));
         if (checkGen.get(key) !== gen) return; // 过期结果：编辑器已再次变更
         diagCollection.set(doc.uri, sgcheck.toVsCodeDiagnostics(raw, doc.uri.fsPath));
-        SG_CHANNEL.appendLine(`[check] ${path.basename(doc.uri.fsPath)}: ${raw.length} 条诊断（${Date.now() - t0}ms）`);
+        SG_CHANNEL.appendLine(`[check] ${path.basename(doc.uri.fsPath)}: ${raw.length} 条诊断（${Date.now() - t0}ms, ${path.basename(sg)}）`);
     } catch (e) {
         if (checkGen.get(key) !== gen) return;
         SG_CHANNEL.appendLine(`[check] 失败: ${e.message}`);
+        // 解析失败几乎总是"PATH 上的编译器过旧，不认识新语法/新 JSON 字段"。
+        // 一次性明确提示（用户点掉后本轮会话不再骚扰），而非静默怪异。
+        if (/解析失败|超时/.test(e.message) && !warnedOldCompiler) {
+            warnedOldCompiler = true;
+            const ver = await probeCompilerVersion(sg).catch(() => '?');
+            vscode.window.showWarningMessage(
+                `Scourge: 诊断输出异常（编译器 ${ver}）。若仓库使用了新语法，请把 scourge.executablePath 指向仓库内 build-rel\\scg.exe，或更新安装版编译器。`,
+                '打开设置'
+            ).then((pick) => {
+                if (pick === '打开设置') vscode.commands.executeCommand('workbench.action.openSettings', 'scourge.executablePath');
+            });
+        }
+    } finally {
+        releaseCheckSlot();
     }
+}
+
+let warnedOldCompiler = false;
+let compilerVersionCache = null;
+/** 取编译器版本首行（scourge x.y.z），用于异常时的用户提示 */
+function probeCompilerVersion(sgPath) {
+    if (compilerVersionCache) return Promise.resolve(compilerVersionCache);
+    return new Promise((resolve, reject) => {
+        const cp = require('child_process');
+        const child = cp.spawn(sgPath, ['version'], { windowsHide: true });
+        let out = '';
+        child.stdout.on('data', (d) => { out += d; });
+        child.on('error', reject);
+        child.on('close', () => {
+            const m = /scourge\s+(\S+)/.exec(out);
+            const v = m ? m[1] : out.trim().slice(0, 40) || '?';
+            compilerVersionCache = v;
+            resolve(v);
+        });
+        setTimeout(() => { try { child.kill(); } catch (_) { /* 幂等 */ } reject(new Error('version 超时')); }, 5000);
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -113,14 +174,25 @@ function activate(context) {
         if (!sg) { reportNoSg(); return; }
         const term = vscode.window.createTerminal({ name: title });
         term.show();
-        // 终端 sendText 走用户 shell：对空格路径统一加引号
-        term.sendText(`& "${sg}" ${args.join(' ')}`);
+        // 引号策略按集成终端默认 shell 分支：PowerShell 需 & 调用操作符，
+        // cmd/bash 下裸带引号路径即可执行（& 在那里分别是命令分隔符/后台符）。
+        const quote = (p) => (p.includes(' ') ? `"${p}"` : p);
+        const shell = (vscode.env.shell || '').toLowerCase();
+        const invoked = shell.includes('powershell') || shell.includes('pwsh')
+            ? `& ${quote(sg)}`
+            : quote(sg);
+        term.sendText(`${invoked} ${args.join(' ')}`);
     };
 
     const activeSgDoc = () => {
         const ed = vscode.window.activeTextEditor;
         if (!ed || ed.document.languageId !== 'scourge') {
             vscode.window.showInformationMessage('当前没有激活的 .sg 编辑器');
+            return null;
+        }
+        // untitled（未保存新文件）没有磁盘路径，跑命令只会困惑——提示先保存
+        if (ed.document.uri.scheme !== 'file') {
+            vscode.window.showInformationMessage('请先保存文件（Ctrl+S）再运行：编译器需要磁盘上的源文件');
             return null;
         }
         return ed.document;
@@ -166,6 +238,27 @@ function activate(context) {
         }
     });
 
+    // F5 零仪式：没有 launch.json 时直接跑当前激活的 .sg 文件；有配置时
+    // 注入探测到的编译器绝对路径（DAP 子进程不再需要 sgPath 字段）。
+    // 这是"跨语言者 0 学习成本"的主路径：按 F5 就该跑起来，而不是先学配置模式。
+    const dbgCfgProvider = vscode.debug.registerDebugConfigurationProvider('scourge', {
+        resolveDebugConfiguration(_folder, config) {
+            if (!config.type && !config.request) {
+                const ed = vscode.window.activeTextEditor;
+                if (!ed || ed.document.languageId !== 'scourge') return null; // 交回 VS Code 引导
+                config.type = 'scourge';
+                config.name = 'Scourge: Run File';
+                config.request = 'launch';
+                config.program = ed.document.uri.fsPath;
+            }
+            if (!config.sgPath) {
+                const sg = resolveSgPath();
+                if (sg) config.sgPath = sg;
+            }
+            return config;
+        }
+    });
+
     // 事件：保存即查 / 输入防抖即查 / 关闭清诊断 / 打开首查
     const onSave = vscode.workspace.onDidSaveTextDocument((doc) => {
         if (vscode.workspace.getConfiguration('scourge').get('checkOnSave')) {
@@ -182,17 +275,30 @@ function activate(context) {
         checkGen.delete(doc.uri.toString());
     });
     const onOpen = vscode.workspace.onDidOpenTextDocument((doc) => {
-        if (doc.languageId === 'scourge') scheduleCheck(doc, 300);
+        // 只查当前可见的：会话恢复会把几十个文档逐个"打开"，但它们不可见
+        if (doc.languageId !== 'scourge') return;
+        const visible = vscode.window.visibleTextEditors.some((ed) => ed.document === doc);
+        if (visible) scheduleCheck(doc, 300);
     });
 
     context.subscriptions.push(
-        cmdRun, cmdBuild, cmdCheck, cmdRepl, fixProvider,
+        cmdRun, cmdBuild, cmdCheck, cmdRepl, fixProvider, dbgCfgProvider,
         onSave, onChange, onClose, onOpen, diagCollection, SG_CHANNEL
     );
 
-    // 已打开的 .sg 文档补一次首查（扩展激活晚于文档打开的场景）
-    for (const doc of vscode.workspace.textDocuments) {
-        if (doc.languageId === 'scourge') scheduleCheck(doc, 300);
+    // 激活首查只针对当前可见编辑器：绝不满场遍历 textDocuments——
+    // 会话恢复时那是几十个文档（实测 16 个编译器进程同时起）。
+    for (const ed of vscode.window.visibleTextEditors) {
+        if (ed.document.languageId === 'scourge') scheduleCheck(ed.document, 300);
+    }
+
+    // 可观测性：明示所用编译器版本与路径。版本漂移（如 PATH 上是旧安装版，
+    // 不认识脚本模式等新语法）是假诊断的头号来源——先让它在日志里现形。
+    const sg = resolveSgPath();
+    if (sg) {
+        probeCompilerVersion(sg).then((v) => {
+            SG_CHANNEL.appendLine(`[compiler] scourge ${v} @ ${sg}`);
+        }).catch(() => { /* 探测失败不影响正常使用 */ });
     }
 }
 
